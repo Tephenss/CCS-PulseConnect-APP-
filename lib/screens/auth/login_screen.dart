@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
-import 'dart:ui';
 import '../../services/auth_service.dart';
 import '../student/student_home.dart';
 import '../teacher/teacher_home.dart';
+import 'forgot_password_screen.dart';
+import '../../services/push_notification_service.dart';
 
 class LoginScreen extends StatefulWidget {
   final String role;
@@ -75,6 +76,8 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
         final userData = result['user'] as Map<String, dynamic>;
         final currentRole = userData['role'] as String? ?? 'student';
         
+        await PushNotificationService().updateToken();
+        
         Navigator.pushAndRemoveUntil(
           context,
           MaterialPageRoute(
@@ -108,7 +111,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
               child: Image.asset(
                 'assets/bg.png',
                 fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => const SizedBox(),
+                errorBuilder: (context, error, stackTrace) => const SizedBox(),
               ),
             ),
 
@@ -491,8 +494,9 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                       alignment: Alignment.centerRight,
                                       child: TextButton(
                                         onPressed: () {
-                                          ScaffoldMessenger.of(context).showSnackBar(
-                                            const SnackBar(content: Text('Password reset feature coming soon')),
+                                          Navigator.push(
+                                            context,
+                                            MaterialPageRoute(builder: (_) => const ForgotPasswordScreen()),
                                           );
                                         },
                                         style: TextButton.styleFrom(

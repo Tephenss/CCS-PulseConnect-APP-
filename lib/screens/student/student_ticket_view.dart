@@ -14,7 +14,35 @@ class StudentTicketView extends StatelessWidget {
     final startAt = event['start_at'] as String?;
     final endAt = event['end_at'] as String?;
     final location = event['location'] as String? ?? 'TBA';
-    final ticketId = ticket['id']?.toString() ?? '';
+    final eventType = event['event_type'] as String? ?? '';
+    final graceTime = event['grace_time']?.toString() ?? '';
+    final ticketData = ticket['tickets'];
+    final ticketId = ticketData is List && ticketData.isNotEmpty
+        ? ticketData[0]['id']?.toString() ?? ''
+        : ticketData is Map ? ticketData['id']?.toString() ?? '' : '';
+
+    // Extract attendance data
+    Map<String, dynamic>? attendance;
+    if (ticketData is List && ticketData.isNotEmpty) {
+      final att = ticketData[0]['attendance'];
+      if (att is List && att.isNotEmpty) {
+        attendance = att[0];
+      } else if (att is Map) {
+        attendance = Map<String, dynamic>.from(att);
+      }
+    } else if (ticketData is Map) {
+      final att = ticketData['attendance'];
+      if (att is List && att.isNotEmpty) {
+        attendance = att[0];
+      } else if (att is Map) {
+        attendance = Map<String, dynamic>.from(att);
+      }
+    }
+
+    final scanStatus = attendance?['status'] as String? ?? 'unscanned';
+    final checkInAt = attendance?['check_in_at'] as String?;
+    final checkOutAt = attendance?['check_out_at'] as String?;
+    final ticketIdDisplay = ticketId.length > 8 ? ticketId.substring(0, 8).toUpperCase() : ticketId.toUpperCase();
 
     DateTime? startDate;
     if (startAt != null) {
@@ -212,7 +240,7 @@ class StudentTicketView extends StatelessWidget {
                                   ),
                                   const SizedBox(height: 4),
                                   Text(
-                                    ticketId.length > 8 ? ticketId.substring(0, 8).toUpperCase() : ticketId.toUpperCase(),
+                                    ticketIdDisplay,
                                     style: const TextStyle(
                                       color: Colors.white,
                                       fontFamily: 'monospace',
@@ -228,13 +256,92 @@ class StudentTicketView extends StatelessWidget {
                             ],
                           ),
                         ),
+                        
+                        // ── Attendance History Section ──
+                        const SizedBox(height: 20),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(20),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: Colors.grey.shade200),
+                            boxShadow: [
+                              BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 10, offset: const Offset(0, 4)),
+                            ],
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Attendance Status',
+                                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF1F2937)),
+                              ),
+                              const SizedBox(height: 16),
+
+                              // Status Badge
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                    decoration: BoxDecoration(
+                                      color: _getAttendanceColor(scanStatus).withValues(alpha: 0.12),
+                                      borderRadius: BorderRadius.circular(20),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(_getAttendanceIcon(scanStatus), size: 16, color: _getAttendanceColor(scanStatus)),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          _getAttendanceLabel(scanStatus),
+                                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: _getAttendanceColor(scanStatus)),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 16),
+
+                              // Check-in time
+                              _buildAttendanceRow(
+                                'Check-in',
+                                checkInAt != null
+                                    ? DateFormat('MMM dd, yyyy — hh:mm a').format(DateTime.parse(checkInAt))
+                                    : 'Not yet',
+                                checkInAt != null,
+                              ),
+                              const SizedBox(height: 10),
+                              _buildAttendanceRow(
+                                'Check-out',
+                                checkOutAt != null
+                                    ? DateFormat('MMM dd, yyyy — hh:mm a').format(DateTime.parse(checkOutAt))
+                                    : 'Not yet',
+                                checkOutAt != null,
+                              ),
+
+                              // Event Type & Grace Time
+                              if (eventType.isNotEmpty || graceTime.isNotEmpty) ...[
+                                const SizedBox(height: 16),
+                                const Divider(height: 1),
+                                const SizedBox(height: 12),
+                                if (eventType.isNotEmpty)
+                                  _buildAttendanceRow('Event Type', eventType, true),
+                                if (graceTime.isNotEmpty) ...[
+                                  const SizedBox(height: 8),
+                                  _buildAttendanceRow('Grace Time', '$graceTime min', true),
+                                ],
+                              ],
+                            ],
+                          ),
+                        ),
                       ],
                     ),
                   ),
                 ),
               ),
             ),
-
             // Fixed Download Button at bottom
             Container(
               padding: const EdgeInsets.all(24),
@@ -298,6 +405,54 @@ class StudentTicketView extends StatelessWidget {
             color: Colors.white,
             fontSize: 15,
             fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Color _getAttendanceColor(String status) {
+    switch (status) {
+      case 'scanned': return const Color(0xFF059669);
+      case 'unscanned': return const Color(0xFF6B7280);
+      default: return const Color(0xFF6B7280);
+    }
+  }
+
+  IconData _getAttendanceIcon(String status) {
+    switch (status) {
+      case 'scanned': return Icons.check_circle_rounded;
+      case 'unscanned': return Icons.radio_button_unchecked_rounded;
+      default: return Icons.help_outline_rounded;
+    }
+  }
+
+  String _getAttendanceLabel(String status) {
+    switch (status) {
+      case 'scanned': return 'Checked In';
+      case 'unscanned': return 'Not Yet Scanned';
+      default: return status.toUpperCase();
+    }
+  }
+
+  Widget _buildAttendanceRow(String label, String value, bool active) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            color: Colors.grey.shade600,
+          ),
+        ),
+        Text(
+          value,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            color: active ? const Color(0xFF1F2937) : Colors.grey.shade400,
           ),
         ),
       ],

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "142750308174",
+    "project_id": "pulseconnect-cb963",
+    "storage_bucket": "pulseconnect-cb963.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:142750308174:android:199c98d1e438acd151f01f",
+        "android_client_info": {
+          "package_name": "com.ccspulseconnect.pulse_connect_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAa-WFH_JXgxvs33kz-5Cbb-hzKxk3Zh9E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

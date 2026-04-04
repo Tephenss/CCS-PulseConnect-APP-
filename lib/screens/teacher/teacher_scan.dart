@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
-import '../../services/auth_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'dart:async';
+import '../../services/event_service.dart';
 
 class TeacherScanScreen extends StatefulWidget {
   const TeacherScanScreen({super.key});
@@ -10,10 +13,81 @@ class TeacherScanScreen extends StatefulWidget {
 }
 
 class _TeacherScanScreenState extends State<TeacherScanScreen> {
-  final _authService = AuthService();
   bool _isScanning = false;
   String _scanStatus = 'Click the button to start scanning';
   Color _statusColor = Colors.grey.shade600;
+
+  bool _isOffline = false;
+  List<String> _offlineQueue = [];
+  bool _isSyncing = false;
+
+  late Connectivity _connectivity;
+  late StreamSubscription<List<ConnectivityResult>> _connectivitySubscription;
+  final EventService _eventService = EventService();
+
+  @override
+  void initState() {
+    super.initState();
+    _initOfflineQueue();
+    _initConnectivity();
+  }
+
+  @override
+  void dispose() {
+    _connectivitySubscription.cancel();
+    super.dispose();
+  }
+
+  Future<void> _initOfflineQueue() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _offlineQueue = prefs.getStringList('offline_scans') ?? [];
+    });
+  }
+
+  Future<void> _saveOfflineQueue() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('offline_scans', _offlineQueue);
+  }
+
+  void _initConnectivity() {
+    _connectivity = Connectivity();
+    _connectivitySubscription = _connectivity.onConnectivityChanged.listen((List<ConnectivityResult> results) {
+      final isOffline = results.every((res) => res == ConnectivityResult.none);
+      setState(() => _isOffline = isOffline);
+      if (!isOffline && _offlineQueue.isNotEmpty) {
+        _syncOfflineQueue();
+      }
+    });
+  }
+
+  Future<void> _syncOfflineQueue() async {
+    if (_isSyncing) return;
+    setState(() => _isSyncing = true);
+
+    List<String> remainingQueue = List.from(_offlineQueue);
+    int syncedCount = 0;
+
+    for (String ticketId in _offlineQueue) {
+      final res = await _eventService.checkInParticipant('PULSE-$ticketId');
+      if (res['ok'] == true || res['error'] == 'Ticket has already been scanned.') {
+        remainingQueue.remove(ticketId);
+        syncedCount++;
+      }
+    }
+
+    setState(() {
+      _offlineQueue = remainingQueue;
+      _isSyncing = false;
+    });
+    _saveOfflineQueue();
+
+    if (syncedCount > 0 && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Auto-synced $syncedCount offline scans to database.')),
+      );
+    }
+  }
 
   void _handleDetect(BarcodeCapture capture) async {
     final List<Barcode> barcodes = capture.barcodes;
@@ -27,14 +101,38 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
           _statusColor = const Color(0xFFD4A843);
         });
 
-        // Simulating API call
-        await Future.delayed(const Duration(seconds: 1));
-
-        if (mounted) {
-          setState(() {
-            _scanStatus = 'Check-in Successful!';
-            _statusColor = const Color(0xFF064E3B);
-          });
+        // Offline logic
+        if (_isOffline) {
+          final strippedId = rawValue.replaceFirst('PULSE-', '').trim();
+          if (!_offlineQueue.contains(strippedId)) {
+            setState(() {
+              _offlineQueue.add(strippedId);
+            });
+            await _saveOfflineQueue();
+          }
+          
+          if (mounted) {
+            setState(() {
+              _scanStatus = 'Saved Offline! Will sync later.';
+              _statusColor = Colors.orange.shade700;
+            });
+          }
+        } 
+        // Online Logic
+        else {
+          final res = await _eventService.checkInParticipant(rawValue);
+          
+          if (mounted) {
+            setState(() {
+              if (res['ok'] == true) {
+                 _scanStatus = 'Check-in Successful!';
+                 _statusColor = const Color(0xFF064E3B);
+              } else {
+                 _scanStatus = res['error'] ?? 'Check-in failed.';
+                 _statusColor = Colors.red.shade700;
+              }
+            });
+          }
         }
         break; // Process one barcode only
       }
@@ -56,6 +154,39 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
               ],
             ),
           ),
+          
+          // Internet status indicator
+          if (_isOffline || _offlineQueue.isNotEmpty)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              margin: const EdgeInsets.symmetric(horizontal: 24),
+              decoration: BoxDecoration(
+                color: _isOffline ? Colors.red.shade50 : Colors.orange.shade50,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: _isOffline ? Colors.red.shade200 : Colors.orange.shade200),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                   Icon(
+                     _isOffline ? Icons.wifi_off_rounded : Icons.sync_rounded, 
+                     size: 16, 
+                     color: _isOffline ? Colors.red.shade700 : Colors.orange.shade700
+                   ),
+                   const SizedBox(width: 8),
+                   Text(
+                     _isOffline 
+                       ? 'Offline Mode - ${_offlineQueue.length} scans queued'
+                       : 'Syncing ${_offlineQueue.length} queued scans...',
+                     style: TextStyle(
+                       fontSize: 12, 
+                       fontWeight: FontWeight.w600, 
+                       color: _isOffline ? Colors.red.shade700 : Colors.orange.shade700
+                     ),
+                   ),
+                ],
+              ),
+            ),
           
           Expanded(
             flex: 5,

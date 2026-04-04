@@ -83,9 +83,9 @@ class AuthService {
     required String middleName,
     required String lastName,
     required String suffix,
+    required String idNumber,
     required String email,
     required String password,
-    required String sectionId,
   }) async {
     try {
       // Check if email already exists
@@ -108,9 +108,10 @@ class AuthService {
         'middle_name': middleName.trim().isEmpty ? null : middleName.trim(),
         'last_name': lastName.trim(),
         'suffix': suffix.trim().isEmpty ? null : suffix.trim(),
+        'student_id': idNumber.trim(),
         'email': email.toLowerCase().trim(),
         'password': passwordHash,
-        'section_id': sectionId.isEmpty ? null : sectionId,
+        'section_id': null, // Section is selected purely post-login
         'role': 'student',
       };
 
@@ -128,6 +129,20 @@ class AuthService {
 
   // Logout
   Future<void> logout() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id');
+
+      // Delete FCM token from Supabase so this device stops receiving notifications
+      if (userId != null && userId.isNotEmpty) {
+        await _supabase
+            .from('fcm_tokens')
+            .delete()
+            .eq('user_id', userId);
+      }
+    } catch (e) {
+      // Fail silently - still proceed with logout
+    }
     final prefs = await SharedPreferences.getInstance();
     await prefs.clear();
   }
@@ -154,16 +169,40 @@ class AuthService {
     return hash == storedHash;
   }
 
-  // Get sections list for registration dropdown
+  // Get sections list for section selection
   Future<List<Map<String, dynamic>>> getSections() async {
     try {
       final response = await _supabase
           .from('sections')
           .select('id, name')
+          .eq('status', 'active')
           .order('name');
       return List<Map<String, dynamic>>.from(response);
     } catch (e) {
       return [];
+    }
+  }
+
+  // Update User Section
+  Future<Map<String, dynamic>> updateSection(String sectionId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id');
+      if (userId == null) return {'ok': false, 'error': 'Not logged in'};
+
+      final response = await _supabase
+          .from('users')
+          .update({'section_id': sectionId})
+          .eq('id', userId)
+          .select()
+          .single();
+
+      // Update local storage
+      await prefs.setString('user_data', jsonEncode(response));
+
+      return {'ok': true, 'user': response};
+    } catch (e) {
+      return {'ok': false, 'error': 'Failed to update section: ${e.toString()}'};
     }
   }
 }

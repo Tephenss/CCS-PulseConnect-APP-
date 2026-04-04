@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/event_service.dart';
+import 'student_event_evaluation.dart';
 
 class StudentCertificates extends StatefulWidget {
   const StudentCertificates({super.key});
@@ -24,7 +25,6 @@ class _StudentCertificatesState extends State<StudentCertificates> {
   Future<void> _loadCertificates() async {
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id') ?? '';
-    // Fetch only 'completed' status participants
     final certs = await _eventService.getMyCertificates(userId);
     if (mounted) {
       setState(() {
@@ -37,23 +37,23 @@ class _StudentCertificatesState extends State<StudentCertificates> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF8F9FA),
+      backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        backgroundColor: const Color(0xFF064E3B),
+        backgroundColor: const Color(0xFF7F1D1D),
         title: const Text(
           'Certificates',
-          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 20),
+          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 20, color: Colors.white),
         ),
       ),
       body: _isLoading
           ? const Center(
-              child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+              child: CircularProgressIndicator(color: Color(0xFF7F1D1D)))
           : _certificates.isEmpty
               ? _buildEmptyState()
               : RefreshIndicator(
                   onRefresh: _loadCertificates,
-                  color: const Color(0xFF064E3B),
+                  color: const Color(0xFF7F1D1D),
                   child: GridView.builder(
                     padding: const EdgeInsets.all(20),
                     gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
@@ -104,9 +104,7 @@ class _StudentCertificatesState extends State<StudentCertificates> {
 
     DateTime? startDate;
     if (startAt != null) {
-      try {
-        startDate = DateTime.parse(startAt);
-      } catch (_) {}
+      try { startDate = DateTime.parse(startAt); } catch (_) {}
     }
 
     return GestureDetector(
@@ -127,23 +125,20 @@ class _StudentCertificatesState extends State<StudentCertificates> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Thumbnail Mock (Placeholder for now, since PDF generation is typically server-side)
+            // Thumbnail
             Expanded(
               child: Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF0FDF4),
-                  borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(16),
-                  ),
-                  border: Border(
-                    bottom: BorderSide(color: Colors.grey.shade200),
+                decoration: const BoxDecoration(
+                  color: Color(0xFFF9FAFB),
+                  borderRadius: BorderRadius.vertical(
+                    top: Radius.circular(15),
                   ),
                 ),
                 child: Center(
                   child: Icon(
                     Icons.workspace_premium_rounded,
                     size: 48,
-                    color: const Color(0xFF064E3B).withValues(alpha: 0.4),
+                    color: const Color(0xFFD4A843), // Gold
                   ),
                 ),
               ),
@@ -172,7 +167,7 @@ class _StudentCertificatesState extends State<StudentCertificates> {
                     style: TextStyle(
                       fontSize: 11,
                       color: Colors.grey.shade500,
-                      fontWeight: FontWeight.w500,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ],
@@ -184,9 +179,42 @@ class _StudentCertificatesState extends State<StudentCertificates> {
     );
   }
 
-  void _showCertificatePreview(Map<String, dynamic> cert) {
+  void _showCertificatePreview(Map<String, dynamic> cert) async {
     final event = cert['events'] as Map<String, dynamic>? ?? {};
+    final eventId = cert['event_id']?.toString() ?? '';
     final title = event['title'] as String? ?? 'Event';
+
+    // Show loading
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+    );
+
+    final prefs = await SharedPreferences.getInstance();
+    final studentId = prefs.getString('user_id') ?? '';
+
+    // Check evaluation status
+    final isEvalDone = await _eventService.isEvaluationSubmitted(eventId, studentId);
+    if (!mounted) return;
+    Navigator.pop(context); // Close loading dialog
+
+    if (!isEvalDone) {
+      // Must evaluate first
+      final success = await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => StudentEventEvaluationScreen(eventId: eventId, studentId: studentId),
+        ),
+      );
+
+      // If they skipped or submitted, success will be true
+      if (success != true) {
+        return; // Did not finish evaluation
+      }
+    }
+
+    if (!mounted) return;
 
     showDialog(
       context: context,
@@ -220,7 +248,7 @@ class _StudentCertificatesState extends State<StudentCertificates> {
                       ),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.close_rounded),
+                      icon: Icon(Icons.close_rounded, color: Colors.grey.shade500),
                       onPressed: () => Navigator.pop(context),
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(),
@@ -229,7 +257,7 @@ class _StudentCertificatesState extends State<StudentCertificates> {
                 ),
               ),
               
-              // Certificate Preview Mock (Page 50)
+              // Certificate Preview
               Container(
                 height: 300,
                 width: double.infinity,
@@ -242,7 +270,6 @@ class _StudentCertificatesState extends State<StudentCertificates> {
                 child: Stack(
                   alignment: Alignment.center,
                   children: [
-                    // Mock certificate design
                     Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -256,17 +283,18 @@ class _StudentCertificatesState extends State<StudentCertificates> {
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 20),
-                        const Text(
+                        Text(
                           'PROUDLY PRESENTED TO',
-                          style: TextStyle(fontSize: 10, color: Colors.grey),
+                          style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
                         ),
                         const SizedBox(height: 10),
                         const Text(
-                          'Student Name', // Would come from profile
+                          'Student Name',
                           style: TextStyle(
                             fontFamily: 'serif',
                             fontSize: 24,
                             fontStyle: FontStyle.italic,
+                            color: Color(0xFF1F2937),
                           ),
                         ),
                         const SizedBox(height: 20),
@@ -275,7 +303,7 @@ class _StudentCertificatesState extends State<StudentCertificates> {
                           child: Text(
                             'For successful completion and participation in\n$title',
                             textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 10, height: 1.5),
+                            style: TextStyle(fontSize: 10, height: 1.5, color: Colors.grey.shade600),
                           ),
                         ),
                       ],
@@ -289,20 +317,29 @@ class _StudentCertificatesState extends State<StudentCertificates> {
                 padding: const EdgeInsets.all(20),
                 child: SizedBox(
                   width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text('Download feature coming soon')),
-                      );
-                    },
-                    icon: const Icon(Icons.download_rounded),
-                    label: const Text('DOWNLOAD PDF'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF064E3B),
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(14),
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF450A0A), Color(0xFF7F1D1D)],
+                      ),
+                    ),
+                    child: ElevatedButton.icon(
+                      onPressed: () {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Download feature coming soon')),
+                        );
+                      },
+                      icon: const Icon(Icons.download_rounded),
+                      label: const Text('DOWNLOAD PDF'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.transparent,
+                        shadowColor: Colors.transparent,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
                       ),
                     ),
                   ),

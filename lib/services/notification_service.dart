@@ -42,7 +42,6 @@ class NotificationService {
       final events = await _supabase
           .from('events')
           .select()
-          .not('status', 'eq', 'archived')
           .order('start_at', ascending: true);
 
       for (var event in events) {
@@ -55,27 +54,46 @@ class NotificationService {
         final hoursUntilStart = startAt.difference(now).inHours;
         final minsUtilStart = startAt.difference(now).inMinutes;
         final createdAt = DateTime.parse(event['created_at']).toLocal();
+        final updatedAt = DateTime.parse(event['updated_at'] ?? event['created_at']).toLocal();
+        final description = event['description'] ?? '';
 
         // Check if event is actually expired (start_at has passed)
         // If it has passed, it behaves like an expired/ongoing event
         bool isExpired = startAt.isBefore(now);
 
-        // Teacher: Event Approved Notification
-        if (role == 'teacher' && status == 'approved') {
-          // If approved recently (e.g. within 7 days)
-          if (now.difference(createdAt).inDays <= 7) {
+        // Teacher: Event Approved or Rejected (Draft) Notification
+        if (role == 'teacher') {
+          if (status == 'approved' && now.difference(updatedAt).inDays <= 7) {
             notifications.add(AppNotification(
               id: 'approved_$eventId',
               title: 'Event Approved',
               message: 'Ang "$title" ay approved na at pwede nang i-publish.',
-              timestamp: createdAt.add(const Duration(hours: 1)), // Just an estimate order
+              timestamp: updatedAt,
               type: NotificationType.success,
+              eventId: eventId,
+            ));
+          } else if ((status == 'draft' || status == 'archived') && now.difference(updatedAt).inDays <= 7) {
+            // Extract rejection reason if present
+            String reasonMsg = 'Ang iyong proposal ay nangangailangan ng pagbabago.';
+            final regExp = RegExp(r'\[REJECT_REASON:\s*(.*?)\]');
+            final match = regExp.firstMatch(description);
+            if (match != null) {
+              reasonMsg = 'Reason: ${match.group(1)}';
+            }
+
+            notifications.add(AppNotification(
+              id: 'reject_$eventId',
+              title: 'Proposal Review Required',
+              message: 'Ang "$title" ay idineklara bilang rejected. $reasonMsg',
+              timestamp: updatedAt,
+              type: NotificationType.error,
               eventId: eventId,
             ));
           }
         }
 
         if (status == 'published') {
+
           // Student/Teacher: New Published Event
           if (!isExpired && now.difference(createdAt).inDays <= 7) {
             notifications.add(AppNotification(
@@ -192,7 +210,6 @@ class NotificationService {
 
       return notifications;
     } catch (e) {
-      print('Error fetching notifications: $e');
       return [];
     }
   }

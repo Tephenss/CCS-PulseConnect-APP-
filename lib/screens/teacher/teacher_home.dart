@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
-import '../welcome_screen.dart';
 import 'teacher_events_tab.dart';
 import 'teacher_profile.dart';
 import 'teacher_scan.dart';
@@ -58,56 +57,68 @@ class _TeacherHomeState extends State<TeacherHome> {
       const TeacherProfile(),
     ];
 
-    return Scaffold(
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
-          : screens[_currentIndex],
-      bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.06),
-              blurRadius: 20,
-              offset: const Offset(0, -4),
-            ),
-          ],
-        ),
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                _buildNavItem(Icons.home_rounded, 'Home', 0),
-                _buildNavItem(Icons.event_note_rounded, 'Events', 1),
-                // Custom Scan Button in the middle
-                GestureDetector(
-                  onTap: () => setState(() => _currentIndex = 2),
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 8),
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFD4A843),
-                      shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFFD4A843).withValues(alpha: 0.4),
-                          blurRadius: 10, offset: const Offset(0, 4)
-                        ),
-                      ],
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        if (_currentIndex != 0) {
+          setState(() => _currentIndex = 0);
+        } else {
+          // Prevent accidental exit
+        }
+      },
+      child: Scaffold(
+        body: _isLoading
+            ? const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+            : screens[_currentIndex],
+        bottomNavigationBar: Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.06),
+                blurRadius: 20,
+                offset: const Offset(0, -4),
+              ),
+            ],
+          ),
+          child: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: [
+                  _buildNavItem(Icons.home_rounded, 'Home', 0),
+                  _buildNavItem(Icons.event_note_rounded, 'Events', 1),
+                  // Custom Scan Button in the middle
+                  GestureDetector(
+                    onTap: () => setState(() => _currentIndex = 2),
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(horizontal: 8),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFD4A843),
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFFD4A843).withValues(alpha: 0.4),
+                            blurRadius: 10, offset: const Offset(0, 4)
+                          ),
+                        ],
+                      ),
+                      child: const Icon(Icons.qr_code_scanner_rounded, color: Color(0xFF064E3B), size: 28),
                     ),
-                    child: const Icon(Icons.qr_code_scanner_rounded, color: Color(0xFF064E3B), size: 28),
                   ),
-                ),
-                _buildNavItem(Icons.groups_rounded, 'Sections', 3),
-                _buildNavItem(Icons.person_rounded, 'Profile', 4),
-              ],
+                  _buildNavItem(Icons.groups_rounded, 'Sections', 3),
+                  _buildNavItem(Icons.person_rounded, 'Profile', 4),
+                ],
+              ),
             ),
           ),
         ),
       ),
     );
+
   }
 
   Widget _buildNavItem(IconData icon, String label, int index) {
@@ -198,7 +209,7 @@ class _TeacherHomeState extends State<TeacherHome> {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                '$firstName',
+                                _user?['first_name'] as String? ?? 'Teacher',
                                 style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w800),
                               ),
                             ],
@@ -464,32 +475,6 @@ class _TeacherHomeState extends State<TeacherHome> {
   }
 
   // Used only for the AlertDialog above
-  Widget _buildAlertDialog(BuildContext context, List<Map<String, dynamic>> events) {
-    return AlertDialog(
-      title: const Text('Events on this date', style: TextStyle(fontWeight: FontWeight.w800)),
-      content: SizedBox(
-        width: double.maxFinite,
-        child: ListView.builder(
-          shrinkWrap: true,
-          itemCount: events.length,
-          itemBuilder: (context, index) {
-            final e = events[index];
-            return ListTile(
-              leading: const Icon(Icons.event_rounded, color: Color(0xFF064E3B)),
-              title: Text(e['title'] ?? 'Event', style: const TextStyle(fontWeight: FontWeight.w700)),
-              onTap: () {
-                 Navigator.pop(context);
-                 setState(() => _currentIndex = 1);
-              },
-            );
-          },
-        ),
-      ),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close', style: TextStyle(color: Color(0xFF064E3B))))
-      ],
-    );
-  }
 
   Widget _buildEventCard(Map<String, dynamic> event) {
     final title = event['title'] as String? ?? 'Untitled Event';

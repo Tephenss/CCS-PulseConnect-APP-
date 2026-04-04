@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/auth_service.dart';
+import '../../services/event_service.dart';
 
 class StudentScanScreen extends StatefulWidget {
   const StudentScanScreen({super.key});
@@ -13,11 +14,13 @@ class StudentScanScreen extends StatefulWidget {
 class _StudentScanScreenState extends State<StudentScanScreen> {
   final _supabase = Supabase.instance.client;
   final _authService = AuthService();
+  final _eventService = EventService();
   bool _isLoading = true;
   bool _hasPermission = false;
   bool _isScanning = false;
   String _scanStatus = 'Click the button to start scanning';
   Color _statusColor = Colors.grey.shade600;
+  IconData _statusIcon = Icons.qr_code_scanner_rounded;
 
   @override
   void initState() {
@@ -29,7 +32,6 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
     try {
       final user = await _authService.getCurrentUser();
       if (user != null) {
-        // Query if the student is an assistant for any active event with scanning allowed
          final response = await _supabase
             .from('event_assistants')
             .select('''
@@ -60,23 +62,52 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
     for (final barcode in barcodes) {
       final rawValue = barcode.rawValue;
       if (rawValue != null && _hasPermission && _isScanning) {
-        // Stop scanning to process
         setState(() {
           _isScanning = false;
-          _scanStatus = 'Processing ticket: $rawValue...';
+          _scanStatus = 'Processing ticket...';
           _statusColor = const Color(0xFFD4A843);
+          _statusIcon = Icons.hourglass_top_rounded;
         });
 
-        // In a real app we would call an API here to record attendance
-        await Future.delayed(const Duration(seconds: 1));
+        final res = await _eventService.checkInParticipant(rawValue);
 
         if (mounted) {
           setState(() {
-            _scanStatus = 'Check-in Successful!';
-            _statusColor = const Color(0xFF064E3B);
+            final status = res['status'] ?? '';
+            if (res['ok'] == true) {
+              final message = res['message'] ?? 'Check-in Successful!';
+              _scanStatus = message;
+
+              if (status == 'late') {
+                _statusColor = const Color(0xFFD97706); // Orange for late
+                _statusIcon = Icons.warning_amber_rounded;
+              } else if (status == 'checked_out') {
+                _statusColor = const Color(0xFF1D4ED8); // Blue for check-out
+                _statusIcon = Icons.logout_rounded;
+              } else {
+                _statusColor = const Color(0xFF064E3B); // Green for on-time
+                _statusIcon = Icons.check_circle_rounded;
+              }
+            } else {
+              _scanStatus = res['error'] ?? 'Check-in failed.';
+
+              if (status == 'too_early') {
+                _statusColor = const Color(0xFF1D4ED8);
+                _statusIcon = Icons.access_time_rounded;
+              } else if (status == 'ended') {
+                _statusColor = Colors.grey.shade700;
+                _statusIcon = Icons.event_busy_rounded;
+              } else if (status == 'used') {
+                _statusColor = const Color(0xFFD97706);
+                _statusIcon = Icons.replay_rounded;
+              } else {
+                _statusColor = Colors.red.shade700;
+                _statusIcon = Icons.cancel_rounded;
+              }
+            }
           });
         }
-        break; // Process one barcode only
+        break;
       }
     }
   }
@@ -84,13 +115,16 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
-        title: const Text('Scan QR Code', style: TextStyle(fontWeight: FontWeight.w700)),
+        title: const Text('Scan QR Code', style: TextStyle(fontWeight: FontWeight.w800, color: Colors.white)),
+        backgroundColor: const Color(0xFF064E3B), // changed to green
+        iconTheme: const IconThemeData(color: Colors.white),
         elevation: 0,
         centerTitle: true,
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+          ? const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B))) // changed to green
           : !_hasPermission
               ? _buildNoPermission()
               : _buildScanner(),
@@ -107,15 +141,15 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
             Container(
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
-                color: Colors.red.shade50,
+                color: const Color(0xFFECFDF5), // changed to light green
                 shape: BoxShape.circle,
               ),
-              child: Icon(Icons.qr_code_scanner_rounded, size: 64, color: Colors.red.shade400),
+              child: const Icon(Icons.qr_code_scanner_rounded, size: 64, color: Color(0xFF064E3B)), // changed to green
             ),
             const SizedBox(height: 24),
-            Text(
+            const Text(
               'No Permission',
-              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Colors.red.shade800),
+              style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Color(0xFF1F2937)),
             ),
             const SizedBox(height: 12),
             Text(
@@ -138,13 +172,16 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
             margin: const EdgeInsets.all(24),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: const Color(0xFF064E3B), width: 4),
+              border: Border.all(color: const Color(0xFF064E3B), width: 4), // changed to green
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 20, offset: const Offset(0, 4)),
+              ],
             ),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(20),
               child: _isScanning
                   ? MobileScanner(
-                      // fit: BoxFit.contain,
                       onDetect: _handleDetect,
                     )
                   : Center(
@@ -175,44 +212,70 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
                     borderRadius: BorderRadius.circular(16),
                     border: Border.all(color: Colors.grey.shade200),
                     boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.05),
-                        blurRadius: 10, offset: const Offset(0, 4)
-                      ),
+                      BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 3)),
                     ],
                   ),
-                  child: Text(
-                    _scanStatus,
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _statusColor),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(_statusIcon, size: 20, color: _statusColor),
+                      const SizedBox(width: 10),
+                      Flexible(
+                        child: Text(
+                          _scanStatus,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _statusColor),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 const SizedBox(height: 16),
                 SizedBox(
                   width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: () {
-                      setState(() {
-                        if (_isScanning) {
-                          _isScanning = false;
-                          _scanStatus = 'Scan cancelled.';
-                          _statusColor = Colors.grey.shade600;
-                        } else {
-                          _isScanning = true;
-                          _scanStatus = 'Point camera at the QR code.';
-                          _statusColor = Colors.grey.shade800;
-                        }
-                      });
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _isScanning ? Colors.red.shade600 : const Color(0xFFD4A843),
-                      foregroundColor: _isScanning ? Colors.white : const Color(0xFF064E3B),
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(16),
+                      gradient: LinearGradient(
+                        colors: _isScanning
+                            ? [const Color(0xFFDC2626), const Color(0xFF991B1B)]
+                            : [const Color(0xFF450A0A), const Color(0xFF7F1D1D)],
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                           color: (_isScanning ? const Color(0xFFDC2626) : const Color(0xFF7F1D1D)).withValues(alpha: 0.3),
+                           blurRadius: 10,
+                           offset: const Offset(0, 4),
+                        ),
+                      ],
                     ),
-                    child: Text(
-                      _isScanning ? 'CANCEL SCANNING' : 'START SCANNING',
-                      style: const TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1.2),
+                    child: ElevatedButton(
+                      onPressed: () {
+                        setState(() {
+                          if (_isScanning) {
+                            _isScanning = false;
+                            _scanStatus = 'Scan cancelled.';
+                            _statusColor = Colors.grey.shade600;
+                            _statusIcon = Icons.qr_code_scanner_rounded;
+                          } else {
+                            _isScanning = true;
+                            _scanStatus = 'Point camera at the QR code.';
+                            _statusColor = Colors.grey.shade800;
+                            _statusIcon = Icons.center_focus_strong_rounded;
+                          }
+                        });
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.transparent,
+                        shadowColor: Colors.transparent,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      ),
+                      child: Text(
+                        _isScanning ? 'CANCEL SCANNING' : 'START SCANNING',
+                        style: const TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1.2),
+                      ),
                     ),
                   ),
                 ),

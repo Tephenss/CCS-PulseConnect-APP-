@@ -1,0 +1,8 @@
+﻿Analyzing CCS PulseConnect(APP)...                              
+
+   info - 'value' is deprecated and shouldn't be used. Use initialValue instead. This will set the initial value for the form field. This feature was deprecated after v3.33.0-1.0.pre - lib\screens\auth\register_screen.dart:473:39 - deprecated_member_use
+  error - Expected an identifier - lib\screens\teacher\teacher_home.dart:198:31 - missing_identifier
+  error - Expected to find ']' - lib\screens\teacher\teacher_home.dart:198:31 - expected_token
+  error - A value of type 'Null' can't be assigned to a parameter of type 'String' in a const constructor - test\widget_test.dart:16:70 - const_constructor_param_type_mismatch
+  error - The argument type 'Null' can't be assigned to the parameter type 'String'.  - test\widget_test.dart:16:80 - argument_type_not_assignable
+

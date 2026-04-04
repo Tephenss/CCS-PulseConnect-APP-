@@ -20,20 +20,6 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
   Offset _pointerPosition = const Offset(0, 0);
   bool _pointerActive = false;
 
-  // Animation helper - get value based on controller percentage
-  double _lerpPhase(double t, List<List<double>> keyframes) {
-    // keyframes: [[percent, value], ...]  percent is 0-100
-    for (int i = 0; i < keyframes.length - 1; i++) {
-      double startP = keyframes[i][0] / 100.0;
-      double endP = keyframes[i + 1][0] / 100.0;
-      if (t >= startP && t <= endP) {
-        double localT = (t - startP) / (endP - startP);
-        return keyframes[i][1] + (keyframes[i + 1][1] - keyframes[i][1]) * localT;
-      }
-    }
-    return keyframes.last[1];
-  }
-
   @override
   void initState() {
     super.initState();
@@ -176,7 +162,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
               child: Image.asset(
                 'assets/bg.png',
                 fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => const SizedBox(),
+                errorBuilder: (context, error, stackTrace) => const SizedBox(),
               ),
             ),
             
@@ -553,7 +539,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                           Navigator.push(
                             context,
                             PageRouteBuilder(
-                              pageBuilder: (_, __, ___) => LoginScreen(role: _selectedRole),
+                              pageBuilder: (context, animation, secondaryAnimation) => LoginScreen(role: _selectedRole),
                               transitionDuration: const Duration(milliseconds: 400),
                               reverseTransitionDuration: const Duration(milliseconds: 400),
                               opaque: true,
@@ -601,7 +587,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                               Navigator.push(
                                 context,
                                 PageRouteBuilder(
-                                  pageBuilder: (_, __, ___) => const RegisterScreen(),
+                                  pageBuilder: (context, animation, secondaryAnimation) => const RegisterScreen(),
                                   transitionDuration: const Duration(milliseconds: 400),
                                   reverseTransitionDuration: const Duration(milliseconds: 400),
                                   opaque: true,

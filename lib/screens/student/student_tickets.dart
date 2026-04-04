@@ -38,23 +38,23 @@ class _StudentTicketsState extends State<StudentTickets> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF8F9FA),
+      backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        backgroundColor: const Color(0xFF064E3B),
+        backgroundColor: const Color(0xFF7F1D1D),
         title: const Text(
           'My Tickets',
-          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 20),
+          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 20, color: Colors.white),
         ),
       ),
       body: _isLoading
           ? const Center(
-              child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+              child: CircularProgressIndicator(color: Color(0xFF7F1D1D)))
           : _tickets.isEmpty
               ? _buildEmptyState()
               : RefreshIndicator(
                   onRefresh: _loadTickets,
-                  color: const Color(0xFF064E3B),
+                  color: const Color(0xFF7F1D1D),
                   child: ListView.builder(
                     padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
                     itemCount: _tickets.length,
@@ -102,9 +102,7 @@ class _StudentTicketsState extends State<StudentTickets> {
 
     DateTime? startDate;
     if (startAt != null) {
-      try {
-        startDate = DateTime.parse(startAt);
-      } catch (_) {}
+      try { startDate = DateTime.parse(startAt); } catch (_) {}
     }
 
     return GestureDetector(
@@ -125,19 +123,19 @@ class _StudentTicketsState extends State<StudentTickets> {
           boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: 0.04),
-              blurRadius: 12,
+              blurRadius: 10,
               offset: const Offset(0, 4),
             ),
           ],
         ),
         child: Column(
           children: [
-            // Ticket Header
+            // Ticket Header — Maroon
             Container(
               padding: const EdgeInsets.all(16),
               decoration: const BoxDecoration(
-                color: Color(0xFF064E3B),
-                borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                color: Color(0xFF7F1D1D),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(19)),
               ),
               child: Row(
                 children: [
@@ -157,8 +155,7 @@ class _StudentTicketsState extends State<StudentTickets> {
                     ),
                   ),
                   Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
                       color: _getStatusColor(status).withValues(alpha: 0.2),
                       borderRadius: BorderRadius.circular(8),
@@ -167,7 +164,7 @@ class _StudentTicketsState extends State<StudentTickets> {
                       status.toUpperCase(),
                       style: TextStyle(
                         color: _getStatusColor(status),
-                        fontWeight: FontWeight.w700,
+                        fontWeight: FontWeight.w800,
                         fontSize: 10,
                       ),
                     ),
@@ -198,6 +195,7 @@ class _StudentTicketsState extends State<StudentTickets> {
                   Container(
                     padding: const EdgeInsets.all(6),
                     decoration: BoxDecoration(
+                      color: Colors.white,
                       border: Border.all(color: Colors.grey.shade200),
                       borderRadius: BorderRadius.circular(10),
                     ),
@@ -207,11 +205,11 @@ class _StudentTicketsState extends State<StudentTickets> {
                       size: 64,
                       eyeStyle: const QrEyeStyle(
                         eyeShape: QrEyeShape.square,
-                        color: Color(0xFF064E3B),
+                        color: Color(0xFF7F1D1D),
                       ),
                       dataModuleStyle: const QrDataModuleStyle(
                         dataModuleShape: QrDataModuleShape.square,
-                        color: Color(0xFF064E3B),
+                        color: Color(0xFF7F1D1D),
                       ),
                     ),
                   ),
@@ -262,8 +260,8 @@ class _StudentTicketsState extends State<StudentTickets> {
                           'Tap to view full ticket',
                           style: TextStyle(
                             fontSize: 11,
-                            color: const Color(0xFF064E3B).withValues(alpha: 0.7),
-                            fontWeight: FontWeight.w600,
+                            color: const Color(0xFF7F1D1D).withValues(alpha: 0.8),
+                            fontWeight: FontWeight.w700,
                           ),
                         ),
                       ],
@@ -283,12 +281,10 @@ class _StudentTicketsState extends State<StudentTickets> {
   Color _getStatusColor(String status) {
     switch (status) {
       case 'checked_in':
-        return Colors.green.shade400;
+        return Colors.green.shade600;
       case 'completed':
         return const Color(0xFFD4A843);
       default:
-        return Colors.white70;
+        return Colors.white;
     }
-  }
-
-}
+  }}

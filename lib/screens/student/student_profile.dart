@@ -1,65 +1,40 @@
-import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/auth_service.dart';
 import '../welcome_screen.dart';
 import '../auth/change_password_screen.dart';
+import 'student_certificates.dart';
 
 class StudentProfile extends StatefulWidget {
   final Map<String, dynamic>? user;
-  const StudentProfile({super.key, this.user});
+  const StudentProfile({super.key, required this.user});
 
   @override
   State<StudentProfile> createState() => _StudentProfileState();
 }
 
+
 class _StudentProfileState extends State<StudentProfile> {
   final _authService = AuthService();
-  bool _isLoading = false;
-  String? _profilePicBase64;
+  String _sectionName = 'Loading...';
 
   @override
   void initState() {
     super.initState();
-    _loadProfilePic();
+    _fetchSectionName();
   }
 
-  Future<void> _loadProfilePic() async {
-    final prefs = await SharedPreferences.getInstance();
-    final userId = widget.user?['id']?.toString() ?? '';
-    setState(() {
-      _profilePicBase64 = prefs.getString('profile_pic_$userId');
-    });
-  }
-
-  Future<void> _pickProfilePic() async {
-    final picker = ImagePicker();
-    final xfile = await picker.pickImage(source: ImageSource.gallery, imageQuality: 50);
-    if (xfile != null) {
-      final bytes = await File(xfile.path).readAsBytes();
-      final base64String = base64Encode(bytes);
-      
-      final prefs = await SharedPreferences.getInstance();
-      final userId = widget.user?['id']?.toString() ?? '';
-      await prefs.setString('profile_pic_$userId', base64String);
-      
-      setState(() {
-        _profilePicBase64 = base64String;
-      });
+  Future<void> _fetchSectionName() async {
+    final sectionId = widget.user?['section_id']?.toString();
+    if (sectionId == null || sectionId.isEmpty) {
+      if (mounted) setState(() => _sectionName = 'Not Set');
+      return;
     }
-  }
-
-  Future<void> _logout() async {
-    setState(() => _isLoading = true);
-    await _authService.logout();
+    final sections = await _authService.getSections();
+    final match = sections.firstWhere((s) => s['id'].toString() == sectionId, orElse: () => {});
     if (mounted) {
-      Navigator.pushAndRemoveUntil(
-        context,
-        MaterialPageRoute(builder: (_) => const WelcomeScreen()),
-        (route) => false,
-      );
+      setState(() {
+        _sectionName = match.isNotEmpty ? (match['name'] as String? ?? 'Not Set') : 'Not Set';
+      });
     }
   }
 
@@ -67,149 +42,216 @@ class _StudentProfileState extends State<StudentProfile> {
   Widget build(BuildContext context) {
     final firstName = widget.user?['first_name'] as String? ?? 'Student';
     final lastName = widget.user?['last_name'] as String? ?? '';
-    final idNumber = widget.user?['id_number'] as String? ?? 'Not specified';
-    final email = widget.user?['email'] as String? ?? 'No email';
-    // Mocks for year level and section if not populated right away
-    final yearLevel = widget.user?['year_level']?.toString() ?? 'Grade 12';
-    final section = widget.user?['section']?.toString() ?? 'A';
+    final email = widget.user?['email'] as String? ?? '';
+    final studentId = widget.user?['student_id'] as String? ?? 'N/A';
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF8F9FA),
-      appBar: AppBar(
-        title: const Text('My Profile', style: TextStyle(fontWeight: FontWeight.w700)),
-        elevation: 0,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.logout_rounded, color: Colors.red),
-            onPressed: _isLoading ? null : _logout,
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
-        child: Column(
-          children: [
-            // Profile Info Header
+      backgroundColor: const Color(0xFFF9FAFB),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Header matching Teacher profile
+              Row(
+                children: [
+                  const Expanded(child: Text('My Profile', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: Color(0xFF1F2937)))),
+                  IconButton(
+                    icon: const Icon(Icons.logout_rounded, color: Colors.red),
+                    onPressed: () async {
+                      await _authService.logout();
+                      if (!context.mounted) return;
+                      Navigator.pushAndRemoveUntil(
+                        context,
+                        MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+                        (route) => false,
+                      );
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              // Profile Card
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 32),
+              padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
                 color: Colors.white,
-                borderRadius: BorderRadius.circular(24),
+                borderRadius: BorderRadius.circular(20),
                 boxShadow: [
-                  BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 20, offset: const Offset(0, 10))
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.04),
+                    blurRadius: 20,
+                    offset: const Offset(0, 4),
+                  ),
                 ],
               ),
               child: Column(
                 children: [
-                  Stack(
-                    alignment: Alignment.bottomRight,
-                    children: [
-                      Container(
-                        width: 100,
-                        height: 100,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFF0FDF4),
-                          shape: BoxShape.circle,
-                          border: Border.all(color: const Color(0xFFD4A843), width: 3),
-                          image: _profilePicBase64 != null
-                              ? DecorationImage(
-                                  image: MemoryImage(base64Decode(_profilePicBase64!)),
-                                  fit: BoxFit.cover,
-                                )
-                              : null,
-                        ),
-                        child: _profilePicBase64 == null
-                            ? Center(
-                                child: Text(
-                                  firstName.isNotEmpty ? firstName[0].toUpperCase() : 'S',
-                                  style: const TextStyle(fontSize: 40, fontWeight: FontWeight.bold, color: Color(0xFF064E3B)),
-                                ),
-                              )
-                            : null,
-                      ),
-                      GestureDetector(
-                        onTap: _pickProfilePic,
-                        child: Container(
-                          padding: const EdgeInsets.all(6),
-                          decoration: const BoxDecoration(
-                            color: Color(0xFF064E3B),
-                            shape: BoxShape.circle,
-                          ),
-                          child: const Icon(Icons.camera_alt_rounded, color: Colors.white, size: 16),
+                  Container(
+                    width: 90,
+                    height: 90,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: const Color(0xFFFFF1F2), // Light subset of maroon
+                      border: Border.all(color: const Color(0xFF7F1D1D), width: 3),
+                    ),
+                    child: Center(
+                      child: Text(
+                        firstName.isNotEmpty ? firstName[0].toUpperCase() : 'S',
+                        style: const TextStyle(
+                          color: Color(0xFF7F1D1D),
+                          fontSize: 36,
+                          fontWeight: FontWeight.w900,
                         ),
                       ),
-                    ],
+                    ),
                   ),
                   const SizedBox(height: 16),
-                  Text('$firstName $lastName', style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: Color(0xFF1F2937))),
+                  Text(
+                    '$firstName $lastName',
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF1F2937),
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
                   const SizedBox(height: 4),
-                  Text(email, style: TextStyle(fontSize: 14, color: Colors.grey.shade600, fontWeight: FontWeight.w500)),
-                  
-                  const SizedBox(height: 32),
-                  const Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text('Profile Information', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFFD4A843))),
+                  Text(
+                    email,
+                    style: TextStyle(
+                      color: Colors.grey.shade500,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
                   ),
-                  const SizedBox(height: 16),
-                  _buildProfileDetailRow('First Name', firstName),
-                  _buildProfileDetailRow('Last Name', lastName),
-                  _buildProfileDetailRow('ID Number', idNumber),
-                  _buildProfileDetailRow('Email', email),
-                  _buildProfileDetailRow('Year Level', yearLevel),
-                  _buildProfileDetailRow('Section', section),
+                  const SizedBox(height: 24),
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.grey.shade200),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Student ID', style: TextStyle(color: Colors.grey.shade600, fontWeight: FontWeight.w600)),
+                        Text(studentId, style: const TextStyle(color: Color(0xFF1F2937), fontWeight: FontWeight.w800)),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 20),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.grey.shade200),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text('Section', style: TextStyle(color: Colors.grey.shade600, fontWeight: FontWeight.w600)),
+                        Text(_sectionName, style: const TextStyle(color: Color(0xFF1F2937), fontWeight: FontWeight.w800)),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),
-            
-            const SizedBox(height: 24),
-            
-            // Change Password Action
-            GestureDetector(
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const ChangePasswordScreen()),
-                );
-              },
-              child: Container(
-                padding: const EdgeInsets.all(20),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 4))],
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.lock_outline, color: Color(0xFF064E3B)),
-                    const SizedBox(width: 16),
-                    const Expanded(child: Text('Change Password', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16))),
-                    Icon(Icons.chevron_right, color: Colors.grey.shade400),
-                  ],
-                ),
+            const SizedBox(height: 32),
+
+            // Certificates Section
+            const Text(
+              'Achievements',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF1F2937),
               ),
             ),
+            const SizedBox(height: 16),
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.04),
+                    blurRadius: 20,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFFFF1F2),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.workspace_premium_rounded, color: Color(0xFF7F1D1D)),
+                ),
+                title: const Text('My Certificates', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: Color(0xFF1F2937))),
+                subtitle: const Text('View earned certificates', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                trailing: const Icon(Icons.chevron_right_rounded, color: Colors.grey),
+                onTap: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const StudentCertificates()));
+                },
+              ),
+            ),
+            const SizedBox(height: 32),
 
+            // Security Section
+            const Text(
+              'Security',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF1F2937),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.04),
+                    blurRadius: 20,
+                    offset: const Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFFFF1F2),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.lock_outline_rounded, color: Color(0xFF7F1D1D)),
+                ),
+                title: const Text('Change Password', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16, color: Color(0xFF1F2937))),
+                subtitle: const Text('Update your account password', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                trailing: const Icon(Icons.chevron_right_rounded, color: Colors.grey),
+                onTap: () {
+                  Navigator.push(context, MaterialPageRoute(builder: (_) => const ChangePasswordScreen()));
+                },
+              ),
+            ),
             const SizedBox(height: 40),
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildProfileDetailRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SizedBox(
-            width: 90,
-            child: Text(label, style: TextStyle(color: Colors.grey.shade500, fontSize: 13, fontWeight: FontWeight.w600)),
-          ),
-          const SizedBox(width: 16),
-          Expanded(child: Text(value, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14))),
-        ],
-      ),
+    ),
     );
   }
 }

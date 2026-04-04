@@ -5,9 +5,17 @@ import 'screens/welcome_screen.dart';
 import 'screens/student/student_home.dart';
 import 'screens/teacher/teacher_home.dart';
 import 'services/auth_service.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'services/push_notification_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize Firebase FIRST
+  await Firebase.initializeApp();
+  
+  // Initialize Push Notification Service
+  await PushNotificationService().initialize();
 
   await Supabase.initialize(
     url: 'https://vvwagzckacyglfjcdalj.supabase.co',
@@ -23,6 +31,9 @@ void main() async {
   if (isLoggedIn) {
     final userData = await authService.getCurrentUser();
     role = userData?['role']?.toString().toLowerCase() ?? 'student';
+    
+    // Save/Update FCM Token on app startup
+    await PushNotificationService().updateToken();
   }
 
   runApp(PulseConnectApp(isLoggedIn: isLoggedIn, userRole: role));
@@ -32,11 +43,14 @@ class PulseConnectApp extends StatelessWidget {
   final bool isLoggedIn;
   final String userRole;
 
+  static final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
   const PulseConnectApp({super.key, required this.isLoggedIn, required this.userRole});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: navigatorKey,
       title: 'CCS PulseConnect',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(

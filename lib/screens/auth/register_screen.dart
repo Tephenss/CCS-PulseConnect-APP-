@@ -16,11 +16,12 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
   final _middleNameCtrl = TextEditingController();
   final _lastNameCtrl = TextEditingController();
   final _suffixCtrl = TextEditingController();
+  final _idNumberCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
   final _confirmPasswordCtrl = TextEditingController();
 
-  String? _selectedSectionId;
+  String? _selectedSectionId; // Deprecated: Section selected post-login
   List<Map<String, dynamic>> _sections = [];
   bool _isLoading = false;
   bool _obscurePassword = true;
@@ -37,7 +38,6 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
   @override
   void initState() {
     super.initState();
-    _loadSections();
     _gradientController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 12),
@@ -58,6 +58,7 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
     _middleNameCtrl.dispose();
     _lastNameCtrl.dispose();
     _suffixCtrl.dispose();
+    _idNumberCtrl.dispose();
     _emailCtrl.dispose();
     _passwordCtrl.dispose();
     _confirmPasswordCtrl.dispose();
@@ -66,10 +67,7 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
     super.dispose();
   }
 
-  Future<void> _loadSections() async {
-    final sections = await _authService.getSections();
-    setState(() => _sections = sections);
-  }
+  // _loadSections is no longer used during registration
 
   Future<void> _handleRegister() async {
     if (!_formKey.currentState!.validate()) return;
@@ -90,9 +88,9 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
       middleName: _middleNameCtrl.text,
       lastName: _lastNameCtrl.text,
       suffix: _suffixCtrl.text,
+      idNumber: _idNumberCtrl.text,
       email: _emailCtrl.text,
       password: _passwordCtrl.text,
-      sectionId: _selectedSectionId ?? '',
     );
 
     setState(() => _isLoading = false);
@@ -174,7 +172,7 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
                   child: Image.asset(
                     'assets/bg.png',
                     fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => const SizedBox(),
+                    errorBuilder: (context, error, stackTrace) => const SizedBox(),
                   ),
                 ),
               ),
@@ -448,6 +446,19 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
 
                                     const SizedBox(height: 20),
 
+                                    // ID Number
+                                    _buildLabel('School ID Number'),
+                                    const SizedBox(height: 8),
+                                    TextFormField(
+                                      controller: _idNumberCtrl, // added new controller
+                                      style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
+                                      cursorColor: const Color(0xFF9F1239),
+                                      decoration: _inputDeco(hint: 'e.g. 231-*****', icon: Icons.badge_outlined),
+                                      validator: (v) => v == null || v.trim().isEmpty ? 'ID Number is required' : null,
+                                    ),
+
+                                    const SizedBox(height: 20),
+
                                     // Email
                                     _buildLabel('Email Address'),
                                     const SizedBox(height: 8),
@@ -466,33 +477,7 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
 
                                     const SizedBox(height: 20),
 
-                                    // Section
-                                    _buildLabel('Year Level & Section'),
-                                    const SizedBox(height: 8),
-                                    DropdownButtonFormField<String>(
-                                      value: _selectedSectionId,
-                                      dropdownColor: const Color(0xFF1C1C22),
-                                      iconEnabledColor: const Color(0xFFA1A1AA),
-                                      style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                                      hint: const Text(
-                                        'Select your section',
-                                        style: TextStyle(color: Color(0xFF71717A), fontSize: 14),
-                                      ),
-                                      decoration: _inputDeco(hint: '', icon: Icons.class_outlined),
-                                      items: _sections.map((s) {
-                                        return DropdownMenuItem<String>(
-                                          value: s['id'].toString(),
-                                          child: Text(
-                                            s['name'] as String? ?? '',
-                                            style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                                          ),
-                                        );
-                                      }).toList(),
-                                      onChanged: (val) => setState(() => _selectedSectionId = val),
-                                      validator: (v) => v == null ? 'Please select a section' : null,
-                                    ),
-
-                                    const SizedBox(height: 20),
+// Section dropdown removed 
 
                                     // Password
                                     _buildLabel('Password'),

@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../services/notification_service.dart';
 import '../../services/auth_service.dart';
-import '../../services/event_service.dart';
-import 'student/student_event_details.dart';
-import 'teacher/teacher_event_manage.dart';
 
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
@@ -16,6 +13,9 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   final _service = NotificationService();
   List<AppNotification> _notifications = [];
   bool _isLoading = true;
+  Color _themeColor = const Color(0xFF7F1D1D); // Default to Maroon
+  Color _unreadBgColor = const Color(0xFFFFF1F2); // Default to Rose 50
+  Color _unreadBorderColor = const Color(0xFFFECDD3); // Default to Rose 200
 
   @override
   void initState() {
@@ -24,6 +24,24 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
   }
 
   Future<void> _loadData() async {
+    final authService = AuthService();
+    final user = await authService.getCurrentUser();
+    final role = user?['role'] ?? 'student';
+    
+    if (mounted) {
+      setState(() {
+        if (role == 'teacher') {
+          _themeColor = const Color(0xFF064E3B);
+          _unreadBgColor = const Color(0xFFECFDF5); // Emerald 50
+          _unreadBorderColor = const Color(0xFFA7F3D0); // Emerald 200
+        } else {
+          _themeColor = const Color(0xFF7F1D1D);
+          _unreadBgColor = const Color(0xFFFFF1F2); // Rose 50
+          _unreadBorderColor = const Color(0xFFFECDD3); // Rose 200
+        }
+      });
+    }
+
     final notifs = await _service.getNotifications();
     if (mounted) {
       setState(() {
@@ -39,13 +57,13 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
         title: const Text('Notifications', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: Colors.white)),
-        backgroundColor: const Color(0xFF064E3B),
+        backgroundColor: _themeColor,
         centerTitle: true,
         elevation: 0,
         iconTheme: const IconThemeData(color: Colors.white),
         actions: [
           IconButton(
-            icon: const Icon(Icons.done_all_rounded, color: Colors.white),
+            icon: const Icon(Icons.done_all_rounded, color: Colors.white70),
             tooltip: 'Mark all as read',
             onPressed: () async {
               await _service.markAllAsRead();
@@ -55,11 +73,11 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         ],
       ),
       body: _isLoading 
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+          ? Center(child: CircularProgressIndicator(color: _themeColor))
           : _notifications.isEmpty
               ? _buildEmptyState()
               : RefreshIndicator(
-                  color: const Color(0xFF064E3B),
+                  color: _themeColor,
                   onRefresh: _loadData,
                   child: ListView.builder(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
@@ -103,16 +121,17 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         break;
       case NotificationType.error:
         icon = Icons.event_busy_rounded;
-        color = Colors.red.shade400;
+        color = const Color(0xFFDC2626);
         break;
       case NotificationType.event:
         icon = Icons.event_available_rounded;
-        color = const Color(0xFF064E3B);
+        color = _themeColor;
         break;
       default:
         icon = Icons.info_rounded;
-        color = Colors.blue.shade400;
+        color = Colors.blue.shade500;
     }
+
 
     final diff = DateTime.now().difference(n.timestamp);
     String timeStr;
@@ -131,8 +150,6 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
         if (!n.isRead) {
           await _service.markAsRead(n.id);
         }
-        
-        // Pop back to Home screen and pass index '1' (Events Tab)
         if (mounted) {
           Navigator.pop(context, 1);
         }
@@ -141,16 +158,14 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: n.isRead ? Colors.white : const Color(0xFF064E3B).withValues(alpha: 0.05),
+        color: n.isRead ? Colors.white : _unreadBgColor,
         borderRadius: BorderRadius.circular(16),
-        border: n.isRead ? Border.all(color: Colors.grey.shade200) : Border.all(color: const Color(0xFF064E3B).withValues(alpha: 0.2)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.02),
-            blurRadius: 10, offset: const Offset(0, 4),
-          ),
-        ],
+        border: Border.all(
+          color: n.isRead ? Colors.grey.shade200 : _unreadBorderColor,
+        ),
+        boxShadow: n.isRead ? [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))] : [],
       ),
+
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -185,7 +200,7 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
                 const SizedBox(height: 6),
                 Text(
                   n.message,
-                  style: TextStyle(fontWeight: FontWeight.w500, fontSize: 14, color: Colors.grey.shade700, height: 1.4),
+                  style: TextStyle(fontWeight: FontWeight.w500, fontSize: 14, color: Colors.grey.shade600, height: 1.4),
                 ),
               ],
             ),

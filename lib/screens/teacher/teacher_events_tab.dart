@@ -142,7 +142,6 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
       final status = (e['status'] as String? ?? 'pending').toLowerCase(); // Normalize string
       
       // Calculate if the event is truly expired based on datetime
-      final endAtStr = e['end_at'] as String?;
       final startAtStr = e['start_at'] as String?;
       DateTime? checkDate;
       
@@ -196,22 +195,12 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
   Widget _buildEventCard(Map<String, dynamic> event) {
     final title = event['title'] as String? ?? 'Sample Event';
     final startAt = event['start_at'] as String?;
-    final endAt = event['end_at'] as String?;
-    final createdAt = event['created_at'] as String?;
     String status = event['status'] as String? ?? 'active';
     final target = event['target_grade'] as String? ?? 'All';
 
     DateTime? startDate;
     if (startAt != null) {
       try { startDate = DateTime.parse(startAt); } catch (_) {}
-    }
-    DateTime? endDate;
-    if (endAt != null) {
-      try { endDate = DateTime.parse(endAt); } catch (_) {}
-    }
-    DateTime? createdDate;
-    if (createdAt != null) {
-      try { createdDate = DateTime.parse(createdAt); } catch (_) {}
     }
 
     // Auto-expire visually if 'start_at' has passed
