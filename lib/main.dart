@@ -7,6 +7,7 @@ import 'screens/teacher/teacher_home.dart';
 import 'services/auth_service.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'services/push_notification_service.dart';
+import 'config/env.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,9 +19,8 @@ void main() async {
   await PushNotificationService().initialize();
 
   await Supabase.initialize(
-    url: 'https://vvwagzckacyglfjcdalj.supabase.co',
-    anonKey:
-        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ2d2FnemNrYWN5Z2xmamNkYWxqIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NDg2MjcwMywiZXhwIjoyMDkwNDM4NzAzfQ.FjsbwZIQ7qLWpxeGmDYgE9CdjPVriCmwas6YCHWFpPE',
+    url: Env.supabaseUrl,
+    anonKey: Env.supabaseAnonKey,
   );
 
   // Check if user is already logged in
