@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../services/auth_service.dart';
@@ -8,6 +10,10 @@ import 'teacher_scan.dart';
 import 'teacher_sections.dart';
 import '../notifications_screen.dart';
 import '../../services/notification_service.dart';
+import '../../widgets/animated_greeting_text.dart';
+import '../../widgets/card_swap_widget.dart';
+import '../../widgets/custom_loader.dart';
+import '../../widgets/shiny_text.dart';
 
 class TeacherHome extends StatefulWidget {
   const TeacherHome({super.key});
@@ -26,11 +32,32 @@ class _TeacherHomeState extends State<TeacherHome> {
   int _unreadCount = 0;
   DateTime _calendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
   final _notifService = NotificationService();
+  final PageController _headerPageController = PageController();
+  int _currentHeaderSlide = 0;
+  Timer? _notifTimer;
 
   @override
   void initState() {
     super.initState();
     _loadData();
+    _startNotifTimer();
+  }
+
+  void _startNotifTimer() {
+    _notifTimer = Timer.periodic(const Duration(seconds: 15), (timer) {
+      if (mounted && _currentIndex == 0) {
+        _refreshUnreadCount();
+      }
+    });
+  }
+
+  Future<void> _refreshUnreadCount() async {
+    try {
+      final unread = await _notifService.getUnreadCount();
+      if (mounted && unread != _unreadCount) {
+        setState(() => _unreadCount = unread);
+      }
+    } catch (_) {}
   }
 
   Future<void> _loadData() async {
@@ -47,6 +74,20 @@ class _TeacherHomeState extends State<TeacherHome> {
     }
   }
 
+  String _getGreeting() {
+    final hour = DateTime.now().hour;
+    if (hour < 12) return 'Good Morning';
+    if (hour < 17) return 'Good Afternoon';
+    return 'Good Evening';
+  }
+
+  @override
+  void dispose() {
+    _notifTimer?.cancel();
+    _headerPageController.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final screens = [
@@ -54,7 +95,7 @@ class _TeacherHomeState extends State<TeacherHome> {
       const TeacherEventsTab(),
       const TeacherScanScreen(),
       const TeacherSections(),
-      const TeacherProfile(),
+      TeacherProfile(user: _user, onUpdate: _loadData),
     ];
 
     return PopScope(
@@ -63,58 +104,89 @@ class _TeacherHomeState extends State<TeacherHome> {
         if (didPop) return;
         if (_currentIndex != 0) {
           setState(() => _currentIndex = 0);
-        } else {
-          // Prevent accidental exit
         }
       },
       child: Scaffold(
-        body: _isLoading
-            ? const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
-            : screens[_currentIndex],
-        bottomNavigationBar: Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.06),
-                blurRadius: 20,
-                offset: const Offset(0, -4),
-              ),
-            ],
-          ),
-          child: SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _buildNavItem(Icons.home_rounded, 'Home', 0),
-                  _buildNavItem(Icons.event_note_rounded, 'Events', 1),
-                  // Custom Scan Button in the middle
-                  GestureDetector(
-                    onTap: () => setState(() => _currentIndex = 2),
+        body: Stack(
+          children: [
+            _isLoading
+                ? const Center(child: PulseConnectLoader())
+                : AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 400),
+                    switchInCurve: Curves.easeInOut,
+                    switchOutCurve: Curves.easeInOut,
+                    transitionBuilder: (Widget child, Animation<double> animation) {
+                      return FadeTransition(opacity: animation, child: child);
+                    },
                     child: Container(
-                      margin: const EdgeInsets.symmetric(horizontal: 8),
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFD4A843),
-                        shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: const Color(0xFFD4A843).withValues(alpha: 0.4),
-                            blurRadius: 10, offset: const Offset(0, 4)
-                          ),
-                        ],
-                      ),
-                      child: const Icon(Icons.qr_code_scanner_rounded, color: Color(0xFF064E3B), size: 28),
+                      key: ValueKey<int>(_currentIndex),
+                      child: screens[_currentIndex],
                     ),
                   ),
-                  _buildNavItem(Icons.groups_rounded, 'Sections', 3),
-                  _buildNavItem(Icons.person_rounded, 'Profile', 4),
-                ],
+            
+            // New Floating Navigation Bar (Matches user design)
+            if (!_isLoading)
+              Positioned(
+                bottom: 24,
+                left: 20,
+                right: 20,
+                child: Row(
+                  children: [
+                    // Main Nav Pill
+                    Expanded(
+                      child: Container(
+                        height: 64,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        decoration: BoxDecoration(
+                          color: Colors.white, // Solid white for better visibility
+                          borderRadius: BorderRadius.circular(32),
+                          border: Border.all(color: Colors.grey.shade200, width: 1),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.25),
+                              blurRadius: 30,
+                              spreadRadius: 2,
+                              offset: const Offset(0, 12),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            _buildNavItem(Icons.home_rounded, 'Home', 0),
+                            _buildNavItem(Icons.event_note_rounded, 'Events', 1),
+                            _buildNavItem(Icons.groups_rounded, 'Sections', 3),
+                            _buildNavItem(Icons.person_rounded, 'Profile', 4),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    // Separate QR Button
+                    GestureDetector(
+                      onTap: () => setState(() => _currentIndex = 2),
+                      child: Container(
+                        width: 58,
+                        height: 58,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF064E3B), // Theme Color
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF064E3B).withValues(alpha: 0.4),
+                              blurRadius: 20,
+                              spreadRadius: 1,
+                              offset: const Offset(0, 8),
+                            ),
+                          ],
+                        ),
+                        child: const Icon(Icons.qr_code_scanner_rounded, color: Colors.white, size: 28),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ),
+          ],
         ),
       ),
     );
@@ -126,16 +198,15 @@ class _TeacherHomeState extends State<TeacherHome> {
     return GestureDetector(
       onTap: () => setState(() => _currentIndex = index),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(
-          horizontal: 16,
-          vertical: 10,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+        padding: EdgeInsets.symmetric(
+          horizontal: isActive ? 12 : 8, // Further reduced padding
+          vertical: 8,
         ),
         decoration: BoxDecoration(
-          color: isActive
-              ? const Color(0xFF064E3B).withValues(alpha: 0.1)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(14),
+          color: isActive ? const Color(0xFF064E3B).withValues(alpha: 0.08) : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -143,8 +214,19 @@ class _TeacherHomeState extends State<TeacherHome> {
             Icon(
               icon,
               color: isActive ? const Color(0xFF064E3B) : Colors.grey.shade400,
-              size: 24,
+              size: 20, // Reduced icon size
             ),
+            if (isActive) ...[
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Color(0xFF064E3B),
+                  fontWeight: FontWeight.w800,
+                  fontSize: 11, // Reduced font size
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -153,7 +235,6 @@ class _TeacherHomeState extends State<TeacherHome> {
 
   Widget _buildHomeContent() {
     final firstName = _user?['first_name'] as String? ?? 'Teacher';
-    final gradeAdvisor = _user?['grade_advisor'] as String? ?? 'General Faculty';
 
     return CustomScrollView(
       slivers: [
@@ -170,96 +251,114 @@ class _TeacherHomeState extends State<TeacherHome> {
             child: SafeArea(
               bottom: false,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 16, 24, 28),
+                padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Row(
                       children: [
                         Container(
-                          width: 48,
-                          height: 48,
+                          width: 50,
+                          height: 50,
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            color: Colors.white.withValues(alpha: 0.2),
-                            border: Border.all(color: const Color(0xFFD4A843).withValues(alpha: 0.6), width: 2),
+                            border: Border.all(color: const Color(0xFFD4A843), width: 2),
+                            image: _user?['photo_url'] != null && (_user?['photo_url'] as String).isNotEmpty
+                                ? DecorationImage(
+                                    image: (_user?['photo_url'] as String).startsWith('http')
+                                        ? NetworkImage(_user?['photo_url'])
+                                        : FileImage(File(_user?['photo_url'])),
+                                    fit: BoxFit.cover,
+                                  )
+                                : null,
                           ),
-                          child: Center(
-                            child: Text(
-                              firstName[0].toUpperCase(),
-                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 20),
-                            ),
-                          ),
+                          child: _user?['photo_url'] == null || (_user?['photo_url'] as String).isEmpty
+                            ? Center(
+                                child: Text(
+                                  firstName.isNotEmpty ? firstName[0].toUpperCase() : 'T',
+                                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 20),
+                                ),
+                              )
+                            : null,
                         ),
                         const SizedBox(width: 14),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFD4A843).withValues(alpha: 0.2),
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                                child: Text(
-                                  gradeAdvisor,
-                                  style: const TextStyle(color: Color(0xFFD4A843), fontSize: 11, fontWeight: FontWeight.w700),
+                              Text(
+                                _getGreeting(),
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.7),
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  letterSpacing: 0.5,
                                 ),
                               ),
-                              const SizedBox(height: 4),
-                              Text(
-                                _user?['first_name'] as String? ?? 'Teacher',
-                                style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w800),
+                              AnimatedGreetingText(
+                                text: firstName,
+                                style: const TextStyle(
+                                  fontSize: 22,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                                baseColor: Colors.white,
+                                scanColor: const Color(0xFF6EE7B7), // Soft emerald glow for Teacher
                               ),
                             ],
                           ),
                         ),
                         // Notification Bell at the top!
                         Container(
+                          margin: const EdgeInsets.only(left: 12),
+                          width: 48,
+                          height: 48,
                           decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.12),
+                            color: Colors.white.withValues(alpha: 0.10),
                             borderRadius: BorderRadius.circular(14),
                           ),
                           child: Stack(
+                            clipBehavior: Clip.none,
                             children: [
-                              IconButton(
-                                icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
-                                onPressed: () async {
-                                  final result = await Navigator.push(
-                                    context,
-                                    MaterialPageRoute(builder: (context) => const NotificationsScreen()),
-                                  );
-                                  
-                                  if (result != null && result is int) {
-                                    setState(() {
-                                      _currentIndex = result;
-                                    });
-                                  }
-                                  
-                                  _loadData();
-                                },
+                              Positioned.fill(
+                                child: IconButton(
+                                  padding: const EdgeInsets.all(10),
+                                  splashRadius: 22,
+                                  icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
+                                  onPressed: () async {
+                                    final result = await Navigator.push(
+                                      context,
+                                      MaterialPageRoute(builder: (context) => const NotificationsScreen()),
+                                    );
+
+                                    if (result != null && result is int) {
+                                      setState(() {
+                                        _currentIndex = result;
+                                      });
+                                    }
+
+                                    _loadData();
+                                  },
+                                ),
                               ),
                               if (_unreadCount > 0)
                                 Positioned(
-                                  top: 8,
-                                  right: 10,
+                                  top: -4,
+                                  right: -4,
                                   child: Container(
-                                    padding: const EdgeInsets.all(4),
+                                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
                                     decoration: BoxDecoration(
-                                      color: Colors.red.shade600,
-                                      shape: BoxShape.circle,
+                                      color: const Color(0xFFEF4444),
+                                      borderRadius: BorderRadius.circular(999),
                                       border: Border.all(color: const Color(0xFF047857), width: 1.5),
                                     ),
                                     constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
-                                    child: Center(
-                                      child: Text(
-                                        _unreadCount > 9 ? '9+' : _unreadCount.toString(),
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w800,
-                                        ),
+                                    child: Text(
+                                      _unreadCount > 99 ? '99+' : _unreadCount.toString(),
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w800,
                                       ),
                                     ),
                                   ),
@@ -270,7 +369,7 @@ class _TeacherHomeState extends State<TeacherHome> {
                       ],
                     ),
                     const SizedBox(height: 24),
-                    _buildMiniCalendar(),
+                    _buildHeaderSlider(),
                   ],
                 ),
               ),
@@ -281,7 +380,7 @@ class _TeacherHomeState extends State<TeacherHome> {
         // Upcoming Events Title
         SliverToBoxAdapter(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 28, 24, 12),
+            padding: const EdgeInsets.fromLTRB(24, 16, 24, 12), // Reduced top padding
             child: Row(
               children: [
                 const Text('Upcoming Events', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F2937))),
@@ -325,8 +424,103 @@ class _TeacherHomeState extends State<TeacherHome> {
                   childCount: _upcomingEvents.length,
                 ),
               ),
-        const SliverToBoxAdapter(child: SizedBox(height: 24)),
+        const SliverToBoxAdapter(child: SizedBox(height: 100)), // Space for floating nav
       ],
+    );
+  }
+
+  Widget _buildHeaderSlider() {
+    return Column(
+      children: [
+        SizedBox(
+          height: 380, // Fixed height for slider (increased to fit calendar)
+          child: PageView(
+            controller: _headerPageController,
+            onPageChanged: (idx) => setState(() => _currentHeaderSlide = idx),
+            children: [
+              _buildMacbookSlide(),
+              _buildMiniCalendar(),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        // Dots Indicator
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: List.generate(2, (index) {
+            final isActive = _currentHeaderSlide == index;
+            return AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              margin: const EdgeInsets.symmetric(horizontal: 4),
+              width: isActive ? 20 : 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: isActive ? const Color(0xFFD4A843) : Colors.white.withValues(alpha: 0.3),
+                borderRadius: BorderRadius.circular(4),
+              ),
+            );
+          }),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMacbookSlide() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 4),
+      padding: const EdgeInsets.all(20),
+      clipBehavior: Clip.hardEdge,
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const ShinyText(
+            text: 'Ready to explore?',
+            fontSize: 20,
+            speed: 2.5,
+            fontWeight: FontWeight.w900,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Monitor upcoming events, view attendance logs instantly, and manage your assigned sections efficiently.',
+            textAlign: TextAlign.left,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.8),
+              fontSize: 12,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 32),
+          // Card swap widget - Max ZOOM version
+          CardSwapWidget(
+            items: const [
+              CardSwapItem(imagePath: 'assets/sample summit/image1.jpg', label: 'CCS SUMMIT'),
+              CardSwapItem(imagePath: 'assets/sample GA/image1.jpg', label: 'GENERAL ASSEMBLY'),
+              CardSwapItem(imagePath: 'assets/sample exhibit/image1.jpg', label: 'CCS EXHIBIT'),
+              CardSwapItem(imagePath: 'assets/sample CV/image1.jpg', label: 'COMPANY VISIT'),
+            ],
+            cardWidth: 250,
+            cardHeight: 140,
+            cardDistance: 20,
+            verticalDistance: 10,
+            delay: const Duration(seconds: 4),
+            skewAmount: 5,
+          ),
+          const SizedBox(height: 12),
+        ],
+      ),
     );
   }
 
@@ -337,6 +531,7 @@ class _TeacherHomeState extends State<TeacherHome> {
     final firstWeekday = DateTime(_calendarMonth.year, _calendarMonth.month, 1).weekday % 7;
 
     return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 4),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.1),

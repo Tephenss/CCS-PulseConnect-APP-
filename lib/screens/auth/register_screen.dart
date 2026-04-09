@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
+import '../../widgets/custom_loader.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -8,7 +9,7 @@ class RegisterScreen extends StatefulWidget {
   State<RegisterScreen> createState() => _RegisterScreenState();
 }
 
-class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProviderStateMixin {
+class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStateMixin {
   final _formKey = GlobalKey<FormState>();
   final _authService = AuthService();
 
@@ -30,6 +31,7 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
   String? _successMessage;
 
   late AnimationController _gradientController;
+  late AnimationController _logoFloatController;
   late ScrollController _scrollController;
   double _scrollDim = 0.0; // 0.0 = top, 1.0 = fully scrolled
   Offset _pointerPosition = const Offset(0, 0);
@@ -40,8 +42,14 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
     super.initState();
     _gradientController = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 12),
+      duration: const Duration(seconds: 5),
     )..repeat(reverse: true);
+    
+    _logoFloatController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2000),
+    )..repeat(reverse: true);
+
     _scrollController = ScrollController();
     _scrollController.addListener(_onScroll);
   }
@@ -63,6 +71,7 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
     _passwordCtrl.dispose();
     _confirmPasswordCtrl.dispose();
     _gradientController.dispose();
+    _logoFloatController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
@@ -197,7 +206,7 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
                       Color(0xFF09090B).withValues(alpha: 0.94 + _scrollDim * 0.03),
                       const Color(0xFF09090B),
                     ],
-                    stops: const [0.0, 0.08, 0.14, 0.20, 0.27, 0.34, 0.42, 0.52, 0.64, 0.78],
+                    stops: const [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.65, 0.8, 0.9, 1.0],
                   ),
                 ),
               ),
@@ -232,26 +241,25 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
               top: 0,
               left: 0,
               right: 0,
-              height: size.height * 0.5,
+              height: size.height,
               child: IgnorePointer(
                 child: AnimatedBuilder(
                   animation: _gradientController,
                   builder: (context, child) {
                     final t = _gradientController.value;
-                    final dimmedOpacity = (_pointerActive ? 0.2 : 0.9) * (1.0 - _scrollDim * 0.7);
                     return Opacity(
-                      opacity: dimmedOpacity.clamp(0.0, 1.0),
+                      opacity: _pointerActive ? 0.3 : 0.95,
                       child: Container(
                         decoration: BoxDecoration(
                           gradient: RadialGradient(
-                            center: Alignment(-0.2 + 0.4 * t, -0.3 + 0.3 * t),
-                            radius: 0.9 + 0.2 * t,
+                            center: Alignment(-0.9 + 1.8 * t, -0.6 + 1.2 * t),
+                            radius: 1.4 + 0.4 * t,
                             colors: [
-                              Color(0xFF6F1D2D).withValues(alpha: 0.75 + 0.1 * t),
-                              Color(0xFF15803D).withValues(alpha: 0.4 + 0.15 * t),
+                              const Color(0xFF6F1D2D).withValues(alpha: 0.85 + 0.1 * t),
+                              const Color(0xFF7F1D1D).withValues(alpha: 0.5 + 0.2 * t),
                               Colors.transparent,
                             ],
-                            stops: [0.0, 0.45 + 0.1 * t, 1.0],
+                            stops: [0.0, 0.45 + 0.2 * t, 1.0],
                           ),
                         ),
                       ),
@@ -328,14 +336,51 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
                           children: [
                             SizedBox(height: size.height * 0.02),
 
+                            // CCS Logo with premium float & glow
+                            AnimatedBuilder(
+                              animation: _logoFloatController,
+                              builder: (context, child) {
+                                return Transform.translate(
+                                  offset: Offset(0, 12 * Curves.easeInOut.transform(_logoFloatController.value)),
+                                  child: child,
+                                );
+                              },
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: const Color(0xFF9F1239).withValues(alpha: 0.35),
+                                      blurRadius: 45,
+                                      spreadRadius: 10,
+                                    ),
+                                    BoxShadow(
+                                      color: const Color(0xFFF59E0B).withValues(alpha: 0.15),
+                                      blurRadius: 65,
+                                      spreadRadius: 18,
+                                    ),
+                                  ],
+                                ),
+                                child: ClipOval(
+                                  child: Image.asset(
+                                    'assets/CCS.png',
+                                    width: 105,
+                                    height: 105,
+                                    fit: BoxFit.cover,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 28),
+
                             // Header
                             const Text(
                               'CCS PULSECONNECT',
                               style: TextStyle(
                                 fontSize: 10,
                                 letterSpacing: 5,
-                                color: Color(0xFF71717A),
-                                fontWeight: FontWeight.w600,
+                                color: Color(0xFFA1A1AA),
+                                fontWeight: FontWeight.w800,
                               ),
                             ),
                             const SizedBox(height: 10),
@@ -467,7 +512,7 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
                                       keyboardType: TextInputType.emailAddress,
                                       style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
                                       cursorColor: const Color(0xFF9F1239),
-                                      decoration: _inputDeco(hint: 'you@email.com', icon: Icons.email_outlined),
+                                      decoration: _inputDeco(hint: 'you@gmail.com', icon: Icons.email_outlined),
                                       validator: (v) {
                                         if (v == null || v.isEmpty) return 'Required';
                                         if (!v.contains('@')) return 'Invalid email';
@@ -564,14 +609,7 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
                                             ),
                                           ),
                                           child: _isLoading
-                                              ? const SizedBox(
-                                                  height: 22,
-                                                  width: 22,
-                                                  child: CircularProgressIndicator(
-                                                    strokeWidth: 2.5,
-                                                    color: Colors.white,
-                                                  ),
-                                                )
+                                              ? const PulseConnectLoader(size: 18, color: Colors.white)
                                               : const Row(
                                                   mainAxisAlignment: MainAxisAlignment.center,
                                                   children: [
@@ -613,7 +651,7 @@ class _RegisterScreenState extends State<RegisterScreen> with SingleTickerProvid
                                   child: const Text(
                                     'Sign In',
                                     style: TextStyle(
-                                      color: Color(0xFF9F1239),
+                                      color: Color(0xFFBE123C),
                                       fontWeight: FontWeight.w700,
                                       fontSize: 13,
                                     ),

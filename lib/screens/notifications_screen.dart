@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../services/notification_service.dart';
 import '../../services/auth_service.dart';
+import '../widgets/custom_loader.dart';
 
 class NotificationsScreen extends StatefulWidget {
   const NotificationsScreen({super.key});
@@ -66,14 +67,17 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
             icon: const Icon(Icons.done_all_rounded, color: Colors.white70),
             tooltip: 'Mark all as read',
             onPressed: () async {
-              await _service.markAllAsRead();
-              _loadData();
+              if (_notifications.isNotEmpty) {
+                final ids = _notifications.map((n) => n.id).toList();
+                await _service.markAllAsRead(ids);
+                _loadData();
+              }
             },
           ),
         ],
       ),
       body: _isLoading 
-          ? Center(child: CircularProgressIndicator(color: _themeColor))
+          ? const Center(child: PulseConnectLoader())
           : _notifications.isEmpty
               ? _buildEmptyState()
               : RefreshIndicator(
@@ -145,6 +149,35 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       timeStr = 'Just now';
     }
 
+    // Dynamic unread background based on type
+    Color cardBg = Colors.white;
+    Color borderColor = Colors.grey.shade200;
+    
+    if (!n.isRead) {
+      switch (n.type) {
+        case NotificationType.success:
+          cardBg = const Color(0xFFF0FDF4); // Green 50
+          borderColor = const Color(0xFFBBF7D0); // Green 200
+          break;
+        case NotificationType.warning:
+          cardBg = const Color(0xFFFFFBEB); // Amber 50
+          borderColor = const Color(0xFFFDE68A); // Amber 200
+          break;
+        case NotificationType.error:
+          cardBg = const Color(0xFFFEF2F2); // Red 50
+          borderColor = const Color(0xFFFECACA); // Red 200
+          break;
+        case NotificationType.info:
+        case NotificationType.event:
+          cardBg = const Color(0xFFEFF6FF); // Blue 50
+          borderColor = const Color(0xFFBFDBFE); // Blue 200
+          break;
+        default:
+          cardBg = _unreadBgColor;
+          borderColor = _unreadBorderColor;
+      }
+    }
+
     return GestureDetector(
       onTap: () async {
         if (!n.isRead) {
@@ -158,10 +191,10 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: n.isRead ? Colors.white : _unreadBgColor,
+        color: cardBg,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
-          color: n.isRead ? Colors.grey.shade200 : _unreadBorderColor,
+          color: borderColor,
         ),
         boxShadow: n.isRead ? [BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))] : [],
       ),

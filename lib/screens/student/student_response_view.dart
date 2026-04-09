@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../services/event_service.dart';
+import '../../widgets/custom_loader.dart';
 
 class StudentResponseView extends StatefulWidget {
   final String eventId;
@@ -70,7 +71,7 @@ class _StudentResponseViewState extends State<StudentResponseView> {
         iconTheme: const IconThemeData(color: Color(0xFF1F2937)),
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+          ? const Center(child: PulseConnectLoader())
           : _questions.isEmpty
               ? const Center(child: Text('No evaluation data found.'))
               : ListView.separated(

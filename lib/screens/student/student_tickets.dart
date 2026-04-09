@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
 import '../../services/event_service.dart';
+import '../../widgets/custom_loader.dart';
 import 'student_ticket_view.dart';
 
 class StudentTickets extends StatefulWidget {
@@ -14,6 +16,7 @@ class StudentTickets extends StatefulWidget {
 
 class _StudentTicketsState extends State<StudentTickets> {
   final _eventService = EventService();
+  static const String _downloadedTicketKeyPrefix = 'downloaded_tickets_';
   List<Map<String, dynamic>> _tickets = [];
   bool _isLoading = true;
 
@@ -24,15 +27,141 @@ class _StudentTicketsState extends State<StudentTickets> {
   }
 
   Future<void> _loadTickets() async {
+    if (mounted) {
+      setState(() => _isLoading = true);
+    }
+
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id') ?? '';
-    final tickets = await _eventService.getMyTickets(userId);
+    final allTickets = userId.isEmpty
+        ? <Map<String, dynamic>>[]
+        : await _eventService.getMyTickets(userId);
+
+    // Keep online list behavior: show active events only.
+    final activeOnlineTickets = allTickets.where(_isTicketActive).map((ticket) {
+      final normalized = Map<String, dynamic>.from(ticket);
+      normalized['local_cached'] = false;
+      return normalized;
+    }).toList();
+
+    // Downloaded tickets are kept in app storage and shown even offline.
+    final offlineTickets = _readOfflineTickets(prefs, userId);
+    final mergedTickets = _mergeTickets(activeOnlineTickets, offlineTickets);
+
     if (mounted) {
       setState(() {
-        _tickets = tickets;
+        _tickets = mergedTickets;
         _isLoading = false;
       });
     }
+  }
+
+  bool _isTicketActive(Map<String, dynamic> ticket) {
+    final now = DateTime.now();
+    final event = ticket['events'] as Map<String, dynamic>? ?? {};
+
+    final status = event['status'] as String? ?? '';
+    if (status != 'published') return false;
+
+    final endAt = event['end_at'] as String?;
+    if (endAt != null && endAt.isNotEmpty) {
+      try {
+        final endDate = DateTime.parse(endAt).toLocal();
+        return endDate.isAfter(now) || endDate.isAtSameMomentAs(now);
+      } catch (_) {}
+    }
+    return true;
+  }
+
+  String _ticketUniqueKey(Map<String, dynamic> ticketMap) {
+    final ticketData = ticketMap['tickets'];
+    final ticketId = ticketData is List && ticketData.isNotEmpty
+        ? (ticketData[0]['id'] ?? '').toString()
+        : ticketData is Map
+            ? (ticketData['id'] ?? '').toString()
+            : '';
+    if (ticketId.isNotEmpty) return 'ticket:$ticketId';
+
+    final event = ticketMap['events'];
+    final eventId = event is Map ? (event['id'] ?? '').toString() : '';
+    if (eventId.isNotEmpty) return 'event:$eventId';
+
+    final registeredAt = (ticketMap['registered_at'] ?? '').toString();
+    if (registeredAt.isNotEmpty) return 'registered:$registeredAt';
+    return '';
+  }
+
+  DateTime _extractSortDate(Map<String, dynamic> ticketMap) {
+    try {
+      final event = ticketMap['events'];
+      final startAt = event is Map ? (event['start_at'] ?? '').toString() : '';
+      if (startAt.isNotEmpty) return DateTime.parse(startAt);
+    } catch (_) {}
+
+    try {
+      final registeredAt = (ticketMap['registered_at'] ?? '').toString();
+      if (registeredAt.isNotEmpty) return DateTime.parse(registeredAt);
+    } catch (_) {}
+
+    try {
+      final downloadedAt = (ticketMap['downloaded_at_local'] ?? '').toString();
+      if (downloadedAt.isNotEmpty) return DateTime.parse(downloadedAt);
+    } catch (_) {}
+
+    return DateTime.fromMillisecondsSinceEpoch(0);
+  }
+
+  List<Map<String, dynamic>> _readOfflineTickets(
+    SharedPreferences prefs,
+    String userId,
+  ) {
+    if (userId.isEmpty) return <Map<String, dynamic>>[];
+
+    final rows = prefs.getStringList('$_downloadedTicketKeyPrefix$userId') ?? <String>[];
+    final parsed = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      try {
+        final decoded = jsonDecode(row);
+        if (decoded is! Map) continue;
+        final ticket = Map<String, dynamic>.from(decoded);
+        ticket['local_cached'] = true;
+        parsed.add(ticket);
+      } catch (_) {
+        // Skip malformed cached tickets safely.
+      }
+    }
+    return parsed;
+  }
+
+  List<Map<String, dynamic>> _mergeTickets(
+    List<Map<String, dynamic>> online,
+    List<Map<String, dynamic>> offline,
+  ) {
+    final merged = <String, Map<String, dynamic>>{};
+    int fallback = 0;
+
+    for (final ticket in offline) {
+      final normalized = Map<String, dynamic>.from(ticket);
+      final key = _ticketUniqueKey(normalized).isNotEmpty
+          ? _ticketUniqueKey(normalized)
+          : 'offline_${fallback++}';
+      normalized['local_cached'] = true;
+      merged[key] = normalized;
+    }
+
+    for (final ticket in online) {
+      final normalized = Map<String, dynamic>.from(ticket);
+      final key = _ticketUniqueKey(normalized).isNotEmpty
+          ? _ticketUniqueKey(normalized)
+          : 'online_${fallback++}';
+      final alreadyOffline = merged.containsKey(key);
+      normalized['local_cached'] = alreadyOffline || normalized['local_cached'] == true;
+      merged[key] = normalized;
+    }
+
+    final list = merged.values.toList();
+    list.sort((a, b) => _extractSortDate(b).compareTo(_extractSortDate(a)));
+    return list;
   }
 
   @override
@@ -48,8 +177,7 @@ class _StudentTicketsState extends State<StudentTickets> {
         ),
       ),
       body: _isLoading
-          ? const Center(
-              child: CircularProgressIndicator(color: Color(0xFF7F1D1D)))
+          ? const Center(child: PulseConnectLoader())
           : _tickets.isEmpty
               ? _buildEmptyState()
               : RefreshIndicator(
@@ -96,157 +224,290 @@ class _StudentTicketsState extends State<StudentTickets> {
     final event = ticket['events'] as Map<String, dynamic>? ?? {};
     final title = event['title'] as String? ?? 'Event';
     final startAt = event['start_at'] as String?;
-    final location = event['location'] as String? ?? '';
-    final ticketId = ticket['id']?.toString() ?? '';
-    final status = ticket['status'] as String? ?? 'registered';
+    final endAt = event['end_at'] as String?;
+    final location = event['location'] as String? ?? 'No Venue';
+    final eventType = event['event_type'] as String? ?? 'Event';
+    final isLocalCached = ticket['local_cached'] == true;
+    final ticketData = ticket['tickets'];
+    final ticketId = ticketData is List && ticketData.isNotEmpty
+        ? ticketData[0]['id']?.toString() ?? ''
+        : ticketData is Map ? ticketData['id']?.toString() ?? '' : '';
 
-    DateTime? startDate;
+    DateTime? startDate, endDate;
     if (startAt != null) {
-      try { startDate = DateTime.parse(startAt); } catch (_) {}
+      try { startDate = DateTime.parse(startAt).toLocal(); } catch (_) {}
+    }
+    if (endAt != null) {
+      try { endDate = DateTime.parse(endAt).toLocal(); } catch (_) {}
     }
 
+    final ticketIdDisplay = ticketId.length > 8
+        ? ticketId.substring(0, 8).toUpperCase()
+        : ticketId.toUpperCase();
+
+    final Color primaryColor = const Color(0xFF7F1D1D); // Maroon
+    final Color accentColor = const Color(0xFFD4A843); // Gold
+
     return GestureDetector(
-      onTap: () {
-        Navigator.push(
+      onTap: () async {
+        await Navigator.push(
           context,
           MaterialPageRoute(
             builder: (_) => StudentTicketView(ticket: ticket),
           ),
         );
+        _loadTickets();
       },
       child: Container(
-        margin: const EdgeInsets.only(bottom: 14),
+        margin: const EdgeInsets.only(bottom: 20),
+        height: 188,
         decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: Colors.grey.shade200),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.04),
-              blurRadius: 10,
-              offset: const Offset(0, 4),
+              color: primaryColor.withOpacity(0.3),
+              blurRadius: 20,
+              offset: const Offset(0, 10),
             ),
           ],
         ),
-        child: Column(
-          children: [
-            // Ticket Header — Maroon
-            Container(
-              padding: const EdgeInsets.all(16),
-              decoration: const BoxDecoration(
-                color: Color(0xFF7F1D1D),
-                borderRadius: BorderRadius.vertical(top: Radius.circular(19)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.confirmation_num_rounded,
-                      color: Color(0xFFD4A843), size: 22),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      title,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w700,
-                        fontSize: 15,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: _getStatusColor(status).withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      status.toUpperCase(),
-                      style: TextStyle(
-                        color: _getStatusColor(status),
-                        fontWeight: FontWeight.w800,
-                        fontSize: 10,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-            // Dashed separator
-            Row(
-              children: List.generate(
-                40,
-                (i) => Expanded(
-                  child: Container(
-                    height: 1,
-                    color: i.isEven ? Colors.grey.shade300 : Colors.transparent,
+        child: ClipPath(
+          clipper: TicketClipper(),
+          child: Stack(
+            children: [
+              // Shiny Glossy Background
+              Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      primaryColor,
+                      const Color(0xFFA52A2A), // Lighter Maroon/Brown
+                      primaryColor.withBlue(40), // Brighter variant
+                      primaryColor,
+                    ],
+                    stops: const [0.0, 0.4, 0.6, 1.0],
                   ),
                 ),
               ),
-            ),
 
-            // Ticket Body
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  // QR Mini Preview
-                  Container(
-                    padding: const EdgeInsets.all(6),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      border: Border.all(color: Colors.grey.shade200),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: QrImageView(
-                      data: 'PULSE-$ticketId',
-                      version: QrVersions.auto,
-                      size: 64,
-                      eyeStyle: const QrEyeStyle(
-                        eyeShape: QrEyeShape.square,
-                        color: Color(0xFF7F1D1D),
-                      ),
-                      dataModuleStyle: const QrDataModuleStyle(
-                        dataModuleShape: QrDataModuleShape.square,
-                        color: Color(0xFF7F1D1D),
+              // Diagonal Shine Overlay
+              Positioned.fill(
+                child: Opacity(
+                  opacity: 0.1,
+                  child: Container(
+                    decoration: const BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment(-1.0, -1.0),
+                        end: Alignment(1.0, 1.0),
+                        colors: [
+                          Colors.transparent,
+                          Colors.white,
+                          Colors.transparent,
+                        ],
+                        stops: [0.45, 0.5, 0.55],
                       ),
                     ),
                   ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        if (startDate != null)
-                          Row(
+                ),
+              ),
+
+              // Content Row
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 0),
+                child: Row(
+                  children: [
+                    // Left Side: Event Info
+                    Expanded(
+                      flex: 65,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 16, 12, 16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w900,
+                                fontSize: 20,
+                                letterSpacing: -0.5,
+                                shadows: [
+                                  Shadow(color: Colors.black26, offset: Offset(0, 2), blurRadius: 4),
+                                ],
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            const SizedBox(height: 4),
+                            Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    eventType.toUpperCase(),
+                                    style: TextStyle(
+                                      color: accentColor,
+                                      fontWeight: FontWeight.w900,
+                                      fontSize: 12,
+                                      letterSpacing: 1.2,
+                                      shadows: [
+                                        Shadow(color: accentColor.withOpacity(0.3), offset: const Offset(0, 1), blurRadius: 2),
+                                      ],
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                if (isLocalCached) ...[
+                                  const SizedBox(width: 8),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withValues(alpha: 0.18),
+                                      borderRadius: BorderRadius.circular(999),
+                                      border: Border.all(color: Colors.white.withValues(alpha: 0.22)),
+                                    ),
+                                    child: const Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.download_done_rounded, size: 11, color: Colors.white),
+                                        SizedBox(width: 3),
+                                        Text(
+                                          'Offline',
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 9,
+                                            fontWeight: FontWeight.w800,
+                                            letterSpacing: 0.3,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
+                            const Spacer(),
+                            // Date/Time
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: Colors.white.withOpacity(0.1)),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.calendar_today_rounded, size: 16, color: Colors.white),
+                                  const SizedBox(width: 8),
+                                  Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        startDate != null ? DateFormat('MMM dd, yyyy').format(startDate) : 'TBA',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w800,
+                                        ),
+                                      ),
+                                      if (startDate != null && endDate != null)
+                                        Text(
+                                          '${DateFormat('hh:mm a').format(startDate)} - ${DateFormat('hh:mm a').format(endDate)}',
+                                          style: TextStyle(
+                                            color: Colors.white.withOpacity(0.8),
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            // Location
+                            Row(
+                              children: [
+                                Icon(Icons.location_on_rounded, size: 16, color: accentColor),
+                                const SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    location,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                    // Vertical Divider
+                    _buildDashedDivider(),
+
+                    // Right Side: QR Code
+                    Expanded(
+                      flex: 35,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              Icon(Icons.calendar_today_rounded,
-                                  size: 13, color: Colors.grey.shade500),
-                              const SizedBox(width: 6),
-                              Text(
-                                DateFormat('MMM dd, yyyy').format(startDate),
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.grey.shade700,
+                              Container(
+                                padding: const EdgeInsets.all(6),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(12),
+                                  boxShadow: [
+                                    BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 8, offset: const Offset(0, 4)),
+                                  ],
+                                ),
+                                child: QrImageView(
+                                  data: 'PULSE-$ticketId',
+                                  version: QrVersions.auto,
+                                  size: 75,
+                                  eyeStyle: QrEyeStyle(
+                                    eyeShape: QrEyeShape.square,
+                                    color: primaryColor,
+                                  ),
+                                  dataModuleStyle: QrDataModuleStyle(
+                                    dataModuleShape: QrDataModuleShape.square,
+                                    color: primaryColor,
+                                  ),
                                 ),
                               ),
-                            ],
-                          ),
-                        if (location.isNotEmpty) ...[
-                          const SizedBox(height: 6),
-                          Row(
-                            children: [
-                              Icon(Icons.location_on_outlined,
-                                  size: 13, color: Colors.grey.shade500),
-                              const SizedBox(width: 6),
-                              Expanded(
+                              const SizedBox(height: 10),
+                              Text(
+                                'TICKET ID',
+                                style: TextStyle(
+                                  fontSize: 10, 
+                                  color: Colors.white.withOpacity(0.7),
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              SizedBox(
+                                width: 100,
                                 child: Text(
-                                  location,
-                                  style: TextStyle(
+                                  ticketIdDisplay,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    color: Colors.white,
                                     fontSize: 12,
-                                    color: Colors.grey.shade600,
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 0.5,
                                   ),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
@@ -254,37 +515,82 @@ class _StudentTicketsState extends State<StudentTickets> {
                               ),
                             ],
                           ),
-                        ],
-                        const SizedBox(height: 8),
-                        Text(
-                          'Tap to view full ticket',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: const Color(0xFF7F1D1D).withValues(alpha: 0.8),
-                            fontWeight: FontWeight.w700,
-                          ),
                         ),
-                      ],
+                      ),
                     ),
-                  ),
-                  Icon(Icons.chevron_right_rounded,
-                      color: Colors.grey.shade400),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Color _getStatusColor(String status) {
-    switch (status) {
-      case 'checked_in':
-        return Colors.green.shade600;
-      case 'completed':
-        return const Color(0xFFD4A843);
-      default:
-        return Colors.white;
-    }
-  }}
+  Widget _buildDashedDivider() {
+    return Column(
+      children: List.generate(
+        15,
+        (index) => Expanded(
+          child: Container(
+            width: 1.5,
+            margin: const EdgeInsets.symmetric(vertical: 3),
+            color: index.isEven ? Colors.white.withOpacity(0.2) : Colors.transparent,
+          ),
+        ),
+      ),
+    );
+  }
+
+}
+
+class TicketClipper extends CustomClipper<Path> {
+  @override
+  Path getClip(Size size) {
+    Path path = Path();
+    double radius = 16.0;
+    double cutoutRadius = 12.0;
+    double cutoutPosition = size.width * 0.65; // Position of the vertical divider
+
+    // Main Ticket Path
+    path.moveTo(radius, 0);
+    
+    // Top border and cutout
+    path.lineTo(cutoutPosition - cutoutRadius, 0);
+    path.arcToPoint(
+      Offset(cutoutPosition + cutoutRadius, 0),
+      radius: Radius.circular(cutoutRadius),
+      clockwise: false,
+    );
+    path.lineTo(size.width - radius, 0);
+    
+    // Top-right corner
+    path.arcToPoint(Offset(size.width, radius), radius: Radius.circular(radius));
+    path.lineTo(size.width, size.height - radius);
+    
+    // Bottom-right corner
+    path.arcToPoint(Offset(size.width - radius, size.height), radius: Radius.circular(radius));
+    
+    // Bottom border and cutout
+    path.lineTo(cutoutPosition + cutoutRadius, size.height);
+    path.arcToPoint(
+      Offset(cutoutPosition - cutoutRadius, size.height),
+      radius: Radius.circular(cutoutRadius),
+      clockwise: false,
+    );
+    path.lineTo(radius, size.height);
+    
+    // Bottom-left corner
+    path.arcToPoint(Offset(0, size.height - radius), radius: Radius.circular(radius));
+    path.lineTo(0, radius);
+    
+    // Top-left corner
+    path.arcToPoint(Offset(radius, 0), radius: Radius.circular(radius));
+    
+    return path;
+  }
+
+  @override
+  bool shouldReclip(CustomClipper<Path> oldClipper) => false;
+}

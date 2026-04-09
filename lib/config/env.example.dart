@@ -4,4 +4,7 @@ class Env {
   static const String supabaseUrl = 'https://YOUR_PROJECT.supabase.co';
   
   static const String supabaseAnonKey = 'YOUR_SUPABASE_ANON_KEY';
+
+  // Gemini API key used by AI Enhance Description in mobile app.
+  static const String geminiApiKey = 'YOUR_GEMINI_API_KEY';
 }

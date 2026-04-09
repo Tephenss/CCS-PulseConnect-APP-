@@ -4,6 +4,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
 import '../../services/ai_service.dart';
+import '../../widgets/custom_loader.dart';
 
 class TeacherCreateEvent extends StatefulWidget {
   const TeacherCreateEvent({super.key});
@@ -701,11 +702,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                 borderRadius: BorderRadius.circular(16),
                 child: Center(
                   child: _isAiProcessing 
-                    ? const SizedBox(
-                        width: 20, 
-                        height: 20, 
-                        child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white),
-                      )
+                    ? const PulseConnectLoader(size: 20, color: Colors.white)
                     : Row(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
@@ -1105,7 +1102,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
               shadowColor: const Color(0xFF064E3B).withValues(alpha: 0.4),
             ),
             child: _isSubmitting
-                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                ? const PulseConnectLoader(size: 20, color: Colors.white)
                 : Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [

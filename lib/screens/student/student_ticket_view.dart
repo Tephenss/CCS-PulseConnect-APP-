@@ -1,14 +1,212 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
 
-class StudentTicketView extends StatelessWidget {
+class StudentTicketView extends StatefulWidget {
   final Map<String, dynamic> ticket;
 
   const StudentTicketView({super.key, required this.ticket});
 
   @override
+  State<StudentTicketView> createState() => _StudentTicketViewState();
+}
+
+class _StudentTicketViewState extends State<StudentTicketView> {
+  static const String _downloadedTicketKeyPrefix = 'downloaded_tickets_';
+  bool _isDownloading = false;
+  bool _isAlreadyDownloaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDownloadedState();
+  }
+
+  Future<void> _loadDownloadedState() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id') ?? 'guest';
+      final storageKey = '$_downloadedTicketKeyPrefix$userId';
+      final currentKey = _ticketUniqueKey(widget.ticket);
+
+      if (currentKey.isEmpty) {
+        if (mounted) setState(() => _isAlreadyDownloaded = false);
+        return;
+      }
+
+      final rows = prefs.getStringList(storageKey) ?? <String>[];
+      bool found = false;
+      for (final row in rows) {
+        try {
+          final decoded = jsonDecode(row);
+          if (decoded is! Map) continue;
+          final map = Map<String, dynamic>.from(decoded);
+          if (_ticketUniqueKey(map) == currentKey) {
+            found = true;
+            break;
+          }
+        } catch (_) {
+          // Ignore malformed rows.
+        }
+      }
+
+      if (mounted) {
+        setState(() => _isAlreadyDownloaded = found);
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _isAlreadyDownloaded = false);
+      }
+    }
+  }
+
+  String _ticketUniqueKey(Map<String, dynamic> ticketMap) {
+    final ticketData = ticketMap['tickets'];
+    final ticketId = ticketData is List && ticketData.isNotEmpty
+        ? (ticketData[0]['id'] ?? '').toString()
+        : ticketData is Map
+            ? (ticketData['id'] ?? '').toString()
+            : '';
+    if (ticketId.isNotEmpty) return 'ticket:$ticketId';
+
+    final event = ticketMap['events'];
+    final eventId = event is Map ? (event['id'] ?? '').toString() : '';
+    if (eventId.isNotEmpty) return 'event:$eventId';
+    return '';
+  }
+
+  Future<void> _downloadTicket(String ticketIdDisplay) async {
+    if (_isDownloading) return;
+    if (_isAlreadyDownloaded) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Ticket already saved offline.')),
+      );
+      return;
+    }
+    if (ticketIdDisplay.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Ticket is not available yet.')),
+      );
+      return;
+    }
+
+    setState(() => _isDownloading = true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id') ?? 'guest';
+      final storageKey = '$_downloadedTicketKeyPrefix$userId';
+
+      final currentTicket = Map<String, dynamic>.from(widget.ticket);
+      currentTicket['local_cached'] = true;
+      currentTicket['downloaded_at_local'] = DateTime.now().toIso8601String();
+      final currentKey = _ticketUniqueKey(currentTicket);
+
+      final existingRows = prefs.getStringList(storageKey) ?? <String>[];
+      final updatedRows = <String>[];
+      bool replaced = false;
+
+      for (final row in existingRows) {
+        try {
+          final decoded = jsonDecode(row);
+          if (decoded is! Map) {
+            continue;
+          }
+          final decodedMap = Map<String, dynamic>.from(decoded);
+          final decodedKey = _ticketUniqueKey(decodedMap);
+          if (!replaced && currentKey.isNotEmpty && decodedKey == currentKey) {
+            updatedRows.add(jsonEncode(currentTicket));
+            replaced = true;
+          } else {
+            updatedRows.add(jsonEncode(decodedMap));
+          }
+        } catch (_) {
+          // Skip malformed cached rows safely.
+        }
+      }
+
+      if (!replaced) {
+        updatedRows.insert(0, jsonEncode(currentTicket));
+      }
+
+      await prefs.setStringList(storageKey, updatedRows.take(150).toList());
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Ticket saved in app. You can open it offline in My Tickets.'),
+        ),
+      );
+      setState(() => _isAlreadyDownloaded = true);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to save ticket offline: $e')),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isDownloading = false);
+      }
+    }
+  }
+
+  Widget _buildDownloadActionIcon() {
+    if (_isDownloading) {
+      return const SizedBox(
+        key: ValueKey('loading-icon'),
+        width: 18,
+        height: 18,
+        child: CircularProgressIndicator(
+          strokeWidth: 2.2,
+          valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFD4A843)),
+        ),
+      );
+    }
+
+    if (_isAlreadyDownloaded) {
+      return const Icon(
+        Icons.download_done_rounded,
+        key: ValueKey('saved-icon'),
+        size: 18,
+        color: Color(0xFFD4A843),
+      );
+    }
+
+    return const Icon(
+      Icons.download_rounded,
+      key: ValueKey('default-icon'),
+      size: 18,
+    );
+  }
+
+  Widget _buildDownloadActionLabel() {
+    if (_isAlreadyDownloaded) {
+      return const Text(
+        'SAVED OFFLINE',
+        key: ValueKey('saved-label'),
+        style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 0.4),
+      );
+    }
+
+    if (_isDownloading) {
+      return const Text(
+        'SAVING OFFLINE...',
+        key: ValueKey('loading-label'),
+        style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 0.4),
+      );
+    }
+
+    return const Text(
+      'DOWNLOAD TICKET',
+      key: ValueKey('default-label'),
+      style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.35),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final ticket = widget.ticket;
     final event = ticket['events'] as Map<String, dynamic>? ?? {};
     final title = event['title'] as String? ?? 'Event';
     final startAt = event['start_at'] as String?;
@@ -92,170 +290,221 @@ class StudentTicketView extends StatelessWidget {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // Top Part (Main Ticket Info)
-                        Container(
-                          padding: const EdgeInsets.all(28),
-                          decoration: const BoxDecoration(
-                            color: Color(0xFF4A0404), // Dark Maroon
-                            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(20),
+                          child: Stack(
                             children: [
-                              // Header (Logo and Type)
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Row(
-                                    children: [
-                                      const Icon(Icons.confirmation_num, color: Color(0xFFD4A843), size: 20),
-                                      const SizedBox(width: 8),
-                                      const Text(
-                                        'PULSECONNECT',
-                                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: -0.5),
-                                      ),
+                          // Shiny Background Layer (Full Height)
+                          Positioned.fill(
+                            child: Container(
+                              decoration: const BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                  colors: [
+                                    Color(0xFF7F1D1D),
+                                    Color(0xFFA52A2A),
+                                    Color(0xFF8B0000),
+                                    Color(0xFF7F1D1D),
+                                  ],
+                                  stops: [0.0, 0.4, 0.6, 1.0],
+                                ),
+                              ),
+                            ),
+                          ),
+
+                          // Diagonal Shine Overlay
+                          Positioned.fill(
+                            child: Opacity(
+                              opacity: 0.12,
+                              child: Container(
+                                decoration: const BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment(-1.0, -1.0),
+                                    end: Alignment(1.0, 1.0),
+                                    colors: [
+                                      Colors.transparent,
+                                      Colors.white,
+                                      Colors.transparent,
                                     ],
+                                    stops: [0.45, 0.5, 0.55],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+
+                          // Main Content
+                          Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              // Top Part (Main Ticket Info)
+                              Container(
+                                padding: const EdgeInsets.all(28),
+                                decoration: BoxDecoration(
+                                  border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05))),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    // Header
+                                    Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            const Icon(Icons.confirmation_num, color: Color(0xFFD4A843), size: 20),
+                                            const SizedBox(width: 8),
+                                            const Text(
+                                              'PULSECONNECT',
+                                              style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: -0.5),
+                                            ),
+                                          ],
+                                        ),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            border: Border.all(color: const Color(0xFFD4A843), width: 1.5),
+                                            borderRadius: BorderRadius.circular(20),
+                                          ),
+                                          child: const Text('EVENT PASS', style: TextStyle(color: Color(0xFFD4A843), fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 1.2)),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 36),
+                                    
+                                    // Title
+                                    Text(
+                                      title.toUpperCase(),
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 28,
+                                        height: 1.1,
+                                        letterSpacing: -0.5,
+                                        shadows: [Shadow(color: Colors.black38, offset: Offset(0, 2), blurRadius: 4)],
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      'CCS Exclusive Event'.toUpperCase(),
+                                      style: TextStyle(
+                                        color: const Color(0xFFD4A843).withOpacity(0.8),
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: 1.0,
+                                      ),
+                                    ),
+                                    
+                                    const SizedBox(height: 36),
+                                    
+                                    Row(
+                                      children: [
+                                        Expanded(child: _buildTicketField('DATE', startDate != null ? DateFormat('MMM dd, yyyy').format(startDate) : 'TBA')),
+                                        Expanded(child: _buildTicketField('TIME', timeString)),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 24),
+                                    _buildTicketField('VENUE', location),
+                                  ],
+                                ),
+                              ),
+
+                              // Perforation Line
+                              Row(
+                                children: [
+                                  Container(
+                                    width: 14, height: 28,
+                                    decoration: const BoxDecoration(
+                                      color: Color(0xFFF8F9FA), 
+                                      borderRadius: BorderRadius.horizontal(right: Radius.circular(14)),
+                                    ),
+                                  ),
+                                  Expanded(
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                                      child: LayoutBuilder(
+                                        builder: (context, constraints) {
+                                          return Flex(
+                                            direction: Axis.horizontal,
+                                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                            children: List.generate((constraints.constrainWidth() / 12).floor(), (index) {
+                                              return Container(width: 6, height: 2, color: Colors.white.withValues(alpha: 0.2));
+                                            }),
+                                          );
+                                        },
+                                      ),
+                                    ),
                                   ),
                                   Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                    decoration: BoxDecoration(
-                                      border: Border.all(color: const Color(0xFFD4A843), width: 1.5),
-                                      borderRadius: BorderRadius.circular(20),
+                                    width: 14, height: 28,
+                                    decoration: const BoxDecoration(
+                                      color: Color(0xFFF8F9FA), 
+                                      borderRadius: BorderRadius.horizontal(left: Radius.circular(14)),
                                     ),
-                                    child: const Text('EVENT PASS', style: TextStyle(color: Color(0xFFD4A843), fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 1.2)),
                                   ),
                                 ],
                               ),
-                              const SizedBox(height: 36),
-                              
-                              // Title
-                              Text(
-                                title.toUpperCase(),
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w900,
-                                  fontSize: 26,
-                                  height: 1.1,
-                                  letterSpacing: -0.5,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                'CCS Exclusive Event',
-                                style: TextStyle(
-                                  color: Colors.white.withValues(alpha: 0.7),
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                              
-                              const SizedBox(height: 36),
-                              
-                              Row(
-                                children: [
-                                  Expanded(child: _buildTicketField('DATE', startDate != null ? DateFormat('MMM dd, yyyy').format(startDate) : 'TBA')),
-                                  Expanded(child: _buildTicketField('TIME', timeString)),
-                                ],
-                              ),
-                              const SizedBox(height: 24),
-                              _buildTicketField('VENUE', location),
-                            ],
-                          ),
-                        ),
-                        
-                        // Perforation Line
-                        Container(
-                          color: const Color(0xFF4A0404),
-                          child: Row(
-                            children: [
+
+                              // Bottom Part (Stub + QR)
                               Container(
-                                width: 14, height: 28,
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFFF8F9FA), // match scaffold background
-                                  borderRadius: BorderRadius.horizontal(right: Radius.circular(14)),
-                                ),
-                              ),
-                              Expanded(
-                                child: Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                                  child: LayoutBuilder(
-                                    builder: (context, constraints) {
-                                      return Flex(
-                                        direction: Axis.horizontal,
-                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                        children: List.generate((constraints.constrainWidth() / 12).floor(), (index) {
-                                          return Container(width: 6, height: 2, color: Colors.white.withValues(alpha: 0.15));
-                                        }),
-                                      );
-                                    },
-                                  ),
-                                ),
-                              ),
-                              Container(
-                                width: 14, height: 28,
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFFF8F9FA), // match scaffold background
-                                  borderRadius: BorderRadius.horizontal(left: Radius.circular(14)),
+                                width: double.infinity,
+                                padding: const EdgeInsets.fromLTRB(28, 14, 28, 28),
+                                child: Column(
+                                  children: [
+                                    // QR Code
+                                    Container(
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white, 
+                                        borderRadius: BorderRadius.circular(16),
+                                        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10, offset: const Offset(0, 5))],
+                                      ),
+                                      child: QrImageView(
+                                        data: 'PULSE-$ticketId',
+                                        version: QrVersions.auto,
+                                        size: 140,
+                                        eyeStyle: const QrEyeStyle(eyeShape: QrEyeShape.square, color: Color(0xFF7F1D1D)),
+                                        dataModuleStyle: const QrDataModuleStyle(dataModuleShape: QrDataModuleShape.square, color: Color(0xFF7F1D1D)),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 24),
+                                    // Ticket ID Placeholder
+                                    Column(
+                                      crossAxisAlignment: CrossAxisAlignment.center,
+                                      children: [
+                                        Text(
+                                          'TICKET ID',
+                                          style: TextStyle(
+                                            color: Colors.white.withValues(alpha: 0.5),
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w800,
+                                            letterSpacing: 2.0,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          ticketIdDisplay,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontFamily: 'monospace',
+                                            fontSize: 18,
+                                            fontWeight: FontWeight.w900,
+                                            letterSpacing: 2,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
                           ),
-                        ),
-                        
-                        // Bottom Part (Stub + QR)
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(28),
-                          decoration: const BoxDecoration(
-                            color: Color(0xFF7F1D1D), // Slightly lighter maroon for the bottom stub
-                            borderRadius: BorderRadius.vertical(bottom: Radius.circular(20)),
-                          ),
-                          child: Column(
-                            children: [
-                              // QR Code
-                              Container(
-                                padding: const EdgeInsets.all(12),
-                                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16)),
-                                child: QrImageView(
-                                  data: 'PULSE-$ticketId',
-                                  version: QrVersions.auto,
-                                  size: 140,
-                                  eyeStyle: const QrEyeStyle(eyeShape: QrEyeShape.square, color: Color(0xFF7F1D1D)),
-                                  dataModuleStyle: const QrDataModuleStyle(dataModuleShape: QrDataModuleShape.square, color: Color(0xFF7F1D1D)),
-                                ),
-                              ),
-                              const SizedBox(height: 24),
-                              // Ticket ID Placeholder
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.center,
-                                children: [
-                                  Text(
-                                    'TICKET ID',
-                                    style: TextStyle(
-                                      color: Colors.white.withValues(alpha: 0.5),
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.w600,
-                                      letterSpacing: 1.5,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    ticketIdDisplay,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontFamily: 'monospace',
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.w700,
-                                      letterSpacing: 2,
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ),
-                        ),
+                        ],
+                      ),
+                    ),
                         
                         // ── Attendance History Section ──
                         const SizedBox(height: 20),
@@ -360,17 +609,36 @@ class StudentTicketView extends StatelessWidget {
                 child: SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
-                    onPressed: () {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Download feature coming soon')),
-                      );
-                    },
-                    icon: const Icon(Icons.download_rounded),
-                    label: const Text('DOWNLOAD TICKET', style: TextStyle(fontWeight: FontWeight.w700)),
+                    onPressed: (_isDownloading || _isAlreadyDownloaded)
+                        ? null
+                        : () => _downloadTicket(ticketIdDisplay),
+                    icon: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220),
+                      switchInCurve: Curves.easeOutCubic,
+                      switchOutCurve: Curves.easeInCubic,
+                      child: _buildDownloadActionIcon(),
+                    ),
+                    label: AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 220),
+                      switchInCurve: Curves.easeOutCubic,
+                      switchOutCurve: Curves.easeInCubic,
+                      child: _buildDownloadActionLabel(),
+                    ),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF7F1D1D),
+                      disabledBackgroundColor: const Color(0xFF7F1D1D),
                       foregroundColor: Colors.white,
+                      disabledForegroundColor: _isAlreadyDownloaded
+                          ? const Color(0xFFD4A843)
+                          : Colors.white,
+                      elevation: _isDownloading ? 0 : 2,
                       padding: const EdgeInsets.symmetric(vertical: 18),
+                      side: BorderSide(
+                        color: _isAlreadyDownloaded
+                            ? const Color(0xFFD4A843).withValues(alpha: 0.55)
+                            : Colors.transparent,
+                        width: 1.0,
+                      ),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(16),
                       ),

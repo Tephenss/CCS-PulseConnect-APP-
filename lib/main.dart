@@ -39,7 +39,7 @@ void main() async {
   runApp(PulseConnectApp(isLoggedIn: isLoggedIn, userRole: role));
 }
 
-class PulseConnectApp extends StatelessWidget {
+class PulseConnectApp extends StatefulWidget {
   final bool isLoggedIn;
   final String userRole;
 
@@ -47,66 +47,94 @@ class PulseConnectApp extends StatelessWidget {
 
   const PulseConnectApp({super.key, required this.isLoggedIn, required this.userRole});
 
+  static _PulseConnectAppState of(BuildContext context) =>
+      context.findAncestorStateOfType<_PulseConnectAppState>()!;
+
+  @override
+  State<PulseConnectApp> createState() => _PulseConnectAppState();
+}
+
+class _PulseConnectAppState extends State<PulseConnectApp> {
+  late String _currentRole;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentRole = widget.userRole;
+  }
+
+  void updateTheme(String role) {
+    if (_currentRole != role) {
+      setState(() => _currentRole = role);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      navigatorKey: navigatorKey,
+      navigatorKey: PulseConnectApp.navigatorKey,
       title: 'CCS PulseConnect',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF064E3B),
-          primary: const Color(0xFF064E3B),
-          secondary: const Color(0xFFD4A843),
-          surface: Colors.white,
-          brightness: Brightness.light,
-        ),
-        textTheme: GoogleFonts.interTextTheme(),
-        scaffoldBackgroundColor: const Color(0xFFF8F9FA),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF064E3B),
+      theme: _getTheme(_currentRole),
+      home: widget.isLoggedIn 
+          ? (_currentRole.toLowerCase() == 'teacher' ? const TeacherHome() : const StudentHome()) 
+          : const WelcomeScreen(),
+    );
+  }
+
+  ThemeData _getTheme(String role) {
+    final bool isStudent = role.toLowerCase() == 'student';
+    final Color primaryColor = isStudent ? const Color(0xFF9F1239) : const Color(0xFF064E3B);
+    final Color secondaryColor = const Color(0xFFD4A843);
+    
+    return ThemeData(
+      useMaterial3: true,
+      colorScheme: ColorScheme.fromSeed(
+        seedColor: primaryColor,
+        primary: primaryColor,
+        secondary: secondaryColor,
+        surface: Colors.white,
+        brightness: Brightness.light,
+      ),
+      textTheme: GoogleFonts.interTextTheme(),
+      scaffoldBackgroundColor: const Color(0xFFF8F9FA),
+      appBarTheme: AppBarTheme(
+        backgroundColor: primaryColor,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        centerTitle: true,
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: primaryColor,
           foregroundColor: Colors.white,
-          elevation: 0,
-          centerTitle: true,
-        ),
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: const Color(0xFF064E3B),
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-            textStyle: const TextStyle(
-              fontSize: 16,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: Colors.white,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
-          border: OutlineInputBorder(
+          padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+          shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(14),
-            borderSide: BorderSide(color: Colors.grey.shade300),
           ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: BorderSide(color: Colors.grey.shade300),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide:
-                const BorderSide(color: Color(0xFF064E3B), width: 2),
+          textStyle: const TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w700,
           ),
         ),
       ),
-      home: isLoggedIn 
-          ? (userRole == 'teacher' ? const TeacherHome() : const StudentHome()) 
-          : const WelcomeScreen(),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: Colors.white,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: Colors.grey.shade300),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: Colors.grey.shade300),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: primaryColor, width: 2),
+        ),
+      ),
     );
   }
 }

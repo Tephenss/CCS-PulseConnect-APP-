@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../../services/auth_service.dart';
@@ -9,6 +11,10 @@ import 'student_profile.dart';
 import 'student_scan.dart';
 import '../notifications_screen.dart';
 import '../../services/notification_service.dart';
+import '../../widgets/animated_greeting_text.dart';
+import '../../widgets/card_swap_widget.dart';
+import '../../widgets/shiny_text.dart';
+import '../../widgets/custom_loader.dart';
 
 class StudentHome extends StatefulWidget {
   const StudentHome({super.key});
@@ -27,6 +33,9 @@ class _StudentHomeState extends State<StudentHome> {
   int _unreadCount = 0;
   DateTime _calendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
   final _notifService = NotificationService();
+  final PageController _headerPageController = PageController();
+  int _currentHeaderSlide = 0;
+  Timer? _notifTimer;
 
   // Section Selection Gate
   List<Map<String, dynamic>> _sections = [];
@@ -38,6 +47,24 @@ class _StudentHomeState extends State<StudentHome> {
   void initState() {
     super.initState();
     _loadData();
+    _startNotifTimer();
+  }
+
+  void _startNotifTimer() {
+    _notifTimer = Timer.periodic(const Duration(seconds: 15), (timer) {
+      if (mounted && _currentIndex == 0) {
+        _refreshUnreadCount();
+      }
+    });
+  }
+
+  Future<void> _refreshUnreadCount() async {
+    try {
+      final unread = await _notifService.getUnreadCount();
+      if (mounted && unread != _unreadCount) {
+        setState(() => _unreadCount = unread);
+      }
+    } catch (_) {}
   }
 
   Future<void> _loadData() async {
@@ -64,6 +91,13 @@ class _StudentHomeState extends State<StudentHome> {
   }
 
   @override
+  void dispose() {
+    _notifTimer?.cancel();
+    _headerPageController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     // Note: Tab 2 (Index 2) is now the StudentScanScreen
     final screens = [
@@ -71,7 +105,7 @@ class _StudentHomeState extends State<StudentHome> {
       const StudentEvents(),
       const StudentScanScreen(), 
       const StudentTickets(),
-      StudentProfile(user: _user),
+      StudentProfile(user: _user, onUpdate: _loadData),
     ];
 
     final bool needsSection = _user != null && _user!['section_id'] == null;
@@ -82,44 +116,90 @@ class _StudentHomeState extends State<StudentHome> {
         if (didPop) return;
         if (_currentIndex != 0) {
           setState(() => _currentIndex = 0);
-        } else {
-          // If already at Home tab, we could show an exit dialog or do nothing.
-          // For now, let's just do nothing to prevent accidental closure.
-          // In a real app, you might show a "Press again to exit" toast.
         }
       },
       child: Scaffold(
         backgroundColor: const Color(0xFFF9FAFB),
-        body: _isLoading
-            ? const Center(
-                child: CircularProgressIndicator(color: Color(0xFF7F1D1D)))
-            : (needsSection ? _buildSectionSelection() : screens[_currentIndex]),
-        bottomNavigationBar: needsSection ? null : Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.04),
-                blurRadius: 20,
-                offset: const Offset(0, -4),
+        body: Stack(
+          children: [
+            _isLoading
+                ? const Center(child: PulseConnectLoader())
+                : AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 400),
+                    switchInCurve: Curves.easeInOut,
+                    switchOutCurve: Curves.easeInOut,
+                    transitionBuilder: (Widget child, Animation<double> animation) {
+                      return FadeTransition(opacity: animation, child: child);
+                    },
+                    child: Container(
+                      key: ValueKey<int>(_currentIndex),
+                      child: (needsSection ? _buildSectionSelection() : screens[_currentIndex]),
+                    ),
+                  ),
+            
+            // New Floating Navigation Bar (Matches user design)
+            if (!_isLoading && !needsSection)
+              Positioned(
+                bottom: 24,
+                left: 20,
+                right: 20,
+                child: Row(
+                  children: [
+                    // Main Nav Pill
+                    Expanded(
+                      child: Container(
+                        height: 64,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        decoration: BoxDecoration(
+                          color: Colors.white, // Solid white for better visibility
+                          borderRadius: BorderRadius.circular(32),
+                          border: Border.all(color: Colors.grey.shade200, width: 1),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.25),
+                              blurRadius: 30,
+                              spreadRadius: 2,
+                              offset: const Offset(0, 12),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly, // More balanced spacing
+                          children: [
+                            _buildNavItem(Icons.home_rounded, 'Home', 0),
+                            _buildNavItem(Icons.event_note_rounded, 'Events', 1),
+                            _buildNavItem(Icons.confirmation_num_rounded, 'Tickets', 3),
+                            _buildNavItem(Icons.person_rounded, 'Profile', 4),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    // Separate QR Button
+                    GestureDetector(
+                      onTap: () => setState(() => _currentIndex = 2),
+                      child: Container(
+                        width: 58,
+                        height: 58,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF7F1D1D), // Theme Color
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: const Color(0xFF7F1D1D).withValues(alpha: 0.4),
+                              blurRadius: 20,
+                              spreadRadius: 1,
+                              offset: const Offset(0, 8),
+                            ),
+                          ],
+                        ),
+                        child: const Icon(Icons.qr_code_scanner_rounded, color: Colors.white, size: 28),
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ],
-          ),
-          child: SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _buildNavItem(Icons.home_rounded, 'Home', 0),
-                  _buildNavItem(Icons.event_note_rounded, 'Events', 1),
-                  _buildScanItem(2), // Floating scan button
-                  _buildNavItem(Icons.confirmation_num_rounded, 'Tickets', 3),
-                  _buildNavItem(Icons.person_rounded, 'Profile', 4),
-                ],
-              ),
-            ),
-          ),
+          ],
         ),
       ),
     );
@@ -264,7 +344,7 @@ class _StudentHomeState extends State<StudentHome> {
                     ),
                   ),
                   child: _isUpdatingSection
-                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      ? const PulseConnectLoader(size: 14)
                       : const Text('Save & Continue', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 ),
               ),
@@ -280,29 +360,31 @@ class _StudentHomeState extends State<StudentHome> {
     return GestureDetector(
       onTap: () => setState(() => _currentIndex = index),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        decoration: BoxDecoration(
-          color: isActive
-              ? const Color(0xFF7F1D1D).withValues(alpha: 0.1)
-              : Colors.transparent,
-          borderRadius: BorderRadius.circular(14),
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+        padding: EdgeInsets.symmetric(
+          horizontal: isActive ? 12 : 8, // Reduced padding to prevent overflow
+          vertical: 8,
         ),
-        child: Column(
+        decoration: BoxDecoration(
+          color: isActive ? const Color(0xFF7F1D1D).withValues(alpha: 0.08) : Colors.transparent,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(
               icon,
               color: isActive ? const Color(0xFF7F1D1D) : const Color(0xFFA1A1AA),
-              size: 24,
+              size: 20, // Reduced icon size
             ),
             if (isActive) ...[
-              const SizedBox(height: 4),
+              const SizedBox(width: 6),
               Text(
                 label,
                 style: const TextStyle(
                   color: Color(0xFF7F1D1D),
-                  fontSize: 10,
+                  fontSize: 11, // Reduced font size
                   fontWeight: FontWeight.w800,
                 ),
               ),
@@ -313,37 +395,7 @@ class _StudentHomeState extends State<StudentHome> {
     );
   }
 
-  Widget _buildScanItem(int index) {
-    return GestureDetector(
-      onTap: () => setState(() => _currentIndex = index),
-      child: Transform.translate(
-        offset: const Offset(0, -10),
-        child: Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: [Color(0xFF047857), Color(0xFF064E3B)], // Emerald to Dark Green
-            ),
-            shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(
-                color: const Color(0xFF064E3B).withValues(alpha: 0.4),
-                blurRadius: 15,
-                offset: const Offset(0, 5),
-              ),
-            ],
-          ),
-          child: const Icon(
-            Icons.qr_code_scanner_rounded,
-            color: Colors.white,
-            size: 28,
-          ),
-        ),
-      ),
-    );
-  }
+  // Removed _buildScanItem as it's replaced by the detached FAB in the Stack
 
   Widget _buildHomeContent() {
     final firstName = _user?['first_name'] as String? ?? 'Student';
@@ -383,23 +435,32 @@ class _StudentHomeState extends State<StudentHome> {
                             height: 50,
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              color: Colors.white.withValues(alpha: 0.15),
-                              border: Border.all(
-                                color: const Color(0xFFD4A843), // Gold Border
-                                width: 2,
-                              ),
-                            ),
-                            child: Center(
-                              child: Text(
-                                firstName.isNotEmpty ? firstName[0].toUpperCase() : 'S',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w800,
-                                  fontSize: 20,
+                                border: Border.all(
+                                  color: const Color(0xFFD4A843), // Gold Border
+                                  width: 2,
                                 ),
+                                image: _user?['photo_url'] != null && (_user?['photo_url'] as String).isNotEmpty
+                                    ? DecorationImage(
+                                        image: (_user?['photo_url'] as String).startsWith('http')
+                                            ? NetworkImage(_user?['photo_url'])
+                                            : FileImage(File(_user?['photo_url'])),
+                                        fit: BoxFit.cover,
+                                      )
+                                    : null,
                               ),
+                              child: _user?['photo_url'] == null || (_user?['photo_url'] as String).isEmpty
+                                ? Center(
+                                    child: Text(
+                                      firstName.isNotEmpty ? firstName[0].toUpperCase() : 'S',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w800,
+                                        fontSize: 20,
+                                      ),
+                                    ),
+                                  )
+                                : null,
                             ),
-                          ),
                         ),
                         const SizedBox(width: 14),
                         // Expanded Column for full-width name support
@@ -416,15 +477,14 @@ class _StudentHomeState extends State<StudentHome> {
                                   letterSpacing: 0.5,
                                 ),
                               ),
-                              Text(
-                                firstName,
+                              AnimatedGreetingText(
+                                text: firstName,
                                 style: const TextStyle(
-                                  color: Colors.white,
                                   fontSize: 22,
                                   fontWeight: FontWeight.w800,
                                 ),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
+                                baseColor: Colors.white,
+                                scanColor: const Color(0xFFFCA5A5), // Soft red/orange glow for Student
                               ),
                             ],
                           ),
@@ -483,8 +543,8 @@ class _StudentHomeState extends State<StudentHome> {
 
                     const SizedBox(height: 28),
 
-                    // Mini Calendar
-                    _buildMiniCalendar(),
+                    // Header Slider (Laptop Animation / Mini Calendar)
+                    _buildHeaderSlider(),
                   ],
                 ),
               ),
@@ -495,7 +555,7 @@ class _StudentHomeState extends State<StudentHome> {
         // Upcoming Events Section
         SliverToBoxAdapter(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 32, 24, 16),
+            padding: const EdgeInsets.fromLTRB(24, 16, 24, 16), // Reduced top padding 
             child: Row(
               children: [
                 const Text(
@@ -562,8 +622,103 @@ class _StudentHomeState extends State<StudentHome> {
                 ),
               ),
 
-        const SliverToBoxAdapter(child: SizedBox(height: 32)),
+        const SliverToBoxAdapter(child: SizedBox(height: 100)), // Space for floating nav
       ],
+    );
+  }
+
+  Widget _buildHeaderSlider() {
+    return Column(
+      children: [
+        SizedBox(
+          height: 380, // Fixed height for slider (increased to fit calendar)
+          child: PageView(
+            controller: _headerPageController,
+            onPageChanged: (idx) => setState(() => _currentHeaderSlide = idx),
+            children: [
+              _buildMacbookSlide(),
+              _buildMiniCalendar(),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        // Dots Indicator
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: List.generate(2, (index) {
+            final isActive = _currentHeaderSlide == index;
+            return AnimatedContainer(
+              duration: const Duration(milliseconds: 300),
+              margin: const EdgeInsets.symmetric(horizontal: 4),
+              width: isActive ? 20 : 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: isActive ? const Color(0xFFD4A843) : Colors.white.withValues(alpha: 0.3),
+                borderRadius: BorderRadius.circular(4),
+              ),
+            );
+          }),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMacbookSlide() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 4),
+      padding: const EdgeInsets.all(20),
+      clipBehavior: Clip.hardEdge,
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const ShinyText(
+            text: 'Ready to explore?',
+            fontSize: 20,
+            speed: 2.5,
+            fontWeight: FontWeight.w900,
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Register for upcoming events, view your e-tickets securely, and track your attendance across the semester.',
+            textAlign: TextAlign.left,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.8),
+              fontSize: 12,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 32),
+          // Card swap widget - Max ZOOM version
+          CardSwapWidget(
+            items: const [
+              CardSwapItem(imagePath: 'assets/sample summit/image1.jpg', label: 'CCS SUMMIT'),
+              CardSwapItem(imagePath: 'assets/sample GA/image1.jpg', label: 'GENERAL ASSEMBLY'),
+              CardSwapItem(imagePath: 'assets/sample exhibit/image1.jpg', label: 'CCS EXHIBIT'),
+              CardSwapItem(imagePath: 'assets/sample CV/image1.jpg', label: 'COMPANY VISIT'),
+            ],
+            cardWidth: 250,
+            cardHeight: 140,
+            cardDistance: 20,
+            verticalDistance: 10,
+            delay: const Duration(seconds: 4),
+            skewAmount: 5,
+          ),
+          const SizedBox(height: 12),
+        ],
+      ),
     );
   }
 
@@ -574,6 +729,7 @@ class _StudentHomeState extends State<StudentHome> {
     final firstWeekday = DateTime(_calendarMonth.year, _calendarMonth.month, 1).weekday % 7;
 
     return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 4),
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.1),

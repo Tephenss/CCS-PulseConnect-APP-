@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/event_service.dart';
+import '../../widgets/custom_loader.dart';
 import 'student_event_evaluation.dart';
 import 'student_response_view.dart';
 import 'student_ticket_view.dart';
@@ -88,29 +89,40 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
   Future<void> _handleViewTicket() async {
     setState(() => _isRegistering = true); // reuse loading state
 
-    final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString('user_id') ?? '';
-    final tickets = await _eventService.getMyTickets(userId);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id') ?? '';
+      
+      // Fetch tickets with a 10-second timeout to prevent infinite loading if network hangs
+      final tickets = await _eventService.getMyTickets(userId).timeout(const Duration(seconds: 10));
 
-    if (!mounted) return;
-    setState(() => _isRegistering = false);
+      if (!mounted) return;
+      setState(() => _isRegistering = false);
 
-    final myTicket = tickets.firstWhere(
-      (t) => t['event_id'].toString() == widget.eventId.toString(),
-      orElse: () => <String, dynamic>{},
-    );
-
-    if (myTicket.isNotEmpty && mounted) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => StudentTicketView(ticket: myTicket),
-        ),
+      final myTicket = tickets.firstWhere(
+        (t) => t['event_id']?.toString() == widget.eventId.toString(),
+        orElse: () => <String, dynamic>{},
       );
-    } else {
+
+      if (myTicket.isNotEmpty && mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => StudentTicketView(ticket: myTicket),
+          ),
+        );
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Could not load ticket details. Please check your network connection.')),
+          );
+        }
+      }
+    } catch (e) {
       if (mounted) {
+        setState(() => _isRegistering = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not load ticket details. Please check your network.')),
+          SnackBar(content: Text('Connection timeout or error. Please try again.')),
         );
       }
     }
@@ -122,7 +134,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
       return const Scaffold(
         backgroundColor: Colors.white,
         body: Center(
-          child: CircularProgressIndicator(color: Color(0xFF7F1D1D)),
+          child: PulseConnectLoader(),
         ),
       );
     }
@@ -464,6 +476,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
         ),
         child: SizedBox(
           width: double.infinity,
+          height: 60, // Prevents the loader's Center from expanding to fill the screen
           child: Container(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(16),
@@ -497,14 +510,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                 ),
               ),
               child: _isRegistering
-                  ? const SizedBox(
-                      height: 22,
-                      width: 22,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2.5,
-                        color: Colors.white,
-                      ),
-                    )
+                  ? const PulseConnectLoader(size: 14)
                   : Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [

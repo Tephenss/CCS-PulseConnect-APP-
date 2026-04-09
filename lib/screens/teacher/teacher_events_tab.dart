@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../../services/event_service.dart';
 import '../../services/auth_service.dart';
 import 'package:intl/intl.dart';
+import '../../widgets/custom_loader.dart';
 import 'teacher_create_event.dart';
 import 'teacher_event_manage.dart';
 
@@ -94,17 +95,24 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
             padding: const EdgeInsets.all(4),
             decoration: BoxDecoration(
               color: const Color(0xFFF3F4F6),
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(16),
             ),
             child: TabBar(
               controller: _tabController,
               indicatorSize: TabBarIndicatorSize.tab,
-              dividerColor: Colors.transparent, // Remove line under tabs natively
+              dividerColor: Colors.transparent,
               indicator: BoxDecoration(
-                color: const Color(0xFFD4A843), // Gold Pill
-                borderRadius: BorderRadius.circular(10),
+                color: const Color(0xFF064E3B),
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFF064E3B).withValues(alpha: 0.2),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
               ),
-              labelColor: const Color(0xFF064E3B), // Dark Green text
+              labelColor: Colors.white,
               unselectedLabelColor: const Color(0xFF6B7280),
               labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
               unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
@@ -120,7 +128,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
           // Tab Views
           Expanded(
             child: _isLoading
-                ? const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+                ? const Center(child: PulseConnectLoader())
                 : TabBarView(
                     controller: _tabController,
                     children: [
@@ -141,15 +149,15 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
     var filteredEvents = _events.where((e) {
       final status = (e['status'] as String? ?? 'pending').toLowerCase(); // Normalize string
       
-      // Calculate if the event is truly expired based on datetime
-      final startAtStr = e['start_at'] as String?;
-      DateTime? checkDate;
+      // Calculate if the event is truly expired based on event end time.
+      final endAtStr = e['end_at'] as String?;
+      DateTime? endDate;
       
-      if (startAtStr != null && startAtStr.isNotEmpty) {
-        try { checkDate = DateTime.parse(startAtStr); } catch (_) {}
+      if (endAtStr != null && endAtStr.isNotEmpty) {
+        try { endDate = DateTime.parse(endAtStr); } catch (_) {}
       }
 
-      bool isPast = checkDate != null && checkDate.isBefore(now);
+      bool isPast = endDate != null && endDate.isBefore(now);
 
       if (statusFilter == 'expired') {
         // Shown in Expired if time naturally passed, excluding manually archived ones
@@ -191,10 +199,10 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
     );
   }
 
-  // Exact Match for UI Image 2
   Widget _buildEventCard(Map<String, dynamic> event) {
     final title = event['title'] as String? ?? 'Sample Event';
     final startAt = event['start_at'] as String?;
+    final endAt = event['end_at'] as String?;
     String status = event['status'] as String? ?? 'active';
     final target = event['target_grade'] as String? ?? 'All';
 
@@ -203,13 +211,16 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
       try { startDate = DateTime.parse(startAt); } catch (_) {}
     }
 
-    // Auto-expire visually if 'start_at' has passed
-    if (status != 'archived' && startDate != null && startDate.isBefore(DateTime.now())) {
+    DateTime? endDate;
+    if (endAt != null) {
+      try { endDate = DateTime.parse(endAt); } catch (_) {}
+    }
+
+    if (status != 'archived' && endDate != null && endDate.isBefore(DateTime.now())) {
       status = 'expired';
     }
 
-    // Status Badge Colors (Aligned with Admin UI Tags)
-    Color statusBg = const Color(0xFF064E3B); // Published/Active
+    Color statusBg = const Color(0xFF064E3B);
     String displayStatus = status.toUpperCase();
 
     if (displayStatus == 'PENDING') {
@@ -217,7 +228,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
     } else if (displayStatus == 'REJECTED') {
       statusBg = const Color(0xFFFF0000); 
     } else if (displayStatus == 'APPROVED') {
-      statusBg = const Color(0xFF3B82F6); // Blue matching the Admin image
+      statusBg = const Color(0xFF3B82F6);
     } else if (displayStatus == 'ARCHIVED' || displayStatus == 'EXPIRED' || displayStatus == 'FINISHED') {
       statusBg = const Color(0xFF6B7280);
     }
@@ -232,104 +243,133 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
         );
       },
       child: Container(
-        margin: const EdgeInsets.only(bottom: 16),
+        margin: const EdgeInsets.only(bottom: 20),
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: Colors.grey.shade300),
-          boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 10, offset: const Offset(0, 4))],
+          borderRadius: BorderRadius.circular(24),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.03),
+              blurRadius: 20,
+              offset: const Offset(0, 10),
+            ),
+          ],
         ),
-        child: IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(24),
+          child: Stack(
             children: [
-              // Left Blue Square (We use Dark Green to match app theme, matching structure)
-              Container(
-                width: 90,
-                decoration: const BoxDecoration(
-                  color: Color(0xFF064E3B), // Dark Green replacing blue
-                  borderRadius: BorderRadius.only(topLeft: Radius.circular(16), bottomLeft: Radius.circular(16)),
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      startDate != null ? DateFormat('dd').format(startDate) : '--',
-                      style: const TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.w800, height: 1.1),
-                    ),
-                    Text(
-                      startDate != null ? DateFormat('MMM').format(startDate) : '---',
-                      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
-                    ),
-                  ],
+              // CCS Watermark Logo
+              Positioned(
+                right: -10,
+                bottom: -10,
+                child: Opacity(
+                  opacity: 0.08,
+                  child: Image.asset(
+                    'assets/CCS.png',
+                    width: 160,
+                    errorBuilder: (context, error, stackTrace) => const SizedBox(),
+                  ),
                 ),
               ),
               
-              // Right Details Area
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Title & Status Badge
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              title,
-                              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF1F2937)),
-                              maxLines: 1, overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                            decoration: BoxDecoration(color: statusBg, borderRadius: BorderRadius.circular(6)),
-                            child: Text(displayStatus, style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w800)),
-                          ),
-                        ],
+              IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Date Badge
+                    Container(
+                      width: 75,
+                      decoration: const BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Color(0xFF064E3B),
+                            Color(0xFF047857),
+                          ],
+                        ),
                       ),
-                      
-                      const SizedBox(height: 8),
-                      Container(height: 2, width: 40, color: const Color(0xFF93C5FD)), // Light blue separator mimicking image
-                      const SizedBox(height: 8),
-                      
-                      Text('For: $target', style: const TextStyle(color: Color(0xFF1D4ED8), fontSize: 12, fontWeight: FontWeight.w700)),
-                      const SizedBox(height: 10),
-                      
-                      // Start Date
-                      Row(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          const Icon(Icons.stop_rounded, size: 10, color: Color(0xFF3B82F6)), // Tiny square dot
-                          const SizedBox(width: 6),
-                          Expanded(
-                            child: Text(
-                              'Date: ${startDate != null ? DateFormat('MMM dd, yyyy').format(startDate) : 'TBA'}',
-                              style: const TextStyle(color: Color(0xFF3B82F6), fontSize: 11, fontWeight: FontWeight.w700),
-                            ),
+                          Text(
+                            startDate != null ? DateFormat('dd').format(startDate) : '--',
+                            style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w900, height: 1.1, letterSpacing: -1),
                           ),
                           Text(
-                            startDate != null ? DateFormat('h:mm a').format(startDate) : '--:--',
-                            style: const TextStyle(color: Color(0xFF3B82F6), fontSize: 11, fontWeight: FontWeight.w700),
+                            startDate != null ? DateFormat('MMM').format(startDate).toUpperCase() : '---',
+                            style: TextStyle(color: Colors.white.withValues(alpha: 0.9), fontSize: 13, fontWeight: FontWeight.w700, letterSpacing: 1.5),
                           ),
+                          const SizedBox(height: 4),
+                          Container(height: 2, width: 12, decoration: BoxDecoration(color: const Color(0xFFD4A843), borderRadius: BorderRadius.circular(1))),
                         ],
                       ),
-                      const SizedBox(height: 6),
-                      // Location
-                      Row(
-                        children: [
-                          const Icon(Icons.location_on_rounded, size: 12, color: Color(0xFF6B7280)), 
-                          const SizedBox(width: 4),
-                          Expanded(
-                            child: Text(
-                              event['location']?.toString().toUpperCase() ?? 'TBA',
-                              style: const TextStyle(color: Color(0xFF6B7280), fontSize: 11, fontWeight: FontWeight.w600),
+                    ),
+                    
+                    // Right Details Area
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.all(18),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // Status Badge
+                            Container(
+                              margin: const EdgeInsets.only(bottom: 10),
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(color: statusBg.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(8)),
+                              child: Text(
+                                displayStatus, 
+                                style: TextStyle(color: statusBg, fontSize: 10, fontWeight: FontWeight.w900, letterSpacing: 0.5)
+                              ),
                             ),
-                          ),
-                        ],
+                            
+                            Text(
+                              title,
+                              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: Color(0xFF111827), letterSpacing: -0.3),
+                              maxLines: 1, overflow: TextOverflow.ellipsis,
+                            ),
+                            
+                            const SizedBox(height: 12),
+                            
+                            // Metadata Row
+                            Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(4),
+                                  decoration: BoxDecoration(color: const Color(0xFFF3F4F6), borderRadius: BorderRadius.circular(6)),
+                                  child: const Icon(Icons.people_rounded, size: 12, color: Color(0xFF4B5563)),
+                                ),
+                                const SizedBox(width: 8),
+                                Text('For: $target', style: const TextStyle(color: Color(0xFF374151), fontSize: 12, fontWeight: FontWeight.w700)),
+                              ],
+                            ),
+                            
+                            const SizedBox(height: 8),
+                            
+                            // Time Row
+                            Row(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(4),
+                                  decoration: BoxDecoration(color: const Color(0xFFF3F4F6), borderRadius: BorderRadius.circular(6)),
+                                  child: const Icon(Icons.schedule_rounded, size: 12, color: Color(0xFF4B5563)),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    startDate != null ? DateFormat('MMM dd, yyyy  -  h:mm a').format(startDate) : 'TBA',
+                                    style: const TextStyle(color: Color(0xFF6B7280), fontSize: 11, fontWeight: FontWeight.w600),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
             ],

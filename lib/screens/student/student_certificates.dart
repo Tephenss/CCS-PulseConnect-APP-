@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/event_service.dart';
+import '../../widgets/custom_loader.dart';
 import 'student_event_evaluation.dart';
 
 class StudentCertificates extends StatefulWidget {
@@ -47,8 +48,7 @@ class _StudentCertificatesState extends State<StudentCertificates> {
         ),
       ),
       body: _isLoading
-          ? const Center(
-              child: CircularProgressIndicator(color: Color(0xFF7F1D1D)))
+          ? const Center(child: PulseConnectLoader())
           : _certificates.isEmpty
               ? _buildEmptyState()
               : RefreshIndicator(
@@ -188,7 +188,7 @@ class _StudentCertificatesState extends State<StudentCertificates> {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+      builder: (_) => const Center(child: PulseConnectLoader())
     );
 
     final prefs = await SharedPreferences.getInstance();

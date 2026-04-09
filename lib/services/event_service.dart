@@ -4,15 +4,22 @@ import 'dart:math';
 class EventService {
   final _supabase = Supabase.instance.client;
 
-  // Get all active/published events (that haven't started yet)
+  bool _isMissingAssistantsTableError(Object error) {
+    final msg = error.toString().toLowerCase();
+    return msg.contains('event_assistants') ||
+        msg.contains('42p01') ||
+        msg.contains('pgrst205');
+  }
+
+  // Get all active/published events (ongoing + upcoming, not yet ended)
   Future<List<Map<String, dynamic>>> getActiveEvents() async {
     try {
-      final now = DateTime.now().toIso8601String();
+      final now = DateTime.now().toUtc().toIso8601String();
       final response = await _supabase
           .from('events')
           .select()
           .eq('status', 'published')
-          .gte('start_at', now)
+          .gte('end_at', now)
           .order('start_at', ascending: true);
       return List<Map<String, dynamic>>.from(response);
     } catch (e) {
@@ -20,16 +27,16 @@ class EventService {
     }
   }
 
-  // Get expired events (past events)
+  // Get expired events (already ended)
   Future<List<Map<String, dynamic>>> getExpiredEvents() async {
     try {
-      final now = DateTime.now().toIso8601String();
+      final now = DateTime.now().toUtc().toIso8601String();
       final response = await _supabase
           .from('events')
           .select()
           .eq('status', 'published')
-          .lt('start_at', now)
-          .order('start_at', ascending: false);
+          .lt('end_at', now)
+          .order('end_at', ascending: false);
       return List<Map<String, dynamic>>.from(response);
     } catch (e) {
       return [];
@@ -39,7 +46,7 @@ class EventService {
   // Get upcoming events (future events)
   Future<List<Map<String, dynamic>>> getUpcomingEvents() async {
     try {
-      final now = DateTime.now().toIso8601String();
+      final now = DateTime.now().toUtc().toIso8601String();
       final response = await _supabase
           .from('events')
           .select()
@@ -224,48 +231,319 @@ class EventService {
   // Get participants (registered students) for a specific event
   Future<List<Map<String, dynamic>>> getEventParticipants(String eventId) async {
     try {
-      // Strategy 1: Try joining users directly (works if FK is named 'student_id' → users.id)
+      // Strategy 1: relational select with stable columns only.
       final response = await _supabase
           .from('event_registrations')
           .select(
             'id, registered_at, student_id, '
-            'users(first_name, last_name, email, id_number, course, year_level), '
-            'tickets(*, attendance(*))'
+            'users(first_name, middle_name, last_name, suffix, email, student_id), '
+            'tickets(*, attendance(*))',
           )
           .eq('event_id', eventId)
           .order('registered_at', ascending: false);
-      
+
       final list = List<Map<String, dynamic>>.from(response);
-      
-      // If no users data came through, try fetching user profiles separately
+
+      // If users relation is null, fetch user profiles separately.
       if (list.isNotEmpty && list[0]['users'] == null) {
-        // Strategy 2: Fetch user data separately per registration
-        final enriched = <Map<String, dynamic>>[];
-        for (final reg in list) {
-          final studentId = reg['student_id']?.toString() ?? '';
-          if (studentId.isNotEmpty) {
-            try {
-              final userRes = await _supabase
-                  .from('users')
-                  .select('first_name, last_name, email, id_number, course, year_level')
-                  .eq('id', studentId)
-                  .limit(1);
-              final enrichedReg = Map<String, dynamic>.from(reg);
-              enrichedReg['users'] = userRes.isNotEmpty ? userRes[0] : null;
-              enriched.add(enrichedReg);
-            } catch (_) {
-              enriched.add(reg);
-            }
-          } else {
-            enriched.add(reg);
-          }
-        }
-        return enriched;
+        return _enrichParticipantsWithUsers(list);
       }
-      
+
+      return list;
+    } catch (_) {
+      // Strategy 2: if relational select fails, fetch base rows then enrich users.
+      try {
+        final base = await _supabase
+            .from('event_registrations')
+            .select('id, registered_at, student_id, tickets(*, attendance(*))')
+            .eq('event_id', eventId)
+            .order('registered_at', ascending: false);
+        return _enrichParticipantsWithUsers(List<Map<String, dynamic>>.from(base));
+      } catch (_) {
+        return [];
+      }
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _enrichParticipantsWithUsers(
+    List<Map<String, dynamic>> regs,
+  ) async {
+    if (regs.isEmpty) return regs;
+
+    final ids = regs
+        .map((r) => r['student_id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList();
+
+    if (ids.isEmpty) return regs;
+
+    try {
+      final usersRes = await _supabase
+          .from('users')
+          .select('id, first_name, middle_name, last_name, suffix, email, student_id')
+          .inFilter('id', ids);
+
+      final users = List<Map<String, dynamic>>.from(usersRes);
+      final byId = <String, Map<String, dynamic>>{};
+      for (final u in users) {
+        final uid = u['id']?.toString() ?? '';
+        if (uid.isNotEmpty) byId[uid] = u;
+      }
+
+      final enriched = <Map<String, dynamic>>[];
+      for (final reg in regs) {
+        final item = Map<String, dynamic>.from(reg);
+        final sid = item['student_id']?.toString() ?? '';
+        if (sid.isNotEmpty && byId.containsKey(sid)) {
+          final u = byId[sid]!;
+          item['users'] = {
+            'first_name': u['first_name'],
+            'middle_name': u['middle_name'],
+            'last_name': u['last_name'],
+            'suffix': u['suffix'],
+            'email': u['email'],
+            'student_id': u['student_id'],
+            // Keep compatibility with existing UI renderers.
+            'id_number': u['id_number'] ?? u['student_id'],
+            'course': u['course'],
+            'year_level': u['year_level'],
+          };
+        }
+        enriched.add(item);
+      }
+      return enriched;
+    } catch (_) {
+      return regs;
+    }
+  }
+
+  // Get assistants (authorized student scanners) for a specific event
+  Future<List<Map<String, dynamic>>> getEventAssistants(String eventId) async {
+    try {
+      final response = await _supabase
+          .from('event_assistants')
+          .select(
+            'id, event_id, student_id, allow_scan, '
+            'users(first_name, middle_name, last_name, suffix, student_id)'
+          )
+          .eq('event_id', eventId);
+
+      final list = List<Map<String, dynamic>>.from(response);
+
+      // If relation mapping didn't include users, enrich manually.
+      if (list.isNotEmpty && list[0]['users'] == null) {
+        return _enrichAssistantsWithUsers(list);
+      }
       return list;
     } catch (e) {
-      return [];
+      if (_isMissingAssistantsTableError(e)) {
+        // Keep UI stable if migration is not yet applied.
+        return [];
+      }
+      try {
+        // Fallback if relational select fails due schema relation mismatch.
+        final base = await _supabase
+            .from('event_assistants')
+            .select('id, event_id, student_id, allow_scan')
+            .eq('event_id', eventId);
+        final list = List<Map<String, dynamic>>.from(base);
+        return _enrichAssistantsWithUsers(list);
+      } catch (_) {
+        return [];
+      }
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _enrichAssistantsWithUsers(
+    List<Map<String, dynamic>> assistants,
+  ) async {
+    if (assistants.isEmpty) return assistants;
+
+    final ids = assistants
+        .map((a) => a['student_id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList();
+
+    if (ids.isEmpty) return assistants;
+
+    try {
+      final usersRes = await _supabase
+          .from('users')
+          .select('id, first_name, middle_name, last_name, suffix, student_id')
+          .inFilter('id', ids);
+
+      final users = List<Map<String, dynamic>>.from(usersRes);
+      final byId = <String, Map<String, dynamic>>{};
+      for (final u in users) {
+        final uid = u['id']?.toString() ?? '';
+        if (uid.isNotEmpty) byId[uid] = u;
+      }
+
+      final enriched = <Map<String, dynamic>>[];
+      for (final a in assistants) {
+        final item = Map<String, dynamic>.from(a);
+        final sid = item['student_id']?.toString() ?? '';
+        if (sid.isNotEmpty) {
+          final u = byId[sid];
+          if (u != null) {
+            item['users'] = {
+              'first_name': u['first_name'],
+              'middle_name': u['middle_name'],
+              'last_name': u['last_name'],
+              'suffix': u['suffix'],
+              'id_number': u['id_number'] ?? u['student_id'],
+              'student_id': u['student_id'],
+            };
+          }
+        }
+        enriched.add(item);
+      }
+      return enriched;
+    } catch (_) {
+      return assistants;
+    }
+  }
+
+  // Assign or re-assign assistant access for an event.
+  Future<Map<String, dynamic>> assignEventAssistant({
+    required String eventId,
+    required String studentId,
+    bool allowScan = true,
+  }) async {
+    try {
+      // Enforce participants-only assistant assignment per event/batch.
+      final regCheck = await _supabase
+          .from('event_registrations')
+          .select('id')
+          .eq('event_id', eventId)
+          .eq('student_id', studentId)
+          .limit(1);
+      if (regCheck.isEmpty) {
+        return {
+          'ok': false,
+          'error':
+              'Only registered participants of this event can be assigned as assistants.',
+        };
+      }
+    } catch (_) {
+      // If validation query fails, proceed to write path to avoid false blocking.
+    }
+
+    final payload = {
+      'event_id': eventId,
+      'student_id': studentId,
+      'allow_scan': allowScan,
+    };
+
+    try {
+      final res = await _supabase
+          .from('event_assistants')
+          .upsert(payload, onConflict: 'event_id,student_id')
+          .select('id, event_id, student_id, allow_scan');
+
+      final list = List<Map<String, dynamic>>.from(res);
+      return {
+        'ok': true,
+        'assistant': list.isNotEmpty ? list.first : payload,
+      };
+    } catch (e) {
+      if (_isMissingAssistantsTableError(e)) {
+        return {
+          'ok': false,
+          'error':
+              'Assistant feature is not set up yet in your database. Please apply the latest Supabase migration first.',
+        };
+      }
+      // Fallback when unique constraint for onConflict is unavailable.
+      try {
+        final existing = await _supabase
+            .from('event_assistants')
+            .select('id, event_id, student_id, allow_scan')
+            .eq('event_id', eventId)
+            .eq('student_id', studentId)
+            .limit(1);
+
+        if (existing.isNotEmpty) {
+          await _supabase
+              .from('event_assistants')
+              .update({'allow_scan': allowScan})
+              .eq('event_id', eventId)
+              .eq('student_id', studentId);
+          final item = Map<String, dynamic>.from(existing.first);
+          item['allow_scan'] = allowScan;
+          return {'ok': true, 'assistant': item};
+        }
+
+        final inserted = await _supabase
+            .from('event_assistants')
+            .insert(payload)
+            .select('id, event_id, student_id, allow_scan');
+        final list = List<Map<String, dynamic>>.from(inserted);
+        return {
+          'ok': true,
+          'assistant': list.isNotEmpty ? list.first : payload,
+        };
+      } catch (fallbackError) {
+        if (_isMissingAssistantsTableError(fallbackError)) {
+          return {
+            'ok': false,
+            'error':
+                'Assistant feature is not set up yet in your database. Please apply the latest Supabase migration first.',
+          };
+        }
+        return {
+          'ok': false,
+          'error': 'Failed to assign assistant. Please try again.',
+          'debug': e.toString(),
+        };
+      }
+    }
+  }
+
+  // Update assistant scan access.
+  Future<Map<String, dynamic>> updateAssistantAccess({
+    String? assistantId,
+    String? eventId,
+    String? studentId,
+    required bool allowScan,
+  }) async {
+    try {
+      final normalizedId = assistantId?.toString() ?? '';
+      if (normalizedId.isNotEmpty) {
+        await _supabase
+            .from('event_assistants')
+            .update({'allow_scan': allowScan})
+            .eq('id', normalizedId);
+        return {'ok': true};
+      }
+
+      final eId = eventId?.toString() ?? '';
+      final sId = studentId?.toString() ?? '';
+      if (eId.isEmpty || sId.isEmpty) {
+        return {'ok': false, 'error': 'Missing assistant identity.'};
+      }
+
+      await _supabase
+          .from('event_assistants')
+          .update({'allow_scan': allowScan})
+          .eq('event_id', eId)
+          .eq('student_id', sId);
+
+      return {'ok': true};
+    } catch (e) {
+      if (_isMissingAssistantsTableError(e)) {
+        return {
+          'ok': false,
+          'error':
+              'Assistant feature is not set up yet in your database. Please apply the latest Supabase migration first.',
+        };
+      }
+      return {
+        'ok': false,
+        'error': 'Failed to update assistant access. Please try again.',
+      };
     }
   }
 
@@ -486,3 +764,4 @@ class EventService {
     }
   }
 }
+

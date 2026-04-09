@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../../services/event_service.dart';
+import '../../widgets/custom_loader.dart';
 
 class StudentEventEvaluationScreen extends StatefulWidget {
   final String eventId;
@@ -129,7 +130,7 @@ class _StudentEventEvaluationScreenState extends State<StudentEventEvaluationScr
         iconTheme: const IconThemeData(color: Color(0xFF1F2937)),
       ),
       body: _isLoading 
-        ? const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+        ? const Center(child: PulseConnectLoader())
         : _questions.isEmpty
           ? Center(
               child: Column(

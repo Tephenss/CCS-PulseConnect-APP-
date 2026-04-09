@@ -201,6 +201,32 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
                 child: _isScanning
                     ? MobileScanner(
                         onDetect: _handleDetect,
+                        errorBuilder: (context, error, child) {
+                          return Container(
+                            color: Colors.black,
+                            alignment: Alignment.center,
+                            child: Padding(
+                              padding: const EdgeInsets.all(20),
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(Icons.error_outline_rounded, color: Colors.white, size: 30),
+                                  const SizedBox(height: 10),
+                                  const Text(
+                                    'Camera unavailable',
+                                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    'Allow camera permission in app settings, then try again.',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(color: Colors.grey.shade300, fontSize: 12),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
                       )
                     : Center(
                         child: Column(

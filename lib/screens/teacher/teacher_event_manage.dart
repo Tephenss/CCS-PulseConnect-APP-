@@ -3,8 +3,8 @@ import 'package:intl/intl.dart';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/event_service.dart';
+import '../../widgets/custom_loader.dart';
 
 class TeacherEventManage extends StatefulWidget {
   final Map<String, dynamic> event;
@@ -37,17 +37,30 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       return;
     }
 
-    final participants = await _eventService.getEventParticipants(eventId);
+    try {
+      final results = await Future.wait([
+        _eventService.getEventParticipants(eventId),
+        _eventService.getEventAssistants(eventId),
+      ]);
 
-    if (mounted) {
-      setState(() {
-        _isLoading = false;
-        _participants = participants;
-        // Assistants still mocked for now
-        _assistants = [
-          {'name': 'Pedro Penduko', 'id_number': '2019-12345', 'allow_scan': true},
-        ];
-      });
+      final participants = results[0] as List<Map<String, dynamic>>;
+      final assistants = results[1] as List<Map<String, dynamic>>;
+
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _participants = participants;
+          _assistants = assistants;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _participants = [];
+          _assistants = [];
+        });
+      }
     }
   }
 
@@ -76,6 +89,57 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     if (parts.isEmpty) return '?';
     if (parts.length == 1) return parts[0][0].toUpperCase();
     return '${parts[0][0]}${parts[parts.length - 1][0]}'.toUpperCase();
+  }
+
+  String _getAssistantName(Map<String, dynamic> assistant) {
+    final u = assistant['users'];
+    if (u is Map) {
+      final first = (u['first_name'] ?? '').toString().trim();
+      final last = (u['last_name'] ?? '').toString().trim();
+      final full = '$first $last'.trim();
+      if (full.isNotEmpty) return full;
+    }
+    final legacy = (assistant['name'] ?? '').toString().trim();
+    if (legacy.isNotEmpty) return legacy;
+    return 'Unknown Student';
+  }
+
+  String _getAssistantStudentNumber(Map<String, dynamic> assistant) {
+    final u = assistant['users'];
+    if (u is Map) {
+      final idNum = (u['id_number'] ?? '').toString().trim();
+      if (idNum.isNotEmpty) return idNum;
+      final studentId = (u['student_id'] ?? '').toString().trim();
+      if (studentId.isNotEmpty) return studentId;
+    }
+    final legacy = (assistant['id_number'] ?? '').toString().trim();
+    return legacy.isNotEmpty ? legacy : 'N/A';
+  }
+
+  List<Map<String, String>> _buildAssistantCandidates() {
+    final assignedIds = _assistants
+        .map((a) => a['student_id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+
+    final candidates = <Map<String, String>>[];
+    for (final p in _participants) {
+      final sid = p['student_id']?.toString() ?? '';
+      if (sid.isEmpty || assignedIds.contains(sid)) continue;
+
+      final name = _getName(p);
+      final u = p['users'];
+      final idNum = (u is Map ? (u['id_number'] ?? u['student_id']) : null)?.toString() ?? 'N/A';
+
+      candidates.add({
+        'student_id': sid,
+        'name': name,
+        'id_number': idNum.isEmpty ? 'N/A' : idNum,
+      });
+    }
+
+    candidates.sort((a, b) => (a['name'] ?? '').compareTo(b['name'] ?? ''));
+    return candidates;
   }
 
   // ─── Helper: attendance status ───
@@ -112,23 +176,211 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
   }
 
   Future<void> _toggleAssistant(Map<String, dynamic> assistant, bool val) async {
-    final oldVal = assistant['allow_scan'];
+    final oldVal = assistant['allow_scan'] == true;
     setState(() => assistant['allow_scan'] = val);
-    
-    try {
-      await Supabase.instance.client
-        .from('event_assistants')
-        .update({'allow_scan': val})
-        .eq('id', assistant['id']);
-    } catch (e) {
-      // Revert if HTTP failed
+
+    final result = await _eventService.updateAssistantAccess(
+      assistantId: assistant['id']?.toString(),
+      eventId: widget.event['id']?.toString(),
+      studentId: assistant['student_id']?.toString(),
+      allowScan: val,
+    );
+
+    if (result['ok'] != true) {
       setState(() => assistant['allow_scan'] = oldVal);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to update assistant access.')),
+          SnackBar(content: Text(result['error'] ?? 'Failed to update assistant access.')),
         );
       }
     }
+  }
+
+  Future<void> _showAssignAssistantSheet() async {
+    final eventId = widget.event['id']?.toString() ?? '';
+    if (eventId.isEmpty) return;
+
+    final baseCandidates = _buildAssistantCandidates();
+    if (baseCandidates.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No eligible participants available for assistant assignment.')),
+      );
+      return;
+    }
+
+    final candidates = List<Map<String, String>>.from(baseCandidates);
+    String query = '';
+    bool isSubmitting = false;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final filtered = candidates.where((c) {
+              if (query.trim().isEmpty) return true;
+              final q = query.toLowerCase();
+              return (c['name'] ?? '').toLowerCase().contains(q) ||
+                  (c['id_number'] ?? '').toLowerCase().contains(q);
+            }).toList();
+
+            return Container(
+              height: MediaQuery.of(context).size.height * 0.72,
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Center(
+                    child: Container(
+                      width: 42,
+                      height: 4,
+                      margin: const EdgeInsets.only(bottom: 14),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFD1D5DB),
+                        borderRadius: BorderRadius.circular(99),
+                      ),
+                    ),
+                  ),
+                  const Text(
+                    'Assign Assistant',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: Color(0xFF111827)),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Select registered participants who can scan tickets for this event.',
+                    style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                  ),
+                  const SizedBox(height: 14),
+                  Container(
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF3F4F6),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: TextField(
+                      onChanged: (v) => setSheetState(() => query = v),
+                      decoration: const InputDecoration(
+                        hintText: 'Search name or ID number...',
+                        border: InputBorder.none,
+                        prefixIcon: Icon(Icons.search_rounded, size: 20, color: Color(0xFF9CA3AF)),
+                        contentPadding: EdgeInsets.symmetric(vertical: 10),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  Expanded(
+                    child: filtered.isEmpty
+                        ? const Center(
+                            child: Text(
+                              'No matching students.',
+                              style: TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.w600),
+                            ),
+                          )
+                        : ListView.separated(
+                            itemCount: filtered.length,
+                            separatorBuilder: (_, __) => const SizedBox(height: 8),
+                            itemBuilder: (context, index) {
+                              final c = filtered[index];
+                              final name = c['name'] ?? 'Student';
+                              final idNum = c['id_number'] ?? 'N/A';
+                              final sid = c['student_id'] ?? '';
+                              final initials = _getInitials(name);
+
+                              return InkWell(
+                                borderRadius: BorderRadius.circular(14),
+                                onTap: isSubmitting
+                                    ? null
+                                    : () async {
+                                        if (sid.isEmpty) return;
+                                        setSheetState(() => isSubmitting = true);
+
+                                        final res = await _eventService.assignEventAssistant(
+                                          eventId: eventId,
+                                          studentId: sid,
+                                          allowScan: true,
+                                        );
+
+                                        if (!mounted) return;
+                                        setSheetState(() => isSubmitting = false);
+
+                                        if (res['ok'] == true) {
+                                          if (Navigator.canPop(context)) Navigator.pop(context);
+                                          await _loadData();
+                                          if (!mounted) return;
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            SnackBar(content: Text('$name assigned as assistant.')),
+                                          );
+                                        } else {
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            SnackBar(content: Text(res['error'] ?? 'Failed to assign assistant.')),
+                                          );
+                                        }
+                                      },
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFF9FAFB),
+                                    borderRadius: BorderRadius.circular(14),
+                                    border: Border.all(color: const Color(0xFFE5E7EB)),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Container(
+                                        width: 38,
+                                        height: 38,
+                                        decoration: const BoxDecoration(
+                                          color: Color(0xFF064E3B),
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: Center(
+                                          child: Text(
+                                            initials,
+                                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              name,
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w700,
+                                                fontSize: 14,
+                                                color: Color(0xFF111827),
+                                              ),
+                                            ),
+                                            Text(
+                                              'ID: $idNum',
+                                              style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const Icon(Icons.add_circle_rounded, color: Color(0xFF064E3B)),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> _exportCsv(List<Map<String, dynamic>> participants) async {
@@ -141,7 +393,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       final name = _getName(p);
       final u = p['users'];
       final email = (u is Map ? u['email'] : null)?.toString() ?? '';
-      final idNum = (u is Map ? u['id_number'] : null)?.toString() ?? '';
+      final idNum = (u is Map ? (u['id_number'] ?? u['student_id']) : null)?.toString() ?? '';
       final course = (u is Map ? u['course'] : null)?.toString() ?? '';
       final yearLevel = (u is Map ? u['year_level'] : null)?.toString() ?? '';
       
@@ -227,38 +479,17 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
               unselectedLabelColor: Colors.grey.shade500,
               labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
               unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-              tabs: [
-                const Tab(text: 'Details'),
-                Tab(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text('Participants'),
-                      if (_participants.isNotEmpty) ...[
-                        const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF064E3B),
-                            borderRadius: BorderRadius.circular(99),
-                          ),
-                          child: Text(
-                            '${_participants.length}',
-                            style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w800),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                const Tab(text: 'Assistants'),
+              tabs: const [
+                Tab(text: 'Details'),
+                Tab(text: 'Participants'),
+                Tab(text: 'Assistants'),
               ],
             ),
           ),
 
           Expanded(
             child: _isLoading
-                ? const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+                ? const Center(child: PulseConnectLoader())
                 : TabBarView(
                     controller: _tabController,
                     children: [
@@ -593,7 +824,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                 ),
               ),
               ElevatedButton.icon(
-                onPressed: () {},
+                onPressed: _showAssignAssistantSheet,
                 icon: const Icon(Icons.person_add_rounded, size: 16),
                 label: const Text('Assign'),
                 style: ElevatedButton.styleFrom(
@@ -618,6 +849,9 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                   separatorBuilder: (context, index) => const SizedBox(height: 10),
                   itemBuilder: (context, i) {
                     final a = _assistants[i];
+                    final assistantName = _getAssistantName(a);
+                    final assistantIdNumber = _getAssistantStudentNumber(a);
+                    final initials = _getInitials(assistantName);
                     return Container(
                       decoration: BoxDecoration(
                         color: Colors.white,
@@ -629,10 +863,21 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                         leading: Container(
                           width: 44, height: 44,
                           decoration: const BoxDecoration(color: Color(0xFFD4A843), shape: BoxShape.circle),
-                          child: Center(child: Text(a['name'][0], style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18))),
+                          child: Center(
+                            child: Text(
+                              initials,
+                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18),
+                            ),
+                          ),
                         ),
-                        title: Text(a['name'], style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF111827))),
-                        subtitle: Text('ID: ${a['id_number']}', style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
+                        title: Text(
+                          assistantName,
+                          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF111827)),
+                        ),
+                        subtitle: Text(
+                          'ID: $assistantIdNumber',
+                          style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                        ),
                         trailing: Switch(
                           value: a['allow_scan'] == true,
                           activeTrackColor: const Color(0xFF064E3B),

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../widgets/custom_loader.dart';
 import 'teacher_section_students.dart';
 
 class TeacherSections extends StatefulWidget {
@@ -102,7 +103,7 @@ class _TeacherSectionsState extends State<TeacherSections> {
           if (_isLoading)
             const SliverFillRemaining(
               child: Center(
-                child: CircularProgressIndicator(color: Color(0xFF064E3B)),
+                child: const PulseConnectLoader(),
               ),
             )
           else if (_sections.isEmpty)

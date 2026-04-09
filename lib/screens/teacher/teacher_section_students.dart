@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:intl/intl.dart';
+import '../../widgets/custom_loader.dart';
 
 class TeacherSectionStudents extends StatefulWidget {
   final String sectionId;
@@ -152,7 +153,7 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
           ),
           Expanded(
             child: _isLoading
-                ? const Center(child: CircularProgressIndicator(color: Color(0xFF064E3B)))
+                ? const Center(child: PulseConnectLoader())
                 : _scannedStudents.isEmpty
                     ? Center(
                         child: Column(

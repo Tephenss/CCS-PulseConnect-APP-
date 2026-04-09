@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import '../main.dart';
 import 'auth/login_screen.dart';
 import 'auth/register_screen.dart';
+import '../widgets/shiny_text.dart';
 
 class WelcomeScreen extends StatefulWidget {
   const WelcomeScreen({super.key});
@@ -37,6 +39,12 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
       duration: const Duration(seconds: 12),
     );
     _gradientController.repeat(reverse: true);
+
+    // Ensure global app theme matches the default selected role on screen open.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      PulseConnectApp.of(context).updateTheme(_selectedRole);
+    });
   }
 
   @override
@@ -206,8 +214,8 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                             center: Alignment(-0.3 + 0.6 * t, -0.5 + 0.3 * t),
                             radius: 1.1 + 0.15 * t,
                             colors: [
-                              Color(0xFF6F1D2D).withValues(alpha: 0.82 + 0.08 * t),
-                              Color(0xFF15803D).withValues(alpha: 0.5 + 0.15 * t),
+                              (_selectedRole == 'Teacher' ? const Color(0xFF15803D) : const Color(0xFF6F1D2D)).withValues(alpha: 0.82 + 0.08 * t),
+                              (_selectedRole == 'Teacher' ? const Color(0xFF14532D) : const Color(0xFF4C0519)).withValues(alpha: 0.5 + 0.15 * t),
                               const Color(0xFF09090B),
                             ],
                             stops: [0.0, 0.35 + 0.1 * t, 0.8],
@@ -446,27 +454,23 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                     const SizedBox(height: 16),
                     
                     // Title
-                    const Text(
+                    Text(
                       'CCS PULSECONNECT',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 10,
                         letterSpacing: 4,
-                        color: Color(0xFFA1A1AA),
+                        color: const Color(0xFFA1A1AA),
                         fontWeight: FontWeight.w700,
                       ),
                     ),
                     const SizedBox(height: 8),
-                    const Text(
-                      'Event Management\nSystem',
+                    ShinyText(
+                      text: 'Event Management\nSystem',
+                      fontSize: 27,
+                      speed: 2.2,
+                      fontWeight: FontWeight.w900,
                       textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 26,
-                        fontWeight: FontWeight.w800,
-                        color: Colors.white,
-                        letterSpacing: -0.5,
-                        height: 1.2,
-                      ),
                     ),
 
                     const Spacer(flex: 2),
@@ -488,7 +492,6 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
 
                     const SizedBox(height: 24),
 
-                    // User Type Selector - Styled like the web form inputs
                     Container(
                       padding: const EdgeInsets.all(4),
                       decoration: BoxDecoration(
@@ -499,17 +502,33 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                       child: Row(
                         children: ['Student', 'Teacher'].map((role) {
                           final isSelected = _selectedRole == role;
+                          // Dynamic role color: Maroon for Student, Green for Teacher
+                          final activeColor = role == 'Teacher' 
+                              ? const Color(0xFF064E3B) 
+                              : const Color(0xFF9F1239);
+
                           return Expanded(
                             child: GestureDetector(
-                              onTap: () => setState(() => _selectedRole = role),
+                              onTap: () {
+                                setState(() => _selectedRole = role);
+                                // Globally update the app theme to the selected role
+                                PulseConnectApp.of(context).updateTheme(role);
+                              },
                               child: AnimatedContainer(
                                 duration: const Duration(milliseconds: 250),
                                 padding: const EdgeInsets.symmetric(vertical: 14),
                                 decoration: BoxDecoration(
                                   color: isSelected
-                                      ? const Color(0xFF5A0000) // Maroon highlight
+                                      ? activeColor
                                       : Colors.transparent,
                                   borderRadius: BorderRadius.circular(12),
+                                  boxShadow: isSelected ? [
+                                    BoxShadow(
+                                      color: activeColor.withValues(alpha: 0.3),
+                                      blurRadius: 12,
+                                      offset: const Offset(0, 4),
+                                    )
+                                  ] : [],
                                 ),
                                 child: Text(
                                   role,
@@ -536,6 +555,8 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                       width: double.infinity,
                       child: ElevatedButton(
                         onPressed: () {
+                          // Keep theme in sync even when user doesn't retap the role toggle.
+                          PulseConnectApp.of(context).updateTheme(_selectedRole);
                           Navigator.push(
                             context,
                             PageRouteBuilder(
@@ -573,15 +594,8 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                     // Sign Up Link Mapping
                     if (_selectedRole == 'Student') ...[
                       Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        mainAxisAlignment: MainAxisAlignment.end,
                         children: [
-                          GestureDetector(
-                            onTap: () {},
-                            child: const Text(
-                              'Forgot password?',
-                              style: TextStyle(color: Color(0xFFE4E4E7), fontSize: 12),
-                            ),
-                          ),
                           GestureDetector(
                             onTap: () {
                               Navigator.push(
@@ -600,12 +614,17 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                             },
                             child: const Text(
                               'Create account',
-                              style: TextStyle(color: Color(0xFFE4E4E7), fontSize: 12),
+                              style: TextStyle(
+                                color: Color(0xFFE4E4E7),
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                decoration: TextDecoration.underline,
+                              ),
                             ),
                           ),
                         ],
                       ),
-                    ] else const SizedBox(height: 18),
+                    ] else const SizedBox(height: 20),
 
                     const Spacer(),
 

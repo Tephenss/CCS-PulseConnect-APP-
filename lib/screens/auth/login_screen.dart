@@ -4,6 +4,8 @@ import '../student/student_home.dart';
 import '../teacher/teacher_home.dart';
 import 'forgot_password_screen.dart';
 import '../../services/push_notification_service.dart';
+import '../../widgets/custom_loader.dart';
+import '../../main.dart';
 
 class LoginScreen extends StatefulWidget {
   final String role;
@@ -13,7 +15,7 @@ class LoginScreen extends StatefulWidget {
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
-class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStateMixin {
+class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
@@ -22,8 +24,13 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
   bool _obscurePassword = true;
   String? _errorMessage;
 
-  late AnimationController _gradientController;
+  bool get _isTeacher => widget.role.toLowerCase() == 'teacher';
+  Color get _primaryColor => _isTeacher ? const Color(0xFF064E3B) : const Color(0xFF9F1239);
+  Color get _accentColor => _isTeacher ? const Color(0xFF059669) : const Color(0xFFBE123C);
+  Color get _glowColor => _isTeacher ? const Color(0xFF10B981) : const Color(0xFFBE123C);
 
+  late AnimationController _gradientController;
+  late AnimationController _floatController;
   Offset _pointerPosition = const Offset(0, 0);
   bool _pointerActive = false;
 
@@ -32,7 +39,12 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     super.initState();
     _gradientController = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 12),
+      duration: const Duration(seconds: 5),
+    )..repeat(reverse: true);
+
+    _floatController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 2000),
     )..repeat(reverse: true);
   }
 
@@ -41,6 +53,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
     _emailController.dispose();
     _passwordController.dispose();
     _gradientController.dispose();
+    _floatController.dispose();
     super.dispose();
   }
 
@@ -75,6 +88,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
       if (mounted) {
         final userData = result['user'] as Map<String, dynamic>;
         final currentRole = userData['role'] as String? ?? 'student';
+        PulseConnectApp.of(context).updateTheme(currentRole);
         
         await PushNotificationService().updateToken();
         
@@ -95,7 +109,9 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
 
   @override
   Widget build(BuildContext context) {
-    final size = MediaQuery.of(context).size;
+    final mq = MediaQuery.of(context);
+    final size = mq.size;
+    final keyboardOpen = mq.viewInsets.bottom > 0;
 
     return Scaffold(
       backgroundColor: const Color(0xFF09090B),
@@ -134,7 +150,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                       Color(0xF509090B),  // ~96%
                       Color(0xFF09090B),  // 100%
                     ],
-                    stops: [0.0, 0.06, 0.12, 0.18, 0.24, 0.30, 0.37, 0.44, 0.52, 0.60],
+                    stops: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.65, 0.8, 0.9, 1.0],
                   ),
                 ),
               ),
@@ -169,26 +185,25 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
               top: 0,
               left: 0,
               right: 0,
-              height: size.height * 0.5,
+              height: size.height,
               child: IgnorePointer(
                 child: AnimatedBuilder(
                   animation: _gradientController,
                   builder: (context, child) {
                     final t = _gradientController.value;
-                    return AnimatedOpacity(
-                      duration: const Duration(milliseconds: 300),
-                      opacity: _pointerActive ? 0.2 : 0.9,
+                    return Opacity(
+                      opacity: _pointerActive ? 0.3 : 0.95,
                       child: Container(
                         decoration: BoxDecoration(
                           gradient: RadialGradient(
-                            center: Alignment(-0.2 + 0.4 * t, -0.3 + 0.3 * t),
-                            radius: 0.9 + 0.2 * t,
+                            center: Alignment(-0.9 + 1.8 * t, -0.6 + 1.2 * t),
+                            radius: 1.4 + 0.4 * t,
                             colors: [
-                              Color(0xFF6F1D2D).withValues(alpha: 0.75 + 0.1 * t),
-                              Color(0xFF15803D).withValues(alpha: 0.4 + 0.15 * t),
+                              (_isTeacher ? const Color(0xFF064E3B) : const Color(0xFF6F1D2D)).withValues(alpha: 0.85 + 0.1 * t),
+                              (_isTeacher ? const Color(0xFF15803D) : const Color(0xFF7F1D1D)).withValues(alpha: 0.5 + 0.2 * t),
                               Colors.transparent,
                             ],
-                            stops: [0.0, 0.45 + 0.1 * t, 1.0],
+                            stops: [0.0, 0.45 + 0.2 * t, 1.0],
                           ),
                         ),
                       ),
@@ -224,11 +239,11 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
                           decoration: BoxDecoration(
-                            color: const Color(0xFF9F1239),
+                            color: _primaryColor,
                             borderRadius: BorderRadius.circular(24),
                             boxShadow: [
                               BoxShadow(
-                                color: const Color(0xFF9F1239).withValues(alpha: 0.4),
+                                color: _primaryColor.withValues(alpha: 0.4),
                                 blurRadius: 12,
                                 offset: const Offset(0, 4),
                               ),
@@ -262,39 +277,61 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                   // Scrollable content
                   Expanded(
                     child: SingleChildScrollView(
+                      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
                       child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 28),
+                        padding: EdgeInsets.fromLTRB(
+                          28,
+                          0,
+                          28,
+                          (keyboardOpen ? 12 : 0) + mq.viewInsets.bottom + 16,
+                        ),
                         child: Column(
                           children: [
-                            SizedBox(height: size.height * 0.04),
+                            SizedBox(height: keyboardOpen ? 10 : size.height * 0.04),
 
-                            // CCS Logo with glow
-                            Container(
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: const Color(0xFF9F1239).withValues(alpha: 0.35),
-                                    blurRadius: 40,
-                                    spreadRadius: 8,
-                                  ),
-                                  BoxShadow(
-                                    color: const Color(0xFFF59E0B).withValues(alpha: 0.15),
-                                    blurRadius: 60,
-                                    spreadRadius: 15,
-                                  ),
-                                ],
-                              ),
-                              child: ClipOval(
-                                child: Image.asset(
-                                  'assets/CCS.png',
-                                  width: 85,
-                                  height: 85,
-                                  fit: BoxFit.cover,
-                                ),
-                              ),
+                            AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 240),
+                              switchInCurve: Curves.easeOut,
+                              switchOutCurve: Curves.easeIn,
+                              child: keyboardOpen
+                                  ? const SizedBox(key: ValueKey('logo-hidden'), height: 0)
+                                  : AnimatedBuilder(
+                                      key: const ValueKey('logo-visible'),
+                                      animation: _floatController,
+                                      builder: (context, child) {
+                                        return Transform.translate(
+                                          offset: Offset(0, 12 * Curves.easeInOut.transform(_floatController.value)),
+                                          child: child,
+                                        );
+                                      },
+                                      child: Container(
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: _primaryColor.withValues(alpha: 0.35),
+                                              blurRadius: 45,
+                                              spreadRadius: 10,
+                                            ),
+                                            BoxShadow(
+                                              color: const Color(0xFFF59E0B).withValues(alpha: 0.15),
+                                              blurRadius: 65,
+                                              spreadRadius: 18,
+                                            ),
+                                          ],
+                                        ),
+                                        child: ClipOval(
+                                          child: Image.asset(
+                                            'assets/CCS.png',
+                                            width: 105,
+                                            height: 105,
+                                            fit: BoxFit.cover,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
                             ),
-                            const SizedBox(height: 28),
+                            SizedBox(height: keyboardOpen ? 12 : 28),
 
                             // Header Text
                             const Text(
@@ -302,15 +339,15 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                               style: TextStyle(
                                 fontSize: 10,
                                 letterSpacing: 5,
-                                color: Color(0xFF71717A),
-                                fontWeight: FontWeight.w600,
+                                color: Color(0xFFA1A1AA),
+                                fontWeight: FontWeight.w800,
                               ),
                             ),
                             const SizedBox(height: 10),
-                            const Text(
+                            Text(
                               'Welcome Back',
                               style: TextStyle(
-                                fontSize: 30,
+                                fontSize: keyboardOpen ? 25 : 30,
                                 fontWeight: FontWeight.w800,
                                 color: Colors.white,
                                 letterSpacing: -0.8,
@@ -392,9 +429,9 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                       controller: _emailController,
                                       keyboardType: TextInputType.emailAddress,
                                       style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                                      cursorColor: const Color(0xFF9F1239),
+                                      cursorColor: _primaryColor,
                                       decoration: InputDecoration(
-                                        hintText: 'you@email.com',
+                                        hintText: 'you@gmail.com',
                                         hintStyle: const TextStyle(color: Color(0xFF52525B), fontSize: 14),
                                         prefixIcon: const Icon(Icons.email_outlined, color: Color(0xFF52525B), size: 20),
                                         filled: true,
@@ -410,7 +447,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                         ),
                                         focusedBorder: OutlineInputBorder(
                                           borderRadius: BorderRadius.circular(14),
-                                          borderSide: const BorderSide(color: Color(0xFF9F1239), width: 1.5),
+                                          borderSide: BorderSide(color: _primaryColor, width: 1.5),
                                         ),
                                         errorBorder: OutlineInputBorder(
                                           borderRadius: BorderRadius.circular(14),
@@ -445,7 +482,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                       controller: _passwordController,
                                       obscureText: _obscurePassword,
                                       style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                                      cursorColor: const Color(0xFF9F1239),
+                                      cursorColor: _primaryColor,
                                       decoration: InputDecoration(
                                         hintText: '••••••••',
                                         hintStyle: const TextStyle(color: Color(0xFF52525B), fontSize: 14, letterSpacing: 2),
@@ -471,7 +508,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                         ),
                                         focusedBorder: OutlineInputBorder(
                                           borderRadius: BorderRadius.circular(14),
-                                          borderSide: const BorderSide(color: Color(0xFF9F1239), width: 1.5),
+                                          borderSide: BorderSide(color: _primaryColor, width: 1.5),
                                         ),
                                         errorBorder: OutlineInputBorder(
                                           borderRadius: BorderRadius.circular(14),
@@ -496,16 +533,16 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                         onPressed: () {
                                           Navigator.push(
                                             context,
-                                            MaterialPageRoute(builder: (_) => const ForgotPasswordScreen()),
+                                            MaterialPageRoute(builder: (_) => ForgotPasswordScreen(role: widget.role)),
                                           );
                                         },
                                         style: TextButton.styleFrom(
                                           padding: const EdgeInsets.symmetric(vertical: 10),
                                         ),
-                                        child: const Text(
+                                        child: Text(
                                           'Forgot Password?',
                                           style: TextStyle(
-                                            color: Color(0xFF9F1239),
+                                            color: _primaryColor,
                                             fontWeight: FontWeight.w600,
                                             fontSize: 13,
                                           ),
@@ -521,14 +558,14 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                       child: Container(
                                         decoration: BoxDecoration(
                                           borderRadius: BorderRadius.circular(16),
-                                          gradient: const LinearGradient(
-                                            colors: [Color(0xFFBE123C), Color(0xFF9F1239)],
+                                          gradient: LinearGradient(
+                                            colors: [_accentColor, _primaryColor],
                                             begin: Alignment.topLeft,
                                             end: Alignment.bottomRight,
                                           ),
                                           boxShadow: [
                                             BoxShadow(
-                                              color: const Color(0xFF9F1239).withValues(alpha: 0.45),
+                                              color: _primaryColor.withValues(alpha: 0.45),
                                               blurRadius: 24,
                                               offset: const Offset(0, 8),
                                             ),
@@ -546,14 +583,7 @@ class _LoginScreenState extends State<LoginScreen> with SingleTickerProviderStat
                                             ),
                                           ),
                                           child: _isLoading
-                                              ? const SizedBox(
-                                                  height: 22,
-                                                  width: 22,
-                                                  child: CircularProgressIndicator(
-                                                    strokeWidth: 2.5,
-                                                    color: Colors.white,
-                                                  ),
-                                                )
+                                              ? const PulseConnectLoader(size: 18, color: Colors.white)
                                               : const Row(
                                                   mainAxisAlignment: MainAxisAlignment.center,
                                                   children: [
