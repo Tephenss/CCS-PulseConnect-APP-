@@ -14,14 +14,15 @@ void main() async {
 
   // Initialize Firebase FIRST
   await Firebase.initializeApp();
-  
-  // Initialize Push Notification Service
-  await PushNotificationService().initialize();
 
+  // Initialize Supabase before any service that touches Supabase.instance
   await Supabase.initialize(
     url: Env.supabaseUrl,
     anonKey: Env.supabaseAnonKey,
   );
+
+  // Initialize Push Notification Service
+  await PushNotificationService().initialize();
 
   // Check if user is already logged in
   final authService = AuthService();

@@ -82,23 +82,40 @@ class _StudentEventEvaluationScreenState extends State<StudentEventEvaluationScr
 
   Widget _buildRatingField(Map<String, dynamic> q) {
     final val = int.tryParse(_answers[q['id']]?.toString() ?? '0') ?? 0;
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: List.generate(5, (index) {
-        final starIndex = index + 1;
-        return IconButton(
-          onPressed: () {
-            setState(() {
-              _answers[q['id']] = starIndex.toString();
-            });
-          },
-          icon: Icon(
-            starIndex <= val ? Icons.star_rounded : Icons.star_border_rounded,
-            color: const Color(0xFFD4A843),
-            size: 40,
-          ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final bool compact = constraints.maxWidth < 300;
+        final double buttonSize = compact ? 40 : 44;
+        final double iconSize = compact ? 30 : 34;
+
+        return Wrap(
+          alignment: WrapAlignment.center,
+          spacing: 2,
+          runSpacing: 2,
+          children: List.generate(5, (index) {
+            final starIndex = index + 1;
+            return SizedBox(
+              width: buttonSize,
+              height: buttonSize,
+              child: IconButton(
+                onPressed: () {
+                  setState(() {
+                    _answers[q['id']] = starIndex.toString();
+                  });
+                },
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+                splashRadius: buttonSize / 2,
+                icon: Icon(
+                  starIndex <= val ? Icons.star_rounded : Icons.star_border_rounded,
+                  color: const Color(0xFFD4A843),
+                  size: iconSize,
+                ),
+              ),
+            );
+          }),
         );
-      }),
+      },
     );
   }
 

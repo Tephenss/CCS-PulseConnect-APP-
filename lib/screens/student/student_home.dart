@@ -9,8 +9,8 @@ import 'student_tickets.dart';
 import 'student_event_details.dart';
 import 'student_profile.dart';
 import 'student_scan.dart';
-import '../notifications_screen.dart';
 import '../../services/notification_service.dart';
+import '../../widgets/notifications_modal.dart';
 import '../../widgets/animated_greeting_text.dart';
 import '../../widgets/card_swap_widget.dart';
 import '../../widgets/shiny_text.dart';
@@ -23,7 +23,7 @@ class StudentHome extends StatefulWidget {
   State<StudentHome> createState() => _StudentHomeState();
 }
 
-class _StudentHomeState extends State<StudentHome> {
+class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   final _authService = AuthService();
   final _eventService = EventService();
   Map<String, dynamic>? _user;
@@ -35,7 +35,7 @@ class _StudentHomeState extends State<StudentHome> {
   final _notifService = NotificationService();
   final PageController _headerPageController = PageController();
   int _currentHeaderSlide = 0;
-  Timer? _notifTimer;
+  StreamSubscription<int>? _unreadSubscription;
 
   // Section Selection Gate
   List<Map<String, dynamic>> _sections = [];
@@ -46,21 +46,22 @@ class _StudentHomeState extends State<StudentHome> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadData();
-    _startNotifTimer();
+    _subscribeToNotifications();
   }
 
-  void _startNotifTimer() {
-    _notifTimer = Timer.periodic(const Duration(seconds: 15), (timer) {
-      if (mounted && _currentIndex == 0) {
-        _refreshUnreadCount();
+  void _subscribeToNotifications() {
+    _unreadSubscription = _notifService.unreadCountStream.listen((count) {
+      if (mounted) {
+        setState(() => _unreadCount = count);
       }
     });
   }
 
   Future<void> _refreshUnreadCount() async {
     try {
-      final unread = await _notifService.getUnreadCount();
+      final unread = await _notifService.getUnreadCount(forceRefresh: true);
       if (mounted && unread != _unreadCount) {
         setState(() => _unreadCount = unread);
       }
@@ -69,8 +70,18 @@ class _StudentHomeState extends State<StudentHome> {
 
   Future<void> _loadData() async {
     final user = await _authService.getCurrentUser();
-    final events = await _eventService.getUpcomingEvents();
-    final unread = await _notifService.getUnreadCount();
+    
+    // Initialize Realtime once user is known
+    if (user != null) {
+      final userId = user['id']?.toString() ?? '';
+      if (userId.isNotEmpty) {
+        _notifService.initRealtime(userId);
+      }
+    }
+
+    final yearLevel = await _authService.getStudentYearLevel();
+    final events = await _eventService.getUpcomingEvents(yearLevel: yearLevel);
+    final unread = await _notifService.getUnreadCount(forceRefresh: true);
     final sections = await _authService.getSections();
     if (mounted) {
       setState(() {
@@ -91,8 +102,16 @@ class _StudentHomeState extends State<StudentHome> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refreshUnreadCount();
+    }
+  }
+
+  @override
   void dispose() {
-    _notifTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _unreadSubscription?.cancel();
     _headerPageController.dispose();
     super.dispose();
   }
@@ -501,14 +520,12 @@ class _StudentHomeState extends State<StudentHome> {
                               IconButton(
                                 icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
                                 onPressed: () async {
-                                  final result = await Navigator.push(
-                                    context,
-                                    MaterialPageRoute(builder: (context) => const NotificationsScreen()),
-                                  );
+                                  await _refreshUnreadCount();
+                                  final result = await showNotificationsModal(context);
                                   if (result != null && result is int) {
                                     setState(() => _currentIndex = result);
                                   }
-                                  _loadData();
+                                  await _refreshUnreadCount();
                                 },
                               ),
                               if (_unreadCount > 0)

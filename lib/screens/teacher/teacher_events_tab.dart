@@ -30,9 +30,11 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
   Future<void> _loadEvents() async {
     final user = await _authService.getCurrentUser();
     if (user == null) return;
-    
-    // Fetch ALL events (to match what we see in the Admin screenshots)
-    final events = await _eventService.getAllEvents();
+
+    final teacherId = user['id']?.toString() ?? '';
+    final events = teacherId.isEmpty
+        ? <Map<String, dynamic>>[]
+        : await _eventService.getTeacherAccessibleEvents(teacherId);
     
     if (mounted) {
       setState(() {
@@ -199,12 +201,24 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
     );
   }
 
+  String _getTargetLabel(String? val) {
+    if (val == null || val.toLowerCase() == 'all') return 'All Year Levels';
+    if (val.toLowerCase() == 'none') return 'No Target';
+    final map = {
+      '1': '1st Year',
+      '2': '2nd Year',
+      '3': '3rd Year',
+      '4': '4th Year',
+    };
+    return map[val] ?? val;
+  }
+
   Widget _buildEventCard(Map<String, dynamic> event) {
     final title = event['title'] as String? ?? 'Sample Event';
     final startAt = event['start_at'] as String?;
     final endAt = event['end_at'] as String?;
     String status = event['status'] as String? ?? 'active';
-    final target = event['target_grade'] as String? ?? 'All';
+    final target = _getTargetLabel(event['event_for']?.toString());
 
     DateTime? startDate;
     if (startAt != null) {

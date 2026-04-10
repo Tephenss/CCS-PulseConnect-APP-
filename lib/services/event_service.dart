@@ -6,13 +6,42 @@ class EventService {
 
   bool _isMissingAssistantsTableError(Object error) {
     final msg = error.toString().toLowerCase();
-    return msg.contains('event_assistants') ||
+    if (msg.contains('pgrst201') || msg.contains('ambiguous')) return false;
+    return (msg.contains('event_assistants') && msg.contains('does not exist')) ||
         msg.contains('42p01') ||
         msg.contains('pgrst205');
   }
 
+  bool _isMissingTeacherAssignmentsTableError(Object error) {
+    final msg = error.toString().toLowerCase();
+    if (msg.contains('pgrst201') || msg.contains('ambiguous')) return false;
+    return (msg.contains('event_teacher_assignments') && msg.contains('does not exist')) ||
+        msg.contains('42p01') ||
+        msg.contains('pgrst205');
+  }
+
+  bool _isCheckedInStatus(dynamic rawStatus) {
+    final status = (rawStatus?.toString() ?? '').toLowerCase();
+    return status == 'scanned' ||
+        status == 'present' ||
+        status == 'late' ||
+        status == 'early';
+  }
+
+  // Helper to filter events by target year level
+  List<Map<String, dynamic>> _filterByYearLevel(List<Map<String, dynamic>> events, String? yearLevel) {
+    if (yearLevel == null || yearLevel.isEmpty) return events;
+    return events.where((e) {
+      final target = e['event_for']?.toString().toLowerCase();
+      if (target == null || target == 'all' || target == 'none' || target.isEmpty) return true;
+      return target == yearLevel;
+    }).toList();
+  }
+
+  static const Duration _minSecondsBeforeCheckout = Duration(seconds: 20);
+
   // Get all active/published events (ongoing + upcoming, not yet ended)
-  Future<List<Map<String, dynamic>>> getActiveEvents() async {
+  Future<List<Map<String, dynamic>>> getActiveEvents({String? yearLevel}) async {
     try {
       final now = DateTime.now().toUtc().toIso8601String();
       final response = await _supabase
@@ -21,14 +50,15 @@ class EventService {
           .eq('status', 'published')
           .gte('end_at', now)
           .order('start_at', ascending: true);
-      return List<Map<String, dynamic>>.from(response);
+      final list = List<Map<String, dynamic>>.from(response);
+      return _filterByYearLevel(list, yearLevel);
     } catch (e) {
       return [];
     }
   }
 
   // Get expired events (already ended)
-  Future<List<Map<String, dynamic>>> getExpiredEvents() async {
+  Future<List<Map<String, dynamic>>> getExpiredEvents({String? yearLevel}) async {
     try {
       final now = DateTime.now().toUtc().toIso8601String();
       final response = await _supabase
@@ -37,24 +67,29 @@ class EventService {
           .eq('status', 'published')
           .lt('end_at', now)
           .order('end_at', ascending: false);
-      return List<Map<String, dynamic>>.from(response);
+      final list = List<Map<String, dynamic>>.from(response);
+      return _filterByYearLevel(list, yearLevel);
     } catch (e) {
       return [];
     }
   }
 
   // Get upcoming events (future events)
-  Future<List<Map<String, dynamic>>> getUpcomingEvents() async {
+  Future<List<Map<String, dynamic>>> getUpcomingEvents({String? yearLevel}) async {
     try {
       final now = DateTime.now().toUtc().toIso8601String();
+      // We don't use .limit(5) on the DB side if we filter in Dart, 
+      // because we might drop events and return fewer than 5.
+      // Since it's upcoming, getting all and slicing after filter is safer.
       final response = await _supabase
           .from('events')
           .select()
           .eq('status', 'published')
           .gte('start_at', now)
-          .order('start_at', ascending: true)
-          .limit(5);
-      return List<Map<String, dynamic>>.from(response);
+          .order('start_at', ascending: true);
+      final list = List<Map<String, dynamic>>.from(response);
+      final filtered = _filterByYearLevel(list, yearLevel);
+      return filtered.take(5).toList();
     } catch (e) {
       return [];
     }
@@ -198,6 +233,127 @@ class EventService {
     }
   }
 
+  Future<List<Map<String, dynamic>>> getTeacherAccessibleEvents(
+    String teacherId,
+  ) async {
+    try {
+      // 1. Get events assigned to this teacher
+      final assigned = await _supabase
+          .from('event_teacher_assignments')
+          .select('event_id, events(*)')
+          .eq('teacher_id', teacherId);
+
+      // 2. Get events created by this teacher (proposals/results)
+      final created = await _supabase
+          .from('events')
+          .select()
+          .eq('created_by', teacherId);
+
+      final merged = <String, Map<String, dynamic>>{};
+
+      // Add assigned events
+      for (final row in List<Map<String, dynamic>>.from(assigned)) {
+        final event = row['events'];
+        if (event is Map) {
+          final item = Map<String, dynamic>.from(event);
+          final eventId = item['id']?.toString() ?? '';
+          if (eventId.isNotEmpty) {
+            merged[eventId] = item;
+          }
+        }
+      }
+
+      // Add/Overwrite with created events (to ensure we have creator context)
+      for (final event in List<Map<String, dynamic>>.from(created)) {
+        final eventId = event['id']?.toString() ?? '';
+        if (eventId.isNotEmpty) {
+          merged[eventId] = event;
+        }
+      }
+
+      final list = merged.values.toList();
+      list.sort((a, b) {
+        final dateA = DateTime.tryParse(a['start_at']?.toString() ?? '') ?? DateTime(2000);
+        final dateB = DateTime.tryParse(b['start_at']?.toString() ?? '') ?? DateTime(2000);
+        return dateB.compareTo(dateA); // Descending (latest first)
+      });
+
+      return list;
+    } catch (e) {
+      if (_isMissingTeacherAssignmentsTableError(e)) {
+        return getTeacherEvents(teacherId);
+      }
+      return [];
+    }
+  }
+
+  // Get only UPCOMING accessible events for a specific teacher, max 5 limit
+  Future<List<Map<String, dynamic>>> getTeacherUpcomingEvents(String teacherId) async {
+    try {
+      final allAccessible = await getTeacherAccessibleEvents(teacherId);
+      final now = DateTime.now().toUtc();
+      
+      final upcoming = allAccessible.where((e) {
+        if ((e['status']?.toString() ?? '').toLowerCase() != 'published') return false;
+        final start = DateTime.tryParse(e['start_at']?.toString() ?? '');
+        if (start == null) return false;
+        return start.isAfter(now) || start.isAtSameMomentAs(now);
+      }).toList();
+
+      // Return ascending for upcoming
+      upcoming.sort((a, b) {
+        final dateA = DateTime.tryParse(a['start_at']?.toString() ?? '') ?? DateTime(2000);
+        final dateB = DateTime.tryParse(b['start_at']?.toString() ?? '') ?? DateTime(2000);
+        return dateA.compareTo(dateB);
+      });
+
+      return upcoming.take(5).toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getTeacherScanAccessibleEvents(
+    String teacherId,
+  ) async {
+    final now = DateTime.now().toUtc().toIso8601String();
+
+    try {
+      final assignmentRows = await _supabase
+          .from('event_teacher_assignments')
+          .select('event_id')
+          .eq('teacher_id', teacherId)
+          .eq('can_scan', true)
+          .limit(200);
+
+      if (assignmentRows.isEmpty) {
+        return [];
+      }
+
+      final eventIds = assignmentRows
+          .map((row) => row['event_id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet()
+          .toList();
+
+      if (eventIds.isEmpty) {
+        return [];
+      }
+
+      final eventRows = await _supabase
+          .from('events')
+          .select()
+          .inFilter('id', eventIds)
+          .eq('status', 'published')
+          .gte('end_at', now)
+          .order('start_at', ascending: true);
+
+      return List<Map<String, dynamic>>.from(eventRows);
+    } catch (_) {
+      return [];
+    }
+  }
+
   // Get ALL events (to match admin dashboard for testing)
   Future<List<Map<String, dynamic>>> getAllEvents() async {
     try {
@@ -265,6 +421,77 @@ class EventService {
     }
   }
 
+  Future<bool> canTeacherManageAssistants(
+    String eventId,
+    String teacherId,
+  ) async {
+    try {
+      final response = await _supabase
+          .from('event_teacher_assignments')
+          .select('id')
+          .eq('event_id', eventId)
+          .eq('teacher_id', teacherId)
+          .eq('can_manage_assistants', true)
+          .limit(1);
+      return response.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> canTeacherScanEvent(String eventId, String teacherId) async {
+    try {
+      final response = await _supabase
+          .from('event_teacher_assignments')
+          .select('id')
+          .eq('event_id', eventId)
+          .eq('teacher_id', teacherId)
+          .eq('can_scan', true)
+          .limit(1);
+      return response.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> hasTeacherAnyScanAccess(String teacherId) async {
+    final now = DateTime.now().toUtc().toIso8601String();
+
+    try {
+      final assignmentRows = await _supabase
+          .from('event_teacher_assignments')
+          .select('event_id')
+          .eq('teacher_id', teacherId)
+          .eq('can_scan', true)
+          .limit(50);
+
+      if (assignmentRows.isEmpty) {
+        return false;
+      }
+
+      final eventIds = assignmentRows
+          .map((row) => row['event_id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet()
+          .toList();
+
+      if (eventIds.isEmpty) {
+        return false;
+      }
+
+      final eventRows = await _supabase
+          .from('events')
+          .select('id')
+          .inFilter('id', eventIds)
+          .eq('status', 'published')
+          .gte('end_at', now)
+          .limit(1);
+      return eventRows.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<List<Map<String, dynamic>>> _enrichParticipantsWithUsers(
     List<Map<String, dynamic>> regs,
   ) async {
@@ -321,37 +548,19 @@ class EventService {
   // Get assistants (authorized student scanners) for a specific event
   Future<List<Map<String, dynamic>>> getEventAssistants(String eventId) async {
     try {
-      final response = await _supabase
+      // By fetching base table and enriching, we avoid ambiguous relation embed
+      // errors from Supabase due to multiple foreign keys linking to users table.
+      final base = await _supabase
           .from('event_assistants')
-          .select(
-            'id, event_id, student_id, allow_scan, '
-            'users(first_name, middle_name, last_name, suffix, student_id)'
-          )
+          .select('id, event_id, student_id, allow_scan, assigned_by_teacher_id')
           .eq('event_id', eventId);
-
-      final list = List<Map<String, dynamic>>.from(response);
-
-      // If relation mapping didn't include users, enrich manually.
-      if (list.isNotEmpty && list[0]['users'] == null) {
-        return _enrichAssistantsWithUsers(list);
-      }
-      return list;
+      final list = List<Map<String, dynamic>>.from(base);
+      return _enrichAssistantsWithUsers(list);
     } catch (e) {
       if (_isMissingAssistantsTableError(e)) {
-        // Keep UI stable if migration is not yet applied.
         return [];
       }
-      try {
-        // Fallback if relational select fails due schema relation mismatch.
-        final base = await _supabase
-            .from('event_assistants')
-            .select('id, event_id, student_id, allow_scan')
-            .eq('event_id', eventId);
-        final list = List<Map<String, dynamic>>.from(base);
-        return _enrichAssistantsWithUsers(list);
-      } catch (_) {
-        return [];
-      }
+      return [];
     }
   }
 
@@ -410,8 +619,18 @@ class EventService {
   Future<Map<String, dynamic>> assignEventAssistant({
     required String eventId,
     required String studentId,
+    required String teacherId,
     bool allowScan = true,
   }) async {
+    final canManage = await canTeacherManageAssistants(eventId, teacherId);
+    if (!canManage) {
+      return {
+        'ok': false,
+        'error':
+            'Only teachers assigned by admin can manage assistants for this event.',
+      };
+    }
+
     try {
       // Enforce participants-only assistant assignment per event/batch.
       final regCheck = await _supabase
@@ -435,13 +654,14 @@ class EventService {
       'event_id': eventId,
       'student_id': studentId,
       'allow_scan': allowScan,
+      'assigned_by_teacher_id': teacherId,
     };
 
     try {
       final res = await _supabase
           .from('event_assistants')
           .upsert(payload, onConflict: 'event_id,student_id')
-          .select('id, event_id, student_id, allow_scan');
+          .select('id, event_id, student_id, allow_scan, assigned_by_teacher_id');
 
       final list = List<Map<String, dynamic>>.from(res);
       return {
@@ -460,7 +680,7 @@ class EventService {
       try {
         final existing = await _supabase
             .from('event_assistants')
-            .select('id, event_id, student_id, allow_scan')
+            .select('id, event_id, student_id, allow_scan, assigned_by_teacher_id')
             .eq('event_id', eventId)
             .eq('student_id', studentId)
             .limit(1);
@@ -468,18 +688,22 @@ class EventService {
         if (existing.isNotEmpty) {
           await _supabase
               .from('event_assistants')
-              .update({'allow_scan': allowScan})
+              .update({
+                'allow_scan': allowScan,
+                'assigned_by_teacher_id': teacherId,
+              })
               .eq('event_id', eventId)
               .eq('student_id', studentId);
           final item = Map<String, dynamic>.from(existing.first);
           item['allow_scan'] = allowScan;
+          item['assigned_by_teacher_id'] = teacherId;
           return {'ok': true, 'assistant': item};
         }
 
         final inserted = await _supabase
             .from('event_assistants')
             .insert(payload)
-            .select('id, event_id, student_id, allow_scan');
+            .select('id, event_id, student_id, allow_scan, assigned_by_teacher_id');
         final list = List<Map<String, dynamic>>.from(inserted);
         return {
           'ok': true,
@@ -507,8 +731,23 @@ class EventService {
     String? assistantId,
     String? eventId,
     String? studentId,
+    required String teacherId,
     required bool allowScan,
   }) async {
+    final eId = eventId?.toString() ?? '';
+    if (eId.isEmpty) {
+      return {'ok': false, 'error': 'Missing event identity.'};
+    }
+
+    final canManage = await canTeacherManageAssistants(eId, teacherId);
+    if (!canManage) {
+      return {
+        'ok': false,
+        'error':
+            'Only teachers assigned by admin can update assistant access for this event.',
+      };
+    }
+
     try {
       final normalizedId = assistantId?.toString() ?? '';
       if (normalizedId.isNotEmpty) {
@@ -519,7 +758,6 @@ class EventService {
         return {'ok': true};
       }
 
-      final eId = eventId?.toString() ?? '';
       final sId = studentId?.toString() ?? '';
       if (eId.isEmpty || sId.isEmpty) {
         return {'ok': false, 'error': 'Missing assistant identity.'};
@@ -547,6 +785,100 @@ class EventService {
     }
   }
 
+  Future<Map<String, dynamic>> checkInParticipantAsTeacher(
+    String ticketPayload,
+    String teacherId,
+  ) async {
+    if (!ticketPayload.startsWith('PULSE-')) {
+      return {
+        'ok': false,
+        'error': 'Invalid QR Code Format',
+        'status': 'invalid',
+      };
+    }
+
+    final ticketId = ticketPayload.replaceFirst('PULSE-', '').trim();
+
+    try {
+      String eventId = '';
+
+      try {
+        final ticketRes = await _supabase
+            .from('tickets')
+            .select('id, event_registrations!inner(event_id)')
+            .eq('id', ticketId)
+            .limit(1);
+
+        if (ticketRes.isNotEmpty) {
+          final reg = ticketRes.first['event_registrations'];
+          eventId = reg is Map ? reg['event_id']?.toString() ?? '' : '';
+        }
+      } catch (_) {
+        // Fallback path for deployments where this relation select fails.
+      }
+
+      if (eventId.isEmpty) {
+        final ticketBaseRes = await _supabase
+            .from('tickets')
+            .select('id, registration_id')
+            .eq('id', ticketId)
+            .limit(1);
+
+        if (ticketBaseRes.isEmpty) {
+          return {
+            'ok': false,
+            'error': 'Ticket not found in the system.',
+            'status': 'invalid',
+          };
+        }
+
+        final registrationId = ticketBaseRes.first['registration_id']?.toString() ?? '';
+        if (registrationId.isNotEmpty) {
+          final regRes = await _supabase
+              .from('event_registrations')
+              .select('event_id')
+              .eq('id', registrationId)
+              .limit(1);
+          if (regRes.isNotEmpty) {
+            eventId = regRes.first['event_id']?.toString() ?? '';
+          }
+        }
+      }
+
+      if (eventId.isEmpty) {
+        return {
+          'ok': false,
+          'error': 'Event lookup failed for this ticket.',
+          'status': 'invalid',
+        };
+      }
+
+      final canScan = await canTeacherScanEvent(eventId, teacherId);
+      if (!canScan) {
+        return {
+          'ok': false,
+          'error': 'You are not assigned to scan this event.',
+          'status': 'forbidden',
+        };
+      }
+
+      return checkInParticipant(ticketPayload);
+    } catch (e) {
+      final msg = e.toString().toLowerCase();
+      final likelyOffline = msg.contains('socketexception') ||
+          msg.contains('timed out') ||
+          msg.contains('failed host lookup') ||
+          msg.contains('network');
+      return {
+        'ok': false,
+        'error': likelyOffline
+            ? 'Check-in failed. Check internet connection.'
+            : 'Check-in failed. Please try again.',
+        'status': 'error',
+      };
+    }
+  }
+
   // Check in a participant via their ticket token/ID
   // Enhanced with time validation matching JADX QRCheckInActivity logic
   Future<Map<String, dynamic>> checkInParticipant(String ticketPayload) async {
@@ -570,19 +902,61 @@ class EventService {
       }
 
       final attendance = existingParams[0];
+      final isCheckedIn = _isCheckedInStatus(attendance['status']);
 
-      // 2. Get event info via ticket → registration → event
-      final ticketRes = await _supabase
-          .from('tickets')
-          .select('id, registration_id, event_registrations!inner(event_id, events!inner(*))')
-          .eq('id', ticketId)
-          .limit(1);
-
+      // 2. Get event info via ticket -> registration -> event
       Map<String, dynamic>? eventData;
-      if (ticketRes.isNotEmpty) {
-        final reg = ticketRes[0]['event_registrations'];
-        if (reg != null) {
-          eventData = reg['events'] as Map<String, dynamic>?;
+      try {
+        final ticketRes = await _supabase
+            .from('tickets')
+            .select('id, registration_id, event_registrations!inner(event_id, events!inner(*))')
+            .eq('id', ticketId)
+            .limit(1);
+
+        if (ticketRes.isNotEmpty) {
+          final reg = ticketRes[0]['event_registrations'];
+          if (reg != null) {
+            eventData = reg['events'] as Map<String, dynamic>?;
+          }
+        }
+      } catch (_) {
+        // Ignore and continue to fallback.
+      }
+
+      if (eventData == null) {
+        try {
+          final ticketBaseRes = await _supabase
+              .from('tickets')
+              .select('id, registration_id')
+              .eq('id', ticketId)
+              .limit(1);
+
+          if (ticketBaseRes.isNotEmpty) {
+            final registrationId = ticketBaseRes.first['registration_id']?.toString() ?? '';
+            if (registrationId.isNotEmpty) {
+              final regRes = await _supabase
+                  .from('event_registrations')
+                  .select('event_id')
+                  .eq('id', registrationId)
+                  .limit(1);
+
+              if (regRes.isNotEmpty) {
+                final eventId = regRes.first['event_id']?.toString() ?? '';
+                if (eventId.isNotEmpty) {
+                  final eventRes = await _supabase
+                      .from('events')
+                      .select('*')
+                      .eq('id', eventId)
+                      .limit(1);
+                  if (eventRes.isNotEmpty) {
+                    eventData = Map<String, dynamic>.from(eventRes.first);
+                  }
+                }
+              }
+            }
+          }
+        } catch (_) {
+          // Keep eventData null; fallback check-in below still works.
         }
       }
 
@@ -606,7 +980,7 @@ class EventService {
           // Already ended check
           if (endAt != null && now.isAfter(endAt)) {
             // If already checked in, let them check out
-            if (attendance['status'] == 'scanned' && attendance['check_out_at'] == null) {
+            if (isCheckedIn && attendance['check_out_at'] == null) {
               await _supabase
                   .from('attendance')
                   .update({'check_out_at': now.toIso8601String()})
@@ -620,12 +994,23 @@ class EventService {
             };
           }
 
-          // Already scanned - allow check-out
-          if (attendance['status'] == 'scanned') {
+          // Already checked in - allow check-out
+          if (isCheckedIn) {
             if (attendance['check_out_at'] != null) {
               return {'ok': false, 'error': 'Ticket already fully used (checked in & out).', 'status': 'used'};
             }
-            // Check-out
+
+            final checkInAt = attendance['check_in_at'] != null
+                ? DateTime.tryParse(attendance['check_in_at'].toString())
+                : null;
+            if (checkInAt != null && now.difference(checkInAt).abs() < _minSecondsBeforeCheckout) {
+              return {
+                'ok': false,
+                'error': 'Already checked in. Please wait a few seconds before scanning again.',
+                'status': 'already_checked_in',
+              };
+            }
+
             await _supabase
                 .from('attendance')
                 .update({'check_out_at': now.toIso8601String()})
@@ -633,7 +1018,7 @@ class EventService {
             return {'ok': true, 'status': 'checked_out', 'message': 'Check-out successful!'};
           }
 
-          // Determine if late
+          // Determine status for first check-in
           bool isLate = false;
           if (graceMinutes > 0) {
             final graceDeadline = startAt.add(Duration(minutes: graceMinutes));
@@ -641,12 +1026,16 @@ class EventService {
           } else {
             isLate = now.isAfter(startAt);
           }
+          final isEarly = now.isBefore(startAt);
+          final checkInStatus = isEarly ? 'early' : (isLate ? 'late' : 'present');
+          final checkInMessage = isEarly
+              ? 'Check-in successful (EARLY)'
+              : (isLate ? 'Check-in successful (LATE)' : 'Check-in successful - On Time!');
 
-          // Perform check-in
           await _supabase
               .from('attendance')
               .update({
-                'status': 'scanned',
+                'status': checkInStatus,
                 'check_in_at': now.toIso8601String(),
               })
               .eq('ticket_id', ticketId);
@@ -654,28 +1043,50 @@ class EventService {
           return {
             'ok': true,
             'ticket_id': ticketId,
-            'status': isLate ? 'late' : 'on_time',
-            'message': isLate ? 'Check-in successful (LATE)' : 'Check-in successful — On Time!',
+            'status': checkInStatus,
+            'message': checkInMessage,
           };
         }
       }
 
       // Fallback: no event timing data, just check in
-      if (attendance['status'] == 'scanned') {
+      if (isCheckedIn) {
         return {'ok': false, 'error': 'Ticket has already been scanned.', 'status': 'used'};
       }
 
       await _supabase
           .from('attendance')
           .update({
-            'status': 'scanned',
+            'status': 'present',
             'check_in_at': DateTime.now().toIso8601String(),
           })
           .eq('ticket_id', ticketId);
 
-      return {'ok': true, 'ticket_id': ticketId, 'status': 'on_time', 'message': 'Check-in successful!'};
+      return {'ok': true, 'ticket_id': ticketId, 'status': 'present', 'message': 'Check-in successful!'};
     } catch (e) {
-      return {'ok': false, 'error': 'Check-in failed. Check internet connection.', 'status': 'error'};
+      final msg = e.toString().toLowerCase();
+      final likelyOffline = msg.contains('socketexception') ||
+          msg.contains('timed out') ||
+          msg.contains('failed host lookup') ||
+          msg.contains('network');
+
+      String errorMessage = likelyOffline
+          ? 'Check-in failed. Check internet connection.'
+          : 'Check-in failed. Please try again.';
+
+      if (!likelyOffline) {
+        if (msg.contains('attendance_status_check')) {
+          errorMessage = 'Check-in failed due to attendance status mismatch.';
+        } else if (msg.contains('permission denied') || msg.contains('row level security')) {
+          errorMessage = 'Check-in failed due to access policy. Please contact admin.';
+        }
+      }
+
+      return {
+        'ok': false,
+        'error': errorMessage,
+        'status': 'error',
+      };
     }
   }
 
@@ -747,6 +1158,20 @@ class EventService {
     }
   }
 
+  // Manual check-out for a participant
+  Future<Map<String, dynamic>> manualCheckOut(String ticketId) async {
+    try {
+      final now = DateTime.now();
+      await _supabase
+          .from('attendance')
+          .update({'check_out_at': now.toIso8601String()})
+          .eq('ticket_id', ticketId);
+      return {'ok': true, 'message': 'Check-out recorded!'};
+    } catch (e) {
+      return {'ok': false, 'error': 'Manual check-out failed.'};
+    }
+  }
+
   // Get attendance info for a ticket (check-in/out times, status)
   Future<Map<String, dynamic>?> getTicketAttendance(String ticketId) async {
     try {
@@ -764,4 +1189,3 @@ class EventService {
     }
   }
 }
-

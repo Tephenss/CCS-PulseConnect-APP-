@@ -15,6 +15,8 @@ class TeacherCreateEvent extends StatefulWidget {
 
 class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   int _currentStep = 1;
+  static final DateFormat _dateTimeFormat = DateFormat('MM/dd/yyyy hh:mm a');
+  static const Duration _manilaOffset = Duration(hours: 8);
 
   // Form Field Controllers
   final _titleCtrl = TextEditingController();
@@ -50,12 +52,26 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   String? _validationError;
 
   DateTime? _parseDateTime(String text) {
-    if (text.isEmpty) return null;
+    if (text.trim().isEmpty) return null;
     try {
-      return DateFormat('MM/dd/yyyy hh:mm a').parse(text);
-    } catch (e) {
+      final parsed = _dateTimeFormat.parseStrict(text.trim());
+      // Keep wall-clock components stable so event times stay Manila-based
+      // even if the device/emulator timezone is changed.
+      return DateTime(parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute);
+    } catch (_) {
       return null;
     }
+  }
+
+  String _toUtcIsoFromManila(DateTime manilaWallTime) {
+    final utc = DateTime.utc(
+      manilaWallTime.year,
+      manilaWallTime.month,
+      manilaWallTime.day,
+      manilaWallTime.hour,
+      manilaWallTime.minute,
+    ).subtract(_manilaOffset);
+    return utc.toIso8601String();
   }
 
   bool _validateStep(int step) {
@@ -154,8 +170,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         'title': '${_titleCtrl.text.trim()} (Batch 1)',
         'description': _descCtrl.text.trim(),
         'location': _locationCtrl.text.trim(),
-        'start_at': s1.toUtc().toIso8601String(),
-        'end_at': e1.toUtc().toIso8601String(),
+        'start_at': _toUtcIsoFromManila(s1),
+        'end_at': _toUtcIsoFromManila(e1),
         'event_type': _eventType,
         'event_for': _eventFor,
         'grace_time': int.tryParse(_graceTimeCtrl.text) ?? 15,
@@ -168,8 +184,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         'title': '${_titleCtrl.text.trim()} (Batch 2)',
         'description': _descCtrl.text.trim(),
         'location': _locationCtrl.text.trim(),
-        'start_at': s2.toUtc().toIso8601String(),
-        'end_at': e2.toUtc().toIso8601String(),
+        'start_at': _toUtcIsoFromManila(s2),
+        'end_at': _toUtcIsoFromManila(e2),
         'event_type': _eventType,
         'event_for': _eventFor,
         'grace_time': int.tryParse(_graceTimeCtrl.text) ?? 15,
@@ -197,8 +213,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         'title': _titleCtrl.text.trim(),
         'description': _descCtrl.text.trim(),
         'location': _locationCtrl.text.trim(),
-        'start_at': s1.toUtc().toIso8601String(),
-        'end_at': e1.toUtc().toIso8601String(),
+        'start_at': _toUtcIsoFromManila(s1),
+        'end_at': _toUtcIsoFromManila(e1),
         'event_type': _eventType,
         'event_for': _eventFor,
         'grace_time': int.tryParse(_graceTimeCtrl.text) ?? 15,
@@ -559,6 +575,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         _buildLabel('Event Title'),
         _buildTextField(controller: _titleCtrl, hint: 'e.g. CCS Summit 2026', prefixIcon: Icons.edit_outlined),
         const SizedBox(height: 24),
+
+        _buildLabel('Location'),
+        _buildTextField(controller: _locationCtrl, hint: 'e.g. CCS Auditorium', prefixIcon: Icons.location_on_outlined),
+        const SizedBox(height: 24),
         
         Row(
           children: [
@@ -601,10 +621,6 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             ),
           ],
         ),
-        const SizedBox(height: 24),
-
-        _buildLabel('Location'),
-        _buildTextField(controller: _locationCtrl, hint: 'e.g. CCS Auditorium', prefixIcon: Icons.location_on_outlined),
         const SizedBox(height: 32),
 
         Container(
@@ -991,7 +1007,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
 
   Future<void> _selectDateTime(TextEditingController controller) async {
     DateTime? initialDate = _parseDateTime(controller.text);
-    TimeOfDay initialTime = const TimeOfDay(hour: 0, minute: 0); // Default to 12:00 AM (0:00)
+    TimeOfDay initialTime = initialDate != null
+        ? TimeOfDay(hour: initialDate.hour, minute: initialDate.minute)
+        : const TimeOfDay(hour: 0, minute: 0);
 
     // Tomorrow Only Restriction - Normalized to Start of Day (00:00:00)
     final DateTime now = DateTime.now();
@@ -1061,7 +1079,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
 
         if (mounted) {
           setState(() {
-            controller.text = DateFormat('MM/dd/yyyy hh:mm a').format(fullDateTime);
+            controller.text = _dateTimeFormat.format(fullDateTime);
           });
           // Removed manual auto-sync to match new Web Dashboard rules
         }

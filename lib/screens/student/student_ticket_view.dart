@@ -681,6 +681,9 @@ class _StudentTicketViewState extends State<StudentTicketView> {
 
   Color _getAttendanceColor(String status) {
     switch (status) {
+      case 'present': return const Color(0xFF059669);
+      case 'late': return const Color(0xFFD97706);
+      case 'early': return const Color(0xFF2563EB);
       case 'scanned': return const Color(0xFF059669);
       case 'unscanned': return const Color(0xFF6B7280);
       default: return const Color(0xFF6B7280);
@@ -689,6 +692,9 @@ class _StudentTicketViewState extends State<StudentTicketView> {
 
   IconData _getAttendanceIcon(String status) {
     switch (status) {
+      case 'present': return Icons.check_circle_rounded;
+      case 'late': return Icons.watch_later_rounded;
+      case 'early': return Icons.bolt_rounded;
       case 'scanned': return Icons.check_circle_rounded;
       case 'unscanned': return Icons.radio_button_unchecked_rounded;
       default: return Icons.help_outline_rounded;
@@ -697,6 +703,9 @@ class _StudentTicketViewState extends State<StudentTicketView> {
 
   String _getAttendanceLabel(String status) {
     switch (status) {
+      case 'present': return 'Checked In';
+      case 'late': return 'Checked In (Late)';
+      case 'early': return 'Checked In (Early)';
       case 'scanned': return 'Checked In';
       case 'unscanned': return 'Not Yet Scanned';
       default: return status.toUpperCase();

@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
 
@@ -17,40 +18,59 @@ class TeacherEventManage extends StatefulWidget {
 class _TeacherEventManageState extends State<TeacherEventManage> with SingleTickerProviderStateMixin {
   late TabController _tabController;
   final _eventService = EventService();
+  final _authService = AuthService();
 
   List<Map<String, dynamic>> _participants = [];
   List<Map<String, dynamic>> _assistants = [];
   bool _isLoading = true;
   String _searchQuery = '';
+  String _currentTeacherId = '';
+  bool _canManageAssistants = false;
+  bool _isApprovalPhase = false;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    final status = (widget.event['status']?.toString() ?? 'pending').toLowerCase();
+    // Only show Participants and Assistants tabs for Published or Expired events
+    _isApprovalPhase = status != 'published' && status != 'expired';
+    _tabController = TabController(length: _isApprovalPhase ? 1 : 3, vsync: this);
     _loadData();
   }
 
-  Future<void> _loadData() async {
+  Future<void> _loadData([bool showLoader = false]) async {
+    if (showLoader && mounted) {
+      setState(() => _isLoading = true);
+    }
+    
     final eventId = widget.event['id']?.toString() ?? '';
     if (eventId.isEmpty) {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
       return;
     }
 
     try {
+      final user = await _authService.getCurrentUser();
+      final teacherId = user?['id']?.toString() ?? '';
       final results = await Future.wait([
         _eventService.getEventParticipants(eventId),
         _eventService.getEventAssistants(eventId),
+        teacherId.isEmpty
+            ? Future<bool>.value(false)
+            : _eventService.canTeacherManageAssistants(eventId, teacherId),
       ]);
 
       final participants = results[0] as List<Map<String, dynamic>>;
       final assistants = results[1] as List<Map<String, dynamic>>;
+      final canManageAssistants = results[2] as bool;
 
       if (mounted) {
         setState(() {
           _isLoading = false;
           _participants = participants;
           _assistants = assistants;
+          _currentTeacherId = teacherId;
+          _canManageAssistants = canManageAssistants;
         });
       }
     } catch (_) {
@@ -59,6 +79,8 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
           _isLoading = false;
           _participants = [];
           _assistants = [];
+          _currentTeacherId = '';
+          _canManageAssistants = false;
         });
       }
     }
@@ -108,12 +130,12 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     final u = assistant['users'];
     if (u is Map) {
       final idNum = (u['id_number'] ?? '').toString().trim();
-      if (idNum.isNotEmpty) return idNum;
+      if (idNum.isNotEmpty && idNum != 'null') return idNum;
       final studentId = (u['student_id'] ?? '').toString().trim();
-      if (studentId.isNotEmpty) return studentId;
+      if (studentId.isNotEmpty && studentId != 'null') return studentId;
     }
     final legacy = (assistant['id_number'] ?? '').toString().trim();
-    return legacy.isNotEmpty ? legacy : 'N/A';
+    return legacy.isNotEmpty && legacy != 'null' ? legacy : 'N/A';
   }
 
   List<Map<String, String>> _buildAssistantCandidates() {
@@ -129,12 +151,18 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
 
       final name = _getName(p);
       final u = p['users'];
-      final idNum = (u is Map ? (u['id_number'] ?? u['student_id']) : null)?.toString() ?? 'N/A';
+      String idNum = 'N/A';
+      if (u is Map) {
+        final id = (u['id_number'] ?? '').toString().trim();
+        final sc = (u['student_id'] ?? '').toString().trim();
+        if (id.isNotEmpty && id != 'null') idNum = id;
+        else if (sc.isNotEmpty && sc != 'null') idNum = sc;
+      }
 
       candidates.add({
         'student_id': sid,
         'name': name,
-        'id_number': idNum.isEmpty ? 'N/A' : idNum,
+        'id_number': idNum,
       });
     }
 
@@ -152,7 +180,12 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       final attendance = ticket['attendance'];
       if (attendance == null) return 'unscanned';
       final att = (attendance is List && attendance.isNotEmpty) ? attendance[0] : null;
-      return att?['status']?.toString() ?? 'unscanned';
+      if (att == null) return 'unscanned';
+      
+      // Prioritize checked out status
+      if (att['check_out_at'] != null) return 'checked_out';
+      
+      return att['status']?.toString() ?? 'unscanned';
     } catch (_) {
       return 'unscanned';
     }
@@ -175,7 +208,33 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     }
   }
 
+  // ─── Helper: check-out time ───
+  String _getCheckOut(Map<String, dynamic> p) {
+    try {
+      final tickets = p['tickets'];
+      if (tickets == null || (tickets is List && tickets.isEmpty)) return '—';
+      final ticket = (tickets is List) ? tickets[0] : null;
+      if (ticket == null) return '—';
+      final attendance = ticket['attendance'];
+      final att = (attendance is List && attendance.isNotEmpty) ? attendance[0] : null;
+      return att != null && att['check_out_at'] != null
+        ? DateFormat('hh:mm a').format(DateTime.parse(att['check_out_at']))
+        : '—';
+    } catch (_) {
+      return '—';
+    }
+  }
+
   Future<void> _toggleAssistant(Map<String, dynamic> assistant, bool val) async {
+    if (!_canManageAssistants || _currentTeacherId.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Only assigned teachers can manage assistants for this event.')),
+        );
+      }
+      return;
+    }
+
     final oldVal = assistant['allow_scan'] == true;
     setState(() => assistant['allow_scan'] = val);
 
@@ -183,6 +242,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       assistantId: assistant['id']?.toString(),
       eventId: widget.event['id']?.toString(),
       studentId: assistant['student_id']?.toString(),
+      teacherId: _currentTeacherId,
       allowScan: val,
     );
 
@@ -196,9 +256,31 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     }
   }
 
+  Future<void> _manualCheckOut(String ticketId, String studentName) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final res = await _eventService.manualCheckOut(ticketId);
+    if (res['ok'] == true) {
+      await _loadData(true);
+      messenger.showSnackBar(
+        SnackBar(content: Text('$studentName checked out successfully!')),
+      );
+    } else {
+      messenger.showSnackBar(
+        SnackBar(content: Text(res['error'] ?? 'Manual checkout failed.')),
+      );
+    }
+  }
+
   Future<void> _showAssignAssistantSheet() async {
     final eventId = widget.event['id']?.toString() ?? '';
     if (eventId.isEmpty) return;
+    if (!_canManageAssistants || _currentTeacherId.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Only assigned teachers can add assistants for this event.')),
+      );
+      return;
+    }
 
     final baseCandidates = _buildAssistantCandidates();
     if (baseCandidates.isEmpty) {
@@ -286,24 +368,38 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                         : ListView.separated(
                             itemCount: filtered.length,
                             separatorBuilder: (_, __) => const SizedBox(height: 8),
-                            itemBuilder: (context, index) {
+                            itemBuilder: (listContext, index) {
                               final c = filtered[index];
                               final name = c['name'] ?? 'Student';
                               final idNum = c['id_number'] ?? 'N/A';
                               final sid = c['student_id'] ?? '';
                               final initials = _getInitials(name);
 
+                              const avatarColors = [
+                                Color(0xFF064E3B),
+                                Color(0xFF1D4ED8),
+                                Color(0xFF7C3AED),
+                                Color(0xFF0F766E),
+                                Color(0xFFB45309),
+                              ];
+                              final avatarColor = avatarColors[index % avatarColors.length];
+
                               return InkWell(
-                                borderRadius: BorderRadius.circular(14),
+                                borderRadius: BorderRadius.circular(16),
                                 onTap: isSubmitting
                                     ? null
                                     : () async {
                                         if (sid.isEmpty) return;
+                                        // Cache messenger and navigator before any async gaps!
+                                        final messenger = ScaffoldMessenger.of(context);
+                                        final navigator = Navigator.of(listContext);
+
                                         setSheetState(() => isSubmitting = true);
 
                                         final res = await _eventService.assignEventAssistant(
                                           eventId: eventId,
                                           studentId: sid,
+                                          teacherId: _currentTeacherId,
                                           allowScan: true,
                                         );
 
@@ -311,62 +407,71 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                                         setSheetState(() => isSubmitting = false);
 
                                         if (res['ok'] == true) {
-                                          if (Navigator.canPop(context)) Navigator.pop(context);
-                                          await _loadData();
+                                          if (navigator.canPop()) navigator.pop();
+                                          await _loadData(true);
                                           if (!mounted) return;
-                                          ScaffoldMessenger.of(context).showSnackBar(
+                                          messenger.showSnackBar(
                                             SnackBar(content: Text('$name assigned as assistant.')),
                                           );
                                         } else {
-                                          ScaffoldMessenger.of(context).showSnackBar(
+                                          messenger.showSnackBar(
                                             SnackBar(content: Text(res['error'] ?? 'Failed to assign assistant.')),
                                           );
                                         }
                                       },
                                 child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                  padding: const EdgeInsets.all(16),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFFF9FAFB),
-                                    borderRadius: BorderRadius.circular(14),
-                                    border: Border.all(color: const Color(0xFFE5E7EB)),
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(16),
+                                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 12, offset: const Offset(0, 2))],
+                                    border: Border.all(color: const Color(0xFFF3F4F6)),
                                   ),
                                   child: Row(
                                     children: [
                                       Container(
-                                        width: 38,
-                                        height: 38,
-                                        decoration: const BoxDecoration(
-                                          color: Color(0xFF064E3B),
-                                          shape: BoxShape.circle,
-                                        ),
+                                        width: 46,
+                                        height: 46,
+                                        decoration: BoxDecoration(color: avatarColor, shape: BoxShape.circle),
                                         child: Center(
                                           child: Text(
                                             initials,
-                                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+                                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16),
                                           ),
                                         ),
                                       ),
-                                      const SizedBox(width: 12),
+                                      const SizedBox(width: 14),
                                       Expanded(
                                         child: Column(
                                           crossAxisAlignment: CrossAxisAlignment.start,
                                           children: [
                                             Text(
                                               name,
-                                              style: const TextStyle(
-                                                fontWeight: FontWeight.w700,
-                                                fontSize: 14,
-                                                color: Color(0xFF111827),
-                                              ),
+                                              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF111827)),
                                             ),
+                                            const SizedBox(height: 2),
                                             Text(
-                                              'ID: $idNum',
-                                              style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                                              'Student ID: $idNum',
+                                              style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280), fontWeight: FontWeight.w500),
                                             ),
                                           ],
                                         ),
                                       ),
-                                      const Icon(Icons.add_circle_rounded, color: Color(0xFF064E3B)),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF064E3B).withValues(alpha: 0.1),
+                                          borderRadius: BorderRadius.circular(10),
+                                        ),
+                                        child: const Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(Icons.add_rounded, color: Color(0xFF064E3B), size: 16),
+                                            SizedBox(width: 6),
+                                            Text('Assign', style: TextStyle(color: Color(0xFF064E3B), fontWeight: FontWeight.w700, fontSize: 13)),
+                                          ],
+                                        ),
+                                      ),
                                     ],
                                   ),
                                 ),
@@ -421,6 +526,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
   @override
   Widget build(BuildContext context) {
     bool isPending = widget.event['status'] == 'pending';
+    bool isApproved = widget.event['status'] == 'approved';
     bool isRejected = widget.event['status'] == 'rejected';
 
     return Scaffold(
@@ -439,26 +545,36 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       ),
       body: Column(
         children: [
-          // ── Status Banner (if pending/rejected) ──
-          if (isPending || isRejected)
+          // ── Status Banner (if pending/rejected/approved) ──
+          if (isPending || isRejected || isApproved)
             Container(
-              color: isPending ? Colors.orange.shade50 : Colors.red.shade50,
+              color: isApproved 
+                  ? Colors.blue.shade50 
+                  : (isPending ? Colors.orange.shade50 : Colors.red.shade50),
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
               child: Row(
                 children: [
                   Icon(
-                    isPending ? Icons.hourglass_top_rounded : Icons.cancel_rounded,
-                    color: isPending ? Colors.orange.shade700 : Colors.red.shade700,
+                    isApproved 
+                        ? Icons.check_circle_outline_rounded 
+                        : (isPending ? Icons.hourglass_top_rounded : Icons.cancel_rounded),
+                    color: isApproved 
+                        ? Colors.blue.shade700 
+                        : (isPending ? Colors.orange.shade700 : Colors.red.shade700),
                     size: 18,
                   ),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      isPending
-                          ? 'This event is pending admin approval.'
-                          : 'This event was rejected. Reason: Conflict with schedule.',
+                      isApproved
+                          ? 'Event is approved! It will be visible to students once published.'
+                          : (isPending
+                              ? 'This event is pending admin approval.'
+                              : 'This event was rejected. Reason: Conflict with schedule.'),
                       style: TextStyle(
-                        color: isPending ? Colors.orange.shade900 : Colors.red.shade900,
+                        color: isApproved 
+                            ? Colors.blue.shade900 
+                            : (isPending ? Colors.orange.shade900 : Colors.red.shade900),
                         fontWeight: FontWeight.w600,
                         fontSize: 13,
                       ),
@@ -469,23 +585,24 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
             ),
 
           // ── Tab Bar ──
-          Container(
-            color: Colors.white,
-            child: TabBar(
-              controller: _tabController,
-              indicatorColor: const Color(0xFF064E3B),
-              indicatorWeight: 3,
-              labelColor: const Color(0xFF064E3B),
-              unselectedLabelColor: Colors.grey.shade500,
-              labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
-              unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-              tabs: const [
-                Tab(text: 'Details'),
-                Tab(text: 'Participants'),
-                Tab(text: 'Assistants'),
-              ],
+          if (!_isApprovalPhase)
+            Container(
+              color: Colors.white,
+              child: TabBar(
+                controller: _tabController,
+                indicatorColor: const Color(0xFF064E3B),
+                indicatorWeight: 3,
+                labelColor: const Color(0xFF064E3B),
+                unselectedLabelColor: Colors.grey.shade500,
+                labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
+                unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                tabs: const [
+                  Tab(text: 'Details'),
+                  Tab(text: 'Participants'),
+                  Tab(text: 'Assistants'),
+                ],
+              ),
             ),
-          ),
 
           Expanded(
             child: _isLoading
@@ -494,8 +611,8 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                     controller: _tabController,
                     children: [
                       _buildDetailsTab(),
-                      _buildParticipantsTab(),
-                      _buildAssistantsTab(),
+                      if (!_isApprovalPhase) _buildParticipantsTab(),
+                      if (!_isApprovalPhase) _buildAssistantsTab(),
                     ],
                   ),
           ),
@@ -504,47 +621,172 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     );
   }
 
+  String _getTargetLabel(String? val) {
+    if (val == null || val.toLowerCase() == 'all') return 'All Year Levels';
+    if (val.toLowerCase() == 'none') return 'No Target';
+    final map = {
+      '1': '1st Year',
+      '2': '2nd Year',
+      '3': '3rd Year',
+      '4': '4th Year',
+    };
+    return map[val] ?? val;
+  }
+
   // ═══════════ DETAILS TAB ═══════════
   Widget _buildDetailsTab() {
+    final startAt = widget.event['start_at'] as String?;
+    final endAt = widget.event['end_at'] as String?;
+    DateTime? startDate, endDate;
+    if (startAt != null) {
+      try { startDate = DateTime.parse(startAt).toLocal(); } catch (_) {}
+    }
+    if (endAt != null) {
+      try { endDate = DateTime.parse(endAt).toLocal(); } catch (_) {}
+    }
+
+    bool isMultiDay = false;
+    if (startDate != null && endDate != null) {
+      isMultiDay = startDate.day != endDate.day ||
+          startDate.month != endDate.month ||
+          startDate.year != endDate.year;
+    }
+
+    final dateStr = startDate != null
+        ? isMultiDay && endDate != null
+            ? '${DateFormat('MMMM dd, yyyy').format(startDate)} - ${DateFormat('MMMM dd, yyyy').format(endDate)}'
+            : DateFormat('MMMM dd, yyyy').format(startDate)
+        : 'TBA';
+
+    final timeStr = startDate != null
+        ? '${DateFormat('hh:mm a').format(startDate)}${endDate != null ? ' - ${DateFormat('hh:mm a').format(endDate)}' : ''}'
+        : 'TBA';
+
+    final location = widget.event['location'] ?? 'TBA';
+    final target = _getTargetLabel(widget.event['event_for']?.toString());
+    final description = widget.event['description'] ?? 'No description provided.';
+
     return ListView(
-      padding: const EdgeInsets.all(24),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
       children: [
-        _buildInfoBox('Description', widget.event['description'] ?? 'No description provided.', Icons.description_outlined),
-        const SizedBox(height: 16),
-        Row(
-          children: [
-            Expanded(child: _buildInfoBox('Type', widget.event['type'] ?? 'Academic', Icons.category_outlined)),
-            const SizedBox(width: 16),
-            Expanded(child: _buildInfoBox('Target', widget.event['target_grade'] ?? 'All Grades', Icons.group_outlined)),
-          ],
+        const Text(
+          'EVENT INFORMATION',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 1.2,
+            color: Color(0xFF6B7280),
+          ),
         ),
-        const SizedBox(height: 16),
-        _buildInfoBox('Venue', widget.event['location'] ?? 'TBA', Icons.location_on_outlined),
+        const SizedBox(height: 12),
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.02),
+                blurRadius: 15,
+                offset: const Offset(0, 4),
+              )
+            ],
+            border: Border.all(color: const Color(0xFFF3F4F6)),
+          ),
+          child: Column(
+            children: [
+              _buildPremiumDetailRow(Icons.group_rounded, 'Target Participants', target),
+              const Divider(height: 1, color: Color(0xFFF3F4F6), indent: 64),
+              _buildPremiumDetailRow(Icons.calendar_today_rounded, 'Date', dateStr),
+              const Divider(height: 1, color: Color(0xFFF3F4F6), indent: 64),
+              _buildPremiumDetailRow(Icons.schedule_rounded, 'Time', timeStr),
+              const Divider(height: 1, color: Color(0xFFF3F4F6), indent: 64),
+              _buildPremiumDetailRow(Icons.location_on_rounded, 'Venue', location),
+            ],
+          ),
+        ),
+        
+        const SizedBox(height: 28),
+        const Text(
+          'ABOUT THE EVENT',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 1.2,
+            color: Color(0xFF6B7280),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.02),
+                blurRadius: 15,
+                offset: const Offset(0, 4),
+              )
+            ],
+            border: Border.all(color: const Color(0xFFF3F4F6)),
+          ),
+          child: Text(
+            description,
+            style: const TextStyle(
+              fontSize: 15,
+              color: Color(0xFF374151),
+              height: 1.6,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
       ],
     );
   }
 
-  Widget _buildInfoBox(String label, String value, IconData icon) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade100),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, 2))],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _buildPremiumDetailRow(IconData icon, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          Row(
-            children: [
-              Icon(icon, size: 15, color: const Color(0xFF064E3B)),
-              const SizedBox(width: 6),
-              Text(label, style: const TextStyle(color: Color(0xFF064E3B), fontWeight: FontWeight.w700, fontSize: 11, letterSpacing: 0.3)),
-            ],
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: const Color(0xFF064E3B).withValues(alpha: 0.05),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(icon, color: const Color(0xFF064E3B), size: 18),
           ),
-          const SizedBox(height: 10),
-          Text(value, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: Color(0xFF1F2937))),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF9CA3AF),
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF111827),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -562,7 +804,11 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
           }).toList();
 
     // Stats
-    final checkedIn = _participants.where((p) => _getAttStatus(p) == 'present').length;
+    final checkedIn = _participants.where((p) {
+      final s = _getAttStatus(p);
+      return s == 'present' || s == 'late' || s == 'early' || s == 'scanned' || s == 'checked_out';
+    }).length;
+    final checkedOut = _participants.where((p) => _getAttStatus(p) == 'checked_out').length;
     final unscanned = _participants.where((p) => _getAttStatus(p) == 'unscanned').length;
 
     return Column(
@@ -573,11 +819,13 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
           padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
           child: Row(
             children: [
-              Expanded(child: _buildStatChip('Registered', '${_participants.length}', const Color(0xFF064E3B), Icons.people_rounded)),
-              const SizedBox(width: 8),
-              Expanded(child: _buildStatChip('Checked In', '$checkedIn', const Color(0xFF10B981), Icons.check_circle_rounded)),
-              const SizedBox(width: 8),
-              Expanded(child: _buildStatChip('Unscanned', '$unscanned', const Color(0xFFF59E0B), Icons.pending_actions_rounded)),
+              Expanded(child: _buildStatChip('Joined', '${_participants.length}', const Color(0xFF064E3B), Icons.people_rounded)),
+              const SizedBox(width: 6),
+              Expanded(child: _buildStatChip('Check In', '$checkedIn', const Color(0xFF10B981), Icons.login_rounded)),
+              const SizedBox(width: 6),
+              Expanded(child: _buildStatChip('Check Out', '$checkedOut', const Color(0xFF7C3AED), Icons.logout_rounded)),
+              const SizedBox(width: 6),
+              Expanded(child: _buildStatChip('Absent', '$unscanned', const Color(0xFFF59E0B), Icons.pending_actions_rounded)),
             ],
           ),
         ),
@@ -678,6 +926,11 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     final yearLevel = (u is Map ? u['year_level'] : null)?.toString() ?? '';
     final levelText = [if (yearLevel.isNotEmpty) yearLevel, if (course.isNotEmpty) course].join(' — ');
 
+    final checkOut = _getCheckOut(p);
+    final tickets = p['tickets'];
+    final ticket = (tickets is List && tickets.isNotEmpty) ? tickets[0] : null;
+    final ticketId = ticket?['id']?.toString() ?? '';
+
     // Status chip
     Color statusColor;
     Color statusBg;
@@ -685,23 +938,30 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     IconData statusIcon;
 
     switch (attStatus) {
+      case 'checked_out':
+        statusColor = const Color(0xFF7C3AED);
+        statusBg = const Color(0xFFF3E8FF);
+        statusLabel = 'Checked Out';
+        statusIcon = Icons.logout_rounded;
+        break;
+      case 'scanned':
       case 'present':
         statusColor = const Color(0xFF064E3B);
         statusBg = const Color(0xFF064E3B).withValues(alpha: 0.1);
         statusLabel = 'Checked In';
         statusIcon = Icons.check_circle_rounded;
         break;
+      case 'early':
+        statusColor = const Color(0xFF1D4ED8);
+        statusBg = const Color(0xFFDBEAFE);
+        statusLabel = 'Early';
+        statusIcon = Icons.bolt_rounded;
+        break;
       case 'late':
         statusColor = Colors.orange.shade700;
         statusBg = Colors.orange.shade50;
         statusLabel = 'Late';
         statusIcon = Icons.schedule_rounded;
-        break;
-      case 'absent':
-        statusColor = Colors.red.shade700;
-        statusBg = Colors.red.shade50;
-        statusLabel = 'Absent';
-        statusIcon = Icons.cancel_rounded;
         break;
       default:
         statusColor = Colors.grey.shade600;
@@ -720,11 +980,18 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     ];
     final avatarColor = avatarColors[index % avatarColors.length];
 
+    final isExpired = widget.event['status'] == 'expired';
+    final canCheckOut = !isExpired && 
+                        ticketId.isNotEmpty && 
+                        (attStatus == 'present' || attStatus == 'late' || attStatus == 'early' || attStatus == 'scanned') && 
+                        checkOut == '—';
+
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
         boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 12, offset: const Offset(0, 2))],
+        border: Border.all(color: const Color(0xFFF3F4F6)),
       ),
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -749,36 +1016,75 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                   Text(name, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF111827))),
                   if (email.isNotEmpty)
                     Text(email, style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12, fontWeight: FontWeight.w500)),
-                  if (levelText.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(levelText, style: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 11)),
-                  ],
-                  if (attStatus == 'present' && checkIn != '—') ...[
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        const Icon(Icons.login_rounded, size: 12, color: Color(0xFF064E3B)),
-                        const SizedBox(width: 4),
-                        Text(checkIn, style: const TextStyle(color: Color(0xFF064E3B), fontSize: 11, fontWeight: FontWeight.w600)),
-                      ],
-                    ),
-                  ],
+                  
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      if (checkIn != '—')
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.login_rounded, size: 11, color: Color(0xFF10B981)),
+                            const SizedBox(width: 4),
+                            Text(checkIn, style: const TextStyle(color: Color(0xFF10B981), fontSize: 11, fontWeight: FontWeight.w700)),
+                          ],
+                        ),
+                      if (checkOut != '—')
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.logout_rounded, size: 11, color: Color(0xFF7C3AED)),
+                            const SizedBox(width: 4),
+                            Text(checkOut, style: const TextStyle(color: Color(0xFF7C3AED), fontSize: 11, fontWeight: FontWeight.w700)),
+                          ],
+                        ),
+                    ],
+                  ),
                 ],
               ),
             ),
 
-            // Status Badge
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-              decoration: BoxDecoration(color: statusBg, borderRadius: BorderRadius.circular(8)),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(statusIcon, size: 13, color: statusColor),
-                  const SizedBox(width: 4),
-                  Text(statusLabel, style: TextStyle(color: statusColor, fontWeight: FontWeight.w700, fontSize: 11)),
+            // Actions / Status
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(color: statusBg, borderRadius: BorderRadius.circular(8)),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(statusIcon, size: 12, color: statusColor),
+                      const SizedBox(width: 4),
+                      Text(statusLabel, style: TextStyle(color: statusColor, fontWeight: FontWeight.w700, fontSize: 10)),
+                    ],
+                  ),
+                ),
+                if (canCheckOut) ...[
+                  const SizedBox(height: 8),
+                  InkWell(
+                    onTap: () => _manualCheckOut(ticketId, name),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: const Color(0xFF7C3AED).withValues(alpha: 0.3)),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.logout_rounded, size: 12, color: Color(0xFF7C3AED)),
+                          SizedBox(width: 4),
+                          Text('Check Out', style: TextStyle(color: Color(0xFF7C3AED), fontSize: 11, fontWeight: FontWeight.w700)),
+                        ],
+                      ),
+                    ),
+                  ),
                 ],
-              ),
+              ],
             ),
           ],
         ),
@@ -807,6 +1113,8 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
 
   // ═══════════ ASSISTANTS TAB ═══════════
   Widget _buildAssistantsTab() {
+    final isExpired = widget.event['status'] == 'expired';
+
     return Column(
       children: [
         Container(
@@ -814,17 +1122,24 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
           padding: const EdgeInsets.fromLTRB(20, 16, 20, 16),
           child: Row(
             children: [
-              const Expanded(
+              Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Authorized Scanners', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: Color(0xFF111827))),
-                    Text('These students can scan tickets on your behalf.', style: TextStyle(color: Color(0xFF6B7280), fontSize: 12)),
+                    const Text('Authorized Scanners', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: Color(0xFF111827))),
+                    Text(
+                      isExpired
+                          ? 'This event is completed. Assistant management is disabled.'
+                          : _canManageAssistants
+                              ? 'These students can scan tickets on your behalf.'
+                              : 'Assistant management is limited to teachers assigned by admin.',
+                      style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12),
+                    ),
                   ],
                 ),
               ),
               ElevatedButton.icon(
-                onPressed: _showAssignAssistantSheet,
+                onPressed: (_canManageAssistants && !isExpired) ? _showAssignAssistantSheet : null,
                 icon: const Icon(Icons.person_add_rounded, size: 16),
                 label: const Text('Assign'),
                 style: ElevatedButton.styleFrom(
@@ -842,7 +1157,29 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         Expanded(
           child: _assistants.isEmpty
-              ? _buildEmptyState('No assistants assigned yet.', Icons.person_off_rounded)
+              ? RefreshIndicator(
+                  color: const Color(0xFF064E3B),
+                  onRefresh: () => _loadData(true),
+                  child: SingleChildScrollView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    child: Container(
+                      height: MediaQuery.of(context).size.height * 0.5,
+                      alignment: Alignment.center,
+                      child: _buildEmptyState(
+                        isExpired 
+                            ? 'No assistants were assigned to this event.'
+                            : _canManageAssistants
+                                ? 'No assistants assigned yet.'
+                                : 'Only assigned teachers can manage assistants.',
+                        isExpired
+                            ? Icons.person_off_rounded
+                            : _canManageAssistants
+                                ? Icons.person_off_rounded
+                                : Icons.lock_outline_rounded,
+                      ),
+                    ),
+                  ),
+                )
               : ListView.separated(
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
                   itemCount: _assistants.length,
@@ -852,37 +1189,68 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                     final assistantName = _getAssistantName(a);
                     final assistantIdNumber = _getAssistantStudentNumber(a);
                     final initials = _getInitials(assistantName);
+                    
+                    const avatarColors = [
+                      Color(0xFF064E3B),
+                      Color(0xFF1D4ED8),
+                      Color(0xFF7C3AED),
+                      Color(0xFF0F766E),
+                      Color(0xFFB45309),
+                    ];
+                    final avatarColor = avatarColors[i % avatarColors.length];
+
                     return Container(
+                      padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(16),
                         boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 12, offset: const Offset(0, 2))],
+                        border: Border.all(color: const Color(0xFFF3F4F6)),
                       ),
-                      child: ListTile(
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                        leading: Container(
-                          width: 44, height: 44,
-                          decoration: const BoxDecoration(color: Color(0xFFD4A843), shape: BoxShape.circle),
-                          child: Center(
-                            child: Text(
-                              initials,
-                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 18),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 46,
+                            height: 46,
+                            decoration: BoxDecoration(color: avatarColor, shape: BoxShape.circle),
+                            child: Center(
+                              child: Text(
+                                initials,
+                                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16),
+                              ),
                             ),
                           ),
-                        ),
-                        title: Text(
-                          assistantName,
-                          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF111827)),
-                        ),
-                        subtitle: Text(
-                          'ID: $assistantIdNumber',
-                          style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
-                        ),
-                        trailing: Switch(
-                          value: a['allow_scan'] == true,
-                          activeTrackColor: const Color(0xFF064E3B),
-                          onChanged: (v) => _toggleAssistant(a, v),
-                        ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  assistantName,
+                                  style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF111827)),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  'Student ID: $assistantIdNumber',
+                                  style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280), fontWeight: FontWeight.w500),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Transform.scale(
+                            scale: 0.85,
+                            child: Switch(
+                              value: a['allow_scan'] == true,
+                              activeColor: Colors.white,
+                              activeTrackColor: const Color(0xFF064E3B),
+                              inactiveThumbColor: Colors.grey.shade400,
+                              inactiveTrackColor: Colors.grey.shade200,
+                              onChanged: (_canManageAssistants && !isExpired)
+                                  ? (v) => _toggleAssistant(a, v)
+                                  : null,
+                            ),
+                          ),
+                        ],
                       ),
                     );
                   },

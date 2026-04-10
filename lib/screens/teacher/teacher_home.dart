@@ -8,8 +8,8 @@ import 'teacher_events_tab.dart';
 import 'teacher_profile.dart';
 import 'teacher_scan.dart';
 import 'teacher_sections.dart';
-import '../notifications_screen.dart';
 import '../../services/notification_service.dart';
+import '../../widgets/notifications_modal.dart';
 import '../../widgets/animated_greeting_text.dart';
 import '../../widgets/card_swap_widget.dart';
 import '../../widgets/custom_loader.dart';
@@ -22,7 +22,7 @@ class TeacherHome extends StatefulWidget {
   State<TeacherHome> createState() => _TeacherHomeState();
 }
 
-class _TeacherHomeState extends State<TeacherHome> {
+class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   final _authService = AuthService();
   final _eventService = EventService();
   Map<String, dynamic>? _user;
@@ -34,26 +34,27 @@ class _TeacherHomeState extends State<TeacherHome> {
   final _notifService = NotificationService();
   final PageController _headerPageController = PageController();
   int _currentHeaderSlide = 0;
-  Timer? _notifTimer;
+  StreamSubscription<int>? _unreadSubscription;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadData();
-    _startNotifTimer();
+    _subscribeToNotifications();
   }
 
-  void _startNotifTimer() {
-    _notifTimer = Timer.periodic(const Duration(seconds: 15), (timer) {
-      if (mounted && _currentIndex == 0) {
-        _refreshUnreadCount();
+  void _subscribeToNotifications() {
+    _unreadSubscription = _notifService.unreadCountStream.listen((count) {
+      if (mounted) {
+        setState(() => _unreadCount = count);
       }
     });
   }
 
   Future<void> _refreshUnreadCount() async {
     try {
-      final unread = await _notifService.getUnreadCount();
+      final unread = await _notifService.getUnreadCount(forceRefresh: true);
       if (mounted && unread != _unreadCount) {
         setState(() => _unreadCount = unread);
       }
@@ -62,8 +63,19 @@ class _TeacherHomeState extends State<TeacherHome> {
 
   Future<void> _loadData() async {
     final user = await _authService.getCurrentUser();
-    final events = await _eventService.getUpcomingEvents();
-    final unread = await _notifService.getUnreadCount();
+    
+    // Initialize Realtime once user is known
+    String teacherId = '';
+    if (user != null) {
+      final userId = user['id']?.toString() ?? '';
+      if (userId.isNotEmpty) {
+        _notifService.initRealtime(userId);
+        teacherId = userId;
+      }
+    }
+
+    final events = await _eventService.getTeacherUpcomingEvents(teacherId);
+    final unread = await _notifService.getUnreadCount(forceRefresh: true);
     if (mounted) {
       setState(() {
         _user = user;
@@ -82,8 +94,16 @@ class _TeacherHomeState extends State<TeacherHome> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refreshUnreadCount();
+    }
+  }
+
+  @override
   void dispose() {
-    _notifTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    _unreadSubscription?.cancel();
     _headerPageController.dispose();
     super.dispose();
   }
@@ -325,10 +345,8 @@ class _TeacherHomeState extends State<TeacherHome> {
                                   splashRadius: 22,
                                   icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
                                   onPressed: () async {
-                                    final result = await Navigator.push(
-                                      context,
-                                      MaterialPageRoute(builder: (context) => const NotificationsScreen()),
-                                    );
+                                    await _refreshUnreadCount();
+                                    final result = await showNotificationsModal(context);
 
                                     if (result != null && result is int) {
                                       setState(() {
@@ -336,7 +354,7 @@ class _TeacherHomeState extends State<TeacherHome> {
                                       });
                                     }
 
-                                    _loadData();
+                                    await _refreshUnreadCount();
                                   },
                                 ),
                               ),

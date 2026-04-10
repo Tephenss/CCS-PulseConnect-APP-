@@ -22,6 +22,14 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
   bool _isLoading = true;
   List<Map<String, dynamic>> _scannedStudents = [];
 
+  List<dynamic> _toList(dynamic value) {
+    if (value == null) return const [];
+    if (value is List) return value;
+    if (value is Map<String, dynamic>) return [value];
+    if (value is Map) return [Map<String, dynamic>.from(value)];
+    return const [];
+  }
+
   @override
   void initState() {
     super.initState();
@@ -52,18 +60,28 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
         String latestEvent = '';
         DateTime? latestScan;
 
-        final regs = u['event_registrations'] as List<dynamic>? ?? [];
+        final regs = _toList(u['event_registrations']);
         for (var reg in regs) {
-          final tickets = reg['tickets'] as List<dynamic>? ?? [];
-          final eventMap = reg['events'] as Map<String, dynamic>?;
+          if (reg is! Map) continue;
+          final regMap = reg is Map<String, dynamic> ? reg : Map<String, dynamic>.from(reg);
+          final tickets = _toList(regMap['tickets']);
+          final eventRaw = regMap['events'];
+          final eventMap = eventRaw is Map<String, dynamic>
+              ? eventRaw
+              : (eventRaw is Map ? Map<String, dynamic>.from(eventRaw) : null);
           final eventTitle = eventMap?['title']?.toString() ?? 'Event';
 
           for (var t in tickets) {
-            final atts = t['attendance'] as List<dynamic>? ?? [];
+            if (t is! Map) continue;
+            final ticketMap = t is Map<String, dynamic> ? t : Map<String, dynamic>.from(t);
+            final atts = _toList(ticketMap['attendance']);
             for (var a in atts) {
-              if (a['check_in_at'] != null) {
+              if (a is! Map) continue;
+              final attMap = a is Map<String, dynamic> ? a : Map<String, dynamic>.from(a);
+              if (attMap['check_in_at'] != null) {
                 hasScan = true;
-                final checkIn = DateTime.parse(a['check_in_at'].toString());
+                final checkIn = DateTime.tryParse(attMap['check_in_at'].toString());
+                if (checkIn == null) continue;
                 if (latestScan == null || checkIn.isAfter(latestScan)) {
                   latestScan = checkIn;
                   latestEvent = eventTitle;

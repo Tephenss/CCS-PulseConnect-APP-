@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'auth_service.dart';
@@ -25,9 +26,154 @@ class AppNotification {
 }
 
 class NotificationService {
-  final _supabase = Supabase.instance.client;
+  NotificationService._internal();
 
-  Future<List<AppNotification>> getNotifications() async {
+  static final NotificationService _instance = NotificationService._internal();
+
+  factory NotificationService() => _instance;
+
+  final _supabase = Supabase.instance.client;
+  final _unreadController = StreamController<int>.broadcast();
+  Stream<int> get unreadCountStream => _unreadController.stream;
+
+  RealtimeChannel? _notifChannel;
+  Timer? _pollTimer;
+  String? _activeUserId;
+  List<AppNotification> _cachedNotifications = [];
+  DateTime? _lastRefreshAt;
+  bool _isRefreshing = false;
+
+  bool get _isCacheFresh =>
+      _lastRefreshAt != null &&
+      DateTime.now().difference(_lastRefreshAt!) < const Duration(seconds: 8);
+
+  void dispose() {
+    _notifChannel?.unsubscribe();
+    _pollTimer?.cancel();
+  }
+
+  /// Initializes realtime listeners for notifications.
+  /// Should be called after user login.
+  void initRealtime(String userId) {
+    if (userId.isEmpty) return;
+
+    final bool needsRebind = _notifChannel == null || _activeUserId != userId;
+    if (!needsRebind) {
+      _startPolling();
+      unawaited(refresh(force: true));
+      return;
+    }
+
+    _notifChannel?.unsubscribe();
+    _pollTimer?.cancel();
+    _activeUserId = userId;
+    _cachedNotifications = [];
+    _lastRefreshAt = null;
+
+    _notifChannel = _supabase.channel('public:notifications_changes:$userId');
+
+    void scheduleRefresh() {
+      unawaited(refresh(force: true));
+    }
+
+    // Listen for any changes in events (since notifs are derived from these)
+    _notifChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'events',
+      callback: (payload) {
+        scheduleRefresh();
+      },
+    );
+
+    // Listen for explicit read status changes for this user
+    _notifChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'user_notification_reads',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'user_id',
+        value: userId,
+      ),
+      callback: (payload) {
+        scheduleRefresh();
+      },
+    );
+
+    // Listen for "read all" watermark changes
+    _notifChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'user_notification_watermarks',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'user_id',
+        value: userId,
+      ),
+      callback: (payload) {
+        scheduleRefresh();
+      },
+    );
+
+    // Listen for assignments to this teacher
+    _notifChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'event_teacher_assignments',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'teacher_id',
+        value: userId,
+      ),
+      callback: (payload) {
+        scheduleRefresh();
+      },
+    );
+
+    _notifChannel!.subscribe();
+    _startPolling();
+    unawaited(refresh(force: true));
+  }
+
+  void _startPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(seconds: 12), (_) {
+      unawaited(refresh());
+    });
+  }
+
+  void _emitUnreadCount() {
+    if (_unreadController.isClosed) return;
+    final unread = _cachedNotifications.where((n) => !n.isRead).length;
+    _unreadController.add(unread);
+  }
+
+  Future<void> refresh({bool force = false}) async {
+    if (_isRefreshing) return;
+    if (!force && _isCacheFresh) {
+      _emitUnreadCount();
+      return;
+    }
+
+    _isRefreshing = true;
+    try {
+      _cachedNotifications = await _fetchNotifications();
+      _lastRefreshAt = DateTime.now();
+      _emitUnreadCount();
+    } finally {
+      _isRefreshing = false;
+    }
+  }
+
+  Future<List<AppNotification>> getNotifications({bool forceRefresh = false}) async {
+    if (forceRefresh || !_isCacheFresh) {
+      await refresh(force: true);
+    }
+    return List<AppNotification>.from(_cachedNotifications);
+  }
+
+  Future<List<AppNotification>> _fetchNotifications() async {
     List<AppNotification> notifications = [];
     final now = DateTime.now();
 
@@ -38,6 +184,46 @@ class NotificationService {
       if (userData == null) return [];
 
       final role = userData['role'] ?? 'student';
+      final currentUserId = userData['id']?.toString() ?? '';
+      final registeredEventIds = <String>{};
+      final teacherAssignedEventIds = <String, DateTime?>{};
+
+      if (role == 'student' && currentUserId.isNotEmpty) {
+        try {
+          final regs = await _supabase
+              .from('event_registrations')
+              .select('event_id')
+              .eq('student_id', currentUserId);
+          for (final row in (regs as List)) {
+            final eventId = row['event_id']?.toString() ?? '';
+            if (eventId.isNotEmpty) {
+              registeredEventIds.add(eventId);
+            }
+          }
+        } catch (_) {
+          // Keep notifications working even if registration lookup fails.
+        }
+      }
+
+      if (role == 'teacher' && currentUserId.isNotEmpty) {
+        try {
+          final rows = await _supabase
+              .from('event_teacher_assignments')
+              .select('event_id, assigned_at')
+              .eq('teacher_id', currentUserId);
+          for (final row in (rows as List)) {
+            final eventId = row['event_id']?.toString() ?? '';
+            final assignedAtStr = row['assigned_at'] as String? ?? '';
+            if (eventId.isNotEmpty) {
+              teacherAssignedEventIds[eventId] = assignedAtStr.isNotEmpty 
+                  ? DateTime.parse(assignedAtStr).toLocal() 
+                  : null;
+            }
+          }
+        } catch (_) {
+          // Keep notifications working even if assignment lookup fails.
+        }
+      }
 
       final events = await _supabase
           .from('events')
@@ -50,21 +236,36 @@ class NotificationService {
         final status = event['status'];
         final title = event['title'];
         final eventId = event['id'].toString();
+        final createdBy = event['created_by']?.toString() ?? '';
 
         final hoursUntilStart = startAt.difference(now).inHours;
         final minsUtilStart = startAt.difference(now).inMinutes;
-        final createdAt = DateTime.parse(event['created_at']).toLocal();
         final updatedAt = DateTime.parse(event['updated_at'] ?? event['created_at']).toLocal();
         final description = event['description'] ?? '';
 
-        // Check if event has already started
-        bool hasStarted = startAt.isBefore(now);
         // Check if event has actually ended
         bool isFinished = endAt.isBefore(now);
+        final bool isTeacherCreator = role == 'teacher' && currentUserId.isNotEmpty && createdBy == currentUserId;
+        final bool isTeacherAssigned = role == 'teacher' && teacherAssignedEventIds.containsKey(eventId);
+        final DateTime? assignedAt = isTeacherAssigned ? teacherAssignedEventIds[eventId] : null;
 
-        // Teacher: Event Approved or Rejected (Draft) Notification
+        // Teacher assignments - show as new entry in modal list
+        if (role == 'teacher' && isTeacherAssigned && assignedAt != null) {
+          if (now.difference(assignedAt).inDays <= 7) {
+            notifications.add(AppNotification(
+              id: 'assign_$eventId',
+              title: 'Assigned to Event',
+              message: 'You have been assigned to "$title".',
+              timestamp: assignedAt,
+              type: NotificationType.info,
+              eventId: eventId,
+            ));
+          }
+        }
+
+        // Teacher: show proposal notifications only for own proposals.
         if (role == 'teacher') {
-          if (status == 'approved' && now.difference(updatedAt).inDays <= 7) {
+          if (isTeacherCreator && status == 'approved' && now.difference(updatedAt).inDays <= 7) {
             notifications.add(AppNotification(
               id: 'approved_$eventId',
               title: 'Event Approved',
@@ -73,7 +274,7 @@ class NotificationService {
               type: NotificationType.success,
               eventId: eventId,
             ));
-          } else if ((status == 'draft' || status == 'archived') && now.difference(updatedAt).inDays <= 7) {
+          } else if (isTeacherCreator && (status == 'draft' || status == 'archived') && now.difference(updatedAt).inDays <= 7) {
             // Extract rejection reason if present
             String reasonMsg = 'Your proposal requires changes.';
             final regExp = RegExp(r'\[REJECT_REASON:\s*(.*?)\]');
@@ -91,11 +292,16 @@ class NotificationService {
               eventId: eventId,
             ));
           }
+
+          // Teacher should only receive event timeline updates for events they created or were assigned to.
+          if (!isTeacherCreator && !isTeacherAssigned) {
+            continue;
+          }
         }
 
-        // Student/Teacher: Registration Closed 
+        // Registration updates are student-only.
         // Admin toggles 'Allow Registration' OFF which sets status to 'draft'
-        if (status == 'draft' && now.difference(updatedAt).inDays <= 7) {
+        if (role == 'student' && status == 'draft' && now.difference(updatedAt).inDays <= 7) {
           // Double check it's not a REJECTED proposal (which teachers see above)
           bool isRejected = description.contains('[REJECT_REASON:');
           
@@ -112,13 +318,17 @@ class NotificationService {
         }
 
         if (status == 'published') {
-          // Student/Teacher: New Published Event
-          // Visible as long as the event hasn't finished yet
-          if (!isFinished && now.difference(updatedAt).inDays <= 7) {
+          // New Published Event / Registration Open
+          // Visible to Students and Assigned Teachers as long as the event hasn't finished yet
+          bool shouldNotify = (role == 'student') || (role == 'teacher' && isTeacherAssigned);
+          
+          if (shouldNotify && !isFinished && now.difference(updatedAt).inDays <= 7) {
             notifications.add(AppNotification(
               id: 'pub_${eventId}_${updatedAt.millisecondsSinceEpoch}',
-              title: 'Registration Open!',
-              message: 'Registration is now available for "$title".',
+              title: role == 'student' ? 'Registration Open!' : 'Event Published!',
+              message: role == 'student' 
+                  ? 'Registration is now available for "$title".'
+                  : 'The event "$title" has been published and is now visible to students.',
               timestamp: updatedAt,
               type: NotificationType.info,
               eventId: eventId,
@@ -181,14 +391,28 @@ class NotificationService {
           // Only show recent completions (within last 3 days)
           // Use endAt as the actual time it happened
           if (now.difference(endAt).inDays <= 3 && endAt.isBefore(now)) {
-            notifications.add(AppNotification(
-              id: 'finished_$eventId',
-              title: 'Event Completed',
-              message: 'The event "$title" has ended.',
-              timestamp: endAt,
-              type: NotificationType.error,
-              eventId: eventId,
-            ));
+            if (role == 'student') {
+              // Only notify students for events they actually joined.
+              if (registeredEventIds.contains(eventId)) {
+                notifications.add(AppNotification(
+                  id: 'eval_open_$eventId',
+                  title: 'Evaluation Open',
+                  message: '"$title" has ended. Evaluation is now open. Submit it to qualify for your certificate.',
+                  timestamp: endAt,
+                  type: NotificationType.warning,
+                  eventId: eventId,
+                ));
+              }
+            } else {
+              notifications.add(AppNotification(
+                id: 'finished_$eventId',
+                title: 'Event Completed',
+                message: 'The event "$title" has ended.',
+                timestamp: endAt,
+                type: NotificationType.error,
+                eventId: eventId,
+              ));
+            }
           }
         }
       }
@@ -275,11 +499,19 @@ class NotificationService {
     final pwdChangedList = prefs.getStringList('pwd_changes') ?? [];
     pwdChangedList.add(DateTime.now().toIso8601String());
     await prefs.setStringList('pwd_changes', pwdChangedList);
+    await refresh(force: true);
   }
 
   // Mark all notifications as read
   Future<void> markAllAsRead([List<String>? ids]) async {
     try {
+      if (_cachedNotifications.isNotEmpty) {
+        for (final notif in _cachedNotifications) {
+          notif.isRead = true;
+        }
+        _emitUnreadCount();
+      }
+
       final authService = AuthService();
       final userData = await authService.getCurrentUser();
       if (userData == null) return;
@@ -300,6 +532,8 @@ class NotificationService {
         
         await _supabase.from('user_notification_reads').upsert(records, onConflict: 'user_id, notification_id');
       }
+      
+      await refresh(force: true);
     } catch (e) {
       print("Error in markAllAsRead: $e");
     }
@@ -308,6 +542,14 @@ class NotificationService {
   // Mark specific as read
   Future<void> markAsRead(String id) async {
     try {
+      final existing = _cachedNotifications.where((n) => n.id == id);
+      if (existing.isNotEmpty) {
+        for (final notif in existing) {
+          notif.isRead = true;
+        }
+        _emitUnreadCount();
+      }
+
       final authService = AuthService();
       final userData = await authService.getCurrentUser();
       if (userData == null) return;
@@ -317,13 +559,17 @@ class NotificationService {
         'user_id': userId,
         'notification_id': id,
       }, onConflict: 'user_id, notification_id');
+
+      await refresh(force: true);
     } catch (e) {
       print("Error in markAsRead: $e");
     }
   }
 
-  Future<int> getUnreadCount() async {
-    final notifications = await getNotifications();
-    return notifications.where((n) => !n.isRead).length;
+  Future<int> getUnreadCount({bool forceRefresh = false}) async {
+    if (forceRefresh || !_isCacheFresh) {
+      await refresh(force: true);
+    }
+    return _cachedNotifications.where((n) => !n.isRead).length;
   }
 }

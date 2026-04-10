@@ -3,8 +3,6 @@ import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
-import 'student_event_evaluation.dart';
-import 'student_response_view.dart';
 import 'student_ticket_view.dart';
 
 class StudentEventDetails extends StatefulWidget {
@@ -22,8 +20,6 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
   bool _isRegistered = false;
   bool _isRegistering = false;
   int _participantCount = 0;
-  bool _hasEvaluated = false;
-  String _userId = '';
 
   @override
   void initState() {
@@ -37,15 +33,12 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     final userId = prefs.getString('user_id') ?? '';
     final isReg = await _eventService.isRegistered(widget.eventId, userId);
     final count = await _eventService.getParticipantCount(widget.eventId);
-    final evalDone = isReg ? await _eventService.isEvaluationSubmitted(widget.eventId, userId) : false;
 
     if (mounted) {
       setState(() {
         _event = event;
         _isRegistered = isReg;
         _participantCount = count;
-        _hasEvaluated = evalDone;
-        _userId = userId;
         _isLoading = false;
       });
     }
@@ -157,7 +150,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     final startAt = _event!['start_at'] as String?;
     final endAt = _event!['end_at'] as String?;
     final eventType = _event!['event_type'] as String? ?? '';
-    final eventFor = _event!['event_for'] as String? ?? '';
+    final eventForRaw = _event!['event_for'] as String? ?? '';
     final eventSpan = _event!['event_span'] as String? ?? '';
     final graceTime = _event!['grace_time'] as String? ?? '';
 
@@ -333,11 +326,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                     'Location',
                     location,
                   ),
-                  if (eventFor.isNotEmpty)
+                  if (eventForRaw.isNotEmpty)
                     _buildDetailRow(
                       Icons.school_rounded,
                       'Event For',
-                      eventFor,
+                      _getTargetLabel(eventForRaw),
                     ),
                   if (graceTime.isNotEmpty)
                     _buildDetailRow(
@@ -367,90 +360,6 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                         height: 1.6,
                       ),
                     ),
-                  ],
-
-                  // ── Evaluation Section ──
-                  if (_isRegistered) ...[
-                    const SizedBox(height: 12),
-                    if (_hasEvaluated)
-                      GestureDetector(
-                        onTap: () {
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => StudentResponseView(
-                                eventId: widget.eventId,
-                                studentId: _userId,
-                              ),
-                            ),
-                          );
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFECFDF5),
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(color: const Color(0xFF064E3B).withValues(alpha: 0.2)),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.fact_check_rounded, color: Color(0xFF064E3B), size: 22),
-                              const SizedBox(width: 12),
-                              const Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text('Evaluation Submitted', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF064E3B))),
-                                    Text('Tap to view your feedback', style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-                                  ],
-                                ),
-                              ),
-                              const Icon(Icons.chevron_right, color: Color(0xFF064E3B)),
-                            ],
-                          ),
-                        ),
-                      )
-                    else
-                      GestureDetector(
-                        onTap: () async {
-                          final success = await Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => StudentEventEvaluationScreen(
-                                eventId: widget.eventId,
-                                studentId: _userId,
-                              ),
-                            ),
-                          );
-                          if (success == true && mounted) {
-                            setState(() => _hasEvaluated = true);
-                          }
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFFF7ED),
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(color: const Color(0xFFD4A843).withValues(alpha: 0.3)),
-                          ),
-                          child: const Row(
-                            children: [
-                              Icon(Icons.rate_review_rounded, color: Color(0xFFD4A843), size: 22),
-                              SizedBox(width: 12),
-                              Expanded(
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text('Submit Evaluation', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF92400E))),
-                                    Text('Rate this event to get your certificate', style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-                                  ],
-                                ),
-                              ),
-                              Icon(Icons.chevron_right, color: Color(0xFFD4A843)),
-                            ],
-                          ),
-                        ),
-                      ),
                   ],
 
                   const SizedBox(height: 40),
@@ -623,6 +532,18 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
         ],
       ),
     );
+  }
+
+  String _getTargetLabel(String? val) {
+    if (val == null || val.toLowerCase() == 'all') return 'All Year Levels';
+    if (val.toLowerCase() == 'none') return 'No Target';
+    final map = {
+      '1': '1st Year',
+      '2': '2nd Year',
+      '3': '3rd Year',
+      '4': '4th Year',
+    };
+    return map[val] ?? val;
   }
 
   Color _getEventTypeColor(String type) {

@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'student_event_details.dart';
+import 'student_event_evaluation.dart';
+import 'student_response_view.dart';
 
 class StudentEvents extends StatefulWidget {
   const StudentEvents({super.key});
@@ -17,6 +21,9 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
   List<Map<String, dynamic>> _expiredEvents = [];
   List<Map<String, dynamic>> _filteredActive = [];
   List<Map<String, dynamic>> _filteredExpired = [];
+  final Map<String, bool> _expiredRegistered = {};
+  final Map<String, bool> _expiredEvaluated = {};
+  String _userId = '';
   bool _isLoading = true;
 
   // Filter state
@@ -40,13 +47,58 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
 
   Future<void> _loadEvents() async {
     setState(() => _isLoading = true);
-    final active = await _eventService.getActiveEvents();
-    final expired = await _eventService.getExpiredEvents();
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id') ?? '';
+    
+    // Instead of using SharedPreferences directly for yearLevel,
+    // let's just use the AuthService helper because it's safer and up-to-date.
+    final authService = AuthService();
+    final yearLevel = await authService.getStudentYearLevel();
+    
+    final active = await _eventService.getActiveEvents(yearLevel: yearLevel);
+    final expired = await _eventService.getExpiredEvents(yearLevel: yearLevel);
+
+    final registeredMap = <String, bool>{};
+    final evaluatedMap = <String, bool>{};
+    if (userId.isNotEmpty && expired.isNotEmpty) {
+      final checks = await Future.wait(
+        expired.map((event) async {
+          final eventId = event['id']?.toString() ?? '';
+          if (eventId.isEmpty) {
+            return {'eventId': '', 'isRegistered': false, 'hasEvaluated': false};
+          }
+
+          final isRegistered = await _eventService.isRegistered(eventId, userId);
+          final hasEvaluated = isRegistered
+              ? await _eventService.isEvaluationSubmitted(eventId, userId)
+              : false;
+          return {
+            'eventId': eventId,
+            'isRegistered': isRegistered,
+            'hasEvaluated': hasEvaluated,
+          };
+        }),
+      );
+
+      for (final row in checks) {
+        final eventId = row['eventId']?.toString() ?? '';
+        if (eventId.isEmpty) continue;
+        registeredMap[eventId] = row['isRegistered'] == true;
+        evaluatedMap[eventId] = row['hasEvaluated'] == true;
+      }
+    }
 
     if (mounted) {
       setState(() {
+        _userId = userId;
         _activeEvents = active;
         _expiredEvents = expired;
+        _expiredRegistered
+          ..clear()
+          ..addAll(registeredMap);
+        _expiredEvaluated
+          ..clear()
+          ..addAll(evaluatedMap);
         _applyFilters();
         _isLoading = false;
       });
@@ -56,6 +108,41 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
   void _applyFilters() {
     _filteredActive = _filterList(_activeEvents);
     _filteredExpired = _filterList(_expiredEvents);
+  }
+
+  Future<void> _openExpiredEvaluation(Map<String, dynamic> event) async {
+    final eventId = event['id']?.toString() ?? '';
+    if (eventId.isEmpty || _userId.isEmpty) return;
+
+    final hasEvaluated = _expiredEvaluated[eventId] ?? false;
+    if (hasEvaluated) {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => StudentResponseView(
+            eventId: eventId,
+            studentId: _userId,
+          ),
+        ),
+      );
+      return;
+    }
+
+    final success = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => StudentEventEvaluationScreen(
+          eventId: eventId,
+          studentId: _userId,
+        ),
+      ),
+    );
+
+    if (success == true && mounted) {
+      setState(() {
+        _expiredEvaluated[eventId] = true;
+      });
+    }
   }
 
   List<Map<String, dynamic>> _filterList(List<Map<String, dynamic>> events) {
@@ -294,7 +381,7 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
               unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
               tabs: const [
                 Tab(text: 'Active'),
-                Tab(text: 'Expired'),
+                Tab(text: 'Evaluation'),
               ],
             ),
           ),
@@ -305,14 +392,26 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
           : TabBarView(
               controller: _tabController,
               children: [
-                _buildEventList(_filteredActive, 'No active events found'),
-                _buildEventList(_filteredExpired, 'No expired events found'),
+                _buildEventList(
+                  _filteredActive,
+                  'No active events found',
+                  isExpiredTab: false,
+                ),
+                _buildEventList(
+                  _filteredExpired,
+                  'No events open for evaluation yet',
+                  isExpiredTab: true,
+                ),
               ],
             ),
     );
   }
 
-  Widget _buildEventList(List<Map<String, dynamic>> events, String emptyMessage) {
+  Widget _buildEventList(
+    List<Map<String, dynamic>> events,
+    String emptyMessage, {
+    required bool isExpiredTab,
+  }) {
     if (events.isEmpty) {
       return Center(
         child: Column(
@@ -350,17 +449,33 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
         itemCount: events.length,
         itemBuilder: (context, index) {
           final event = events[index];
-          return _buildEventCard(event);
+          return _buildEventCard(event, showEvaluationActions: isExpiredTab);
         },
       ),
     );
   }
 
-  Widget _buildEventCard(Map<String, dynamic> event) {
+  String _getTargetLabel(String? val) {
+    if (val == null || val.toLowerCase() == 'all') return 'All Year Levels';
+    if (val.toLowerCase() == 'none') return 'No Target';
+    final map = {
+      '1': '1st Year',
+      '2': '2nd Year',
+      '3': '3rd Year',
+      '4': '4th Year',
+    };
+    return map[val] ?? val;
+  }
+
+  Widget _buildEventCard(
+    Map<String, dynamic> event, {
+    required bool showEvaluationActions,
+  }) {
+    final eventId = event['id']?.toString() ?? '';
     final title = event['title'] as String? ?? 'Untitled';
     final startAt = event['start_at'] as String?;
     final endAt = event['end_at'] as String?;
-    final eventFor = event['event_for'] as String? ?? 'All';
+    final eventFor = _getTargetLabel(event['event_for']?.toString());
     String status = (event['status'] as String? ?? 'published').toLowerCase();
 
     DateTime? startDate;
@@ -389,6 +504,9 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
     } else if (displayStatus == 'ARCHIVED' || displayStatus == 'EXPIRED' || displayStatus == 'FINISHED') {
       statusBg = const Color(0xFF6B7280);
     }
+
+    final isRegistered = eventId.isNotEmpty && (_expiredRegistered[eventId] ?? false);
+    final hasEvaluated = eventId.isNotEmpty && (_expiredEvaluated[eventId] ?? false);
 
     return GestureDetector(
       onTap: () async {
@@ -560,6 +678,82 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
                                 ),
                               ],
                             ),
+                            if (showEvaluationActions) ...[
+                              const SizedBox(height: 12),
+                              if (isRegistered)
+                                InkWell(
+                                  borderRadius: BorderRadius.circular(10),
+                                  onTap: () => _openExpiredEvaluation(event),
+                                  child: Container(
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                    decoration: BoxDecoration(
+                                      color: hasEvaluated
+                                          ? const Color(0xFFECFDF5)
+                                          : const Color(0xFFFFF7ED),
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: hasEvaluated
+                                            ? const Color(0xFF16A34A).withValues(alpha: 0.25)
+                                            : const Color(0xFFD4A843).withValues(alpha: 0.35),
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Icon(
+                                          hasEvaluated
+                                              ? Icons.fact_check_rounded
+                                              : Icons.rate_review_rounded,
+                                          size: 16,
+                                          color: hasEvaluated
+                                              ? const Color(0xFF166534)
+                                              : const Color(0xFF92400E),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            hasEvaluated
+                                                ? 'Evaluation submitted - view response'
+                                                : 'Evaluation open - tap to answer',
+                                            style: TextStyle(
+                                              fontSize: 11,
+                                              fontWeight: FontWeight.w700,
+                                              color: hasEvaluated
+                                                  ? const Color(0xFF166534)
+                                                  : const Color(0xFF92400E),
+                                            ),
+                                          ),
+                                        ),
+                                        Icon(
+                                          Icons.chevron_right,
+                                          size: 16,
+                                          color: hasEvaluated
+                                              ? const Color(0xFF166534)
+                                              : const Color(0xFF92400E),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                )
+                              else
+                                Container(
+                                  width: double.infinity,
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFF3F4F6),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(color: const Color(0xFFE5E7EB)),
+                                  ),
+                                  child: const Text(
+                                    'Evaluation is available to registered participants only.',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: Color(0xFF6B7280),
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ],
                         ),
                       ),

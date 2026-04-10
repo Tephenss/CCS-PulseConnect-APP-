@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../screens/student/student_event_details.dart';
+import '../screens/teacher/teacher_event_manage.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'auth_service.dart';
+import 'event_service.dart';
 
 // Background message handler — must be top-level function
 @pragma('vm:entry-point')
@@ -20,6 +23,9 @@ class PushNotificationService {
 
   final FirebaseMessaging _firebaseMessaging = FirebaseMessaging.instance;
   final FlutterLocalNotificationsPlugin _localNotificationsPlugin = FlutterLocalNotificationsPlugin();
+
+  AuthService get _authService => AuthService();
+  EventService get _eventService => EventService();
 
   Future<void> initialize() async {
     // 1. Register background handler
@@ -151,13 +157,32 @@ class PushNotificationService {
       print('[FCM] Error saving FCM Token: $e');
     }
   }
-  /// Navigate to a specific event if the notification contains an event_id
-  void _handleNotificationClick(RemoteMessage message) {
+  /// Navigate to a specific event if the notification contains an event_id.
+  /// Teachers are routed to TeacherEventManage, students to StudentEventDetails.
+  Future<void> _handleNotificationClick(RemoteMessage message) async {
     String? eventId = message.data['event_id'];
     if (eventId != null && eventId.isNotEmpty) {
       print('[FCM] Tapped notification for event_id: $eventId');
-      
-      // Use the global navigator key to push the Detail screen
+
+      try {
+        final user = await _authService.getCurrentUser();
+        final role = (user?['role']?.toString() ?? '').toLowerCase();
+
+        if (role == 'teacher') {
+          final event = await _eventService.getEventById(eventId);
+          if (event != null) {
+            PulseConnectApp.navigatorKey.currentState?.push(
+              MaterialPageRoute(
+                builder: (context) => TeacherEventManage(event: event),
+              ),
+            );
+            return;
+          }
+        }
+      } catch (e) {
+        print('[FCM] Notification route fallback: $e');
+      }
+
       PulseConnectApp.navigatorKey.currentState?.push(
         MaterialPageRoute(
           builder: (context) => StudentEventDetails(eventId: eventId),

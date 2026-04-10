@@ -165,72 +165,73 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
   }
 
   Widget _buildScanner() {
+    final media = MediaQuery.of(context);
+    final bottomNavClearance = media.padding.bottom + 98;
     return Column(
       children: [
         Expanded(
-          flex: 5,
-          child: Container(
-            margin: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(24),
-              border: Border.all(color: const Color(0xFF064E3B), width: 4), // changed to green
-              color: Colors.white,
-              boxShadow: [
-                BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 20, offset: const Offset(0, 4)),
-              ],
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(20),
-              child: _isScanning
-                  ? MobileScanner(
-                      onDetect: _handleDetect,
-                      errorBuilder: (context, error, child) {
-                        return Container(
-                          color: Colors.black,
-                          alignment: Alignment.center,
-                          child: Padding(
-                            padding: const EdgeInsets.all(20),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                const Icon(Icons.error_outline_rounded, color: Colors.white, size: 30),
-                                const SizedBox(height: 10),
-                                const Text(
-                                  'Camera unavailable',
-                                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  'Allow camera permission in app settings, then try again.',
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(color: Colors.grey.shade300, fontSize: 12),
-                                ),
-                              ],
-                            ),
-                          ),
-                        );
-                      },
-                    )
-                  : Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.camera_alt_rounded, size: 64, color: Colors.grey.shade300),
-                          const SizedBox(height: 16),
-                          Text('Camera Paused', style: TextStyle(color: Colors.grey.shade500, fontWeight: FontWeight.w600)),
-                        ],
-                      ),
-                    ),
-            ),
-          ),
-        ),
-        
-        Expanded(
-          flex: 2,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: SingleChildScrollView(
+            physics: const BouncingScrollPhysics(),
+            padding: EdgeInsets.fromLTRB(24, 14, 24, bottomNavClearance),
             child: Column(
               children: [
+                Container(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(24),
+                    border: Border.all(color: const Color(0xFF064E3B), width: 4),
+                    color: Colors.white,
+                    boxShadow: [
+                      BoxShadow(color: Colors.black.withValues(alpha: 0.05), blurRadius: 20, offset: const Offset(0, 4)),
+                    ],
+                  ),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(20),
+                    child: AspectRatio(
+                      aspectRatio: 1,
+                      child: _isScanning
+                          ? MobileScanner(
+                              onDetect: _handleDetect,
+                              errorBuilder: (context, error, child) {
+                                return Container(
+                                  color: Colors.black,
+                                  alignment: Alignment.center,
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(20),
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        const Icon(Icons.error_outline_rounded, color: Colors.white, size: 30),
+                                        const SizedBox(height: 10),
+                                        const Text(
+                                          'Camera unavailable',
+                                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                                        ),
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          'Allow camera permission in app settings, then try again.',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(color: Colors.grey.shade300, fontSize: 12),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            )
+                          : Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.camera_alt_rounded, size: 64, color: Colors.grey.shade300),
+                                  const SizedBox(height: 16),
+                                  Text('Camera Paused', style: TextStyle(color: Colors.grey.shade500, fontWeight: FontWeight.w600)),
+                                ],
+                              ),
+                            ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
                 Container(
                   padding: const EdgeInsets.all(16),
                   width: double.infinity,
@@ -247,7 +248,7 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
                     children: [
                       Icon(_statusIcon, size: 20, color: _statusColor),
                       const SizedBox(width: 10),
-                      Flexible(
+                      Expanded(
                         child: Text(
                           _scanStatus,
                           textAlign: TextAlign.center,

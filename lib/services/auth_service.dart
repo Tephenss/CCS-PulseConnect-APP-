@@ -276,6 +276,26 @@ class AuthService {
     return hash == storedHash;
   }
 
+  // Get student year level derived from active section
+  Future<String?> getStudentYearLevel() async {
+    try {
+      final user = await getCurrentUser();
+      if (user == null || user['section_id'] == null) return null;
+      final sections = await getSections();
+      if (sections.isEmpty) return null;
+      final sec = sections.firstWhere((s) => s['id'] == user['section_id'], orElse: () => {});
+      if (sec.isEmpty) return null;
+      final name = sec['name']?.toString().toLowerCase() ?? '';
+      if (name.contains('1')) return '1';
+      if (name.contains('2')) return '2';
+      if (name.contains('3')) return '3';
+      if (name.contains('4')) return '4';
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // Get sections list for section selection
   Future<List<Map<String, dynamic>>> getSections() async {
     try {
