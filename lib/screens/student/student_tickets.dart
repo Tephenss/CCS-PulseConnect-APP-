@@ -6,6 +6,7 @@ import 'dart:convert';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'student_ticket_view.dart';
+import '../../utils/event_time_utils.dart';
 
 class StudentTickets extends StatefulWidget {
   const StudentTickets({super.key});
@@ -57,7 +58,7 @@ class _StudentTicketsState extends State<StudentTickets> {
   }
 
   bool _isTicketActive(Map<String, dynamic> ticket) {
-    final now = DateTime.now();
+    final now = DateTime.now().toUtc().add(kManilaOffset);
     final event = ticket['events'] as Map<String, dynamic>? ?? {};
 
     final status = event['status'] as String? ?? '';
@@ -65,10 +66,10 @@ class _StudentTicketsState extends State<StudentTickets> {
 
     final endAt = event['end_at'] as String?;
     if (endAt != null && endAt.isNotEmpty) {
-      try {
-        final endDate = DateTime.parse(endAt).toLocal();
+      final endDate = parseStoredEventDateTime(endAt);
+      if (endDate != null) {
         return endDate.isAfter(now) || endDate.isAtSameMomentAs(now);
-      } catch (_) {}
+      }
     }
     return true;
   }
@@ -92,11 +93,10 @@ class _StudentTicketsState extends State<StudentTickets> {
   }
 
   DateTime _extractSortDate(Map<String, dynamic> ticketMap) {
-    try {
-      final event = ticketMap['events'];
-      final startAt = event is Map ? (event['start_at'] ?? '').toString() : '';
-      if (startAt.isNotEmpty) return DateTime.parse(startAt);
-    } catch (_) {}
+    final event = ticketMap['events'];
+    final startAt = event is Map ? (event['start_at'] ?? '').toString() : '';
+    final eventDate = parseStoredEventDateTime(startAt);
+    if (eventDate != null) return eventDate;
 
     try {
       final registeredAt = (ticketMap['registered_at'] ?? '').toString();
@@ -233,13 +233,8 @@ class _StudentTicketsState extends State<StudentTickets> {
         ? ticketData[0]['id']?.toString() ?? ''
         : ticketData is Map ? ticketData['id']?.toString() ?? '' : '';
 
-    DateTime? startDate, endDate;
-    if (startAt != null) {
-      try { startDate = DateTime.parse(startAt).toLocal(); } catch (_) {}
-    }
-    if (endAt != null) {
-      try { endDate = DateTime.parse(endAt).toLocal(); } catch (_) {}
-    }
+    final startDate = parseStoredEventDateTime(startAt);
+    final endDate = parseStoredEventDateTime(endAt);
 
     final ticketIdDisplay = ticketId.length > 8
         ? ticketId.substring(0, 8).toUpperCase()

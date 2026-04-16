@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
+import '../services/event_service.dart';
 import '../services/notification_service.dart';
+import '../screens/student/student_certificates.dart';
+import '../screens/student/student_event_details.dart';
+import '../screens/teacher/teacher_event_manage.dart';
 import 'custom_loader.dart';
 
 Future<int?> showNotificationsModal(BuildContext context) {
@@ -41,6 +45,7 @@ class _NotificationsFloatingModal extends StatefulWidget {
 class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal> {
   final _service = NotificationService();
   final _auth = AuthService();
+  final _eventService = EventService();
 
   List<AppNotification> _notifications = [];
   bool _isLoading = true;
@@ -264,9 +269,7 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
         if (!n.isRead) {
           await _service.markAsRead(n.id);
         }
-        if (mounted) {
-          Navigator.pop(context, 1);
-        }
+        await _openNotificationTarget(n);
       },
       child: Container(
         color: n.isRead ? Colors.white : _themeColor.withValues(alpha: 0.06),
@@ -326,6 +329,47 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
           ],
         ),
       ),
+    );
+  }
+
+  Future<void> _openNotificationTarget(AppNotification n) async {
+    final role = (await _auth.getCurrentUser())?['role']?.toString().toLowerCase() ?? 'student';
+    if (!mounted) return;
+
+    Navigator.pop(context);
+
+    if (n.id.startsWith('cert_')) {
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+      if (!mounted) return;
+      Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const StudentCertificates()),
+      );
+      return;
+    }
+
+    final eventId = n.eventId?.trim() ?? '';
+    if (eventId.isEmpty) return;
+
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    if (!mounted) return;
+
+    if (role == 'teacher') {
+      try {
+        final event = await _eventService.getEventById(eventId);
+        if (event != null && mounted) {
+          Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => TeacherEventManage(event: event)),
+          );
+          return;
+        }
+      } catch (_) {
+        // Fall through to the student-style event details route if loading fails.
+      }
+    }
+
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => StudentEventDetails(eventId: eventId)),
     );
   }
 }

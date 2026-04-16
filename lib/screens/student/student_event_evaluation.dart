@@ -13,53 +13,126 @@ class StudentEventEvaluationScreen extends StatefulWidget {
   });
 
   @override
-  State<StudentEventEvaluationScreen> createState() => _StudentEventEvaluationScreenState();
+  State<StudentEventEvaluationScreen> createState() =>
+      _StudentEventEvaluationScreenState();
 }
 
-class _StudentEventEvaluationScreenState extends State<StudentEventEvaluationScreen> {
+class _StudentEventEvaluationScreenState
+    extends State<StudentEventEvaluationScreen> {
   final EventService _eventService = EventService();
   bool _isLoading = true;
-  List<Map<String, dynamic>> _questions = [];
+  Map<String, dynamic> _bundle = {};
+  List<Map<String, dynamic>> _sections = [];
   final Map<String, dynamic> _answers = {};
 
   @override
   void initState() {
     super.initState();
-    _loadQuestions();
+    _loadBundle();
   }
 
-  Future<void> _loadQuestions() async {
-    final q = await _eventService.getEvaluationQuestions(widget.eventId);
+  String _answerKey(String scopeId, String questionId) => '$scopeId::$questionId';
+
+  Future<void> _loadBundle() async {
+    final bundle = await _eventService.getEvaluationBundle(
+      eventId: widget.eventId,
+      studentId: widget.studentId,
+    );
+
+    final rawSections = bundle['sections'];
+    final sections = rawSections is List
+        ? rawSections
+            .whereType<Map>()
+            .map((row) => Map<String, dynamic>.from(row))
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    _answers.clear();
+    for (final section in sections) {
+      final scopeId = section['scope_id']?.toString() ?? '';
+      final rawAnswers = section['answers'];
+      final answers = rawAnswers is Map<String, dynamic>
+          ? rawAnswers
+          : (rawAnswers is Map ? Map<String, dynamic>.from(rawAnswers) : <String, dynamic>{});
+      answers.forEach((questionId, value) {
+        _answers[_answerKey(scopeId, questionId)] = value;
+      });
+    }
+
     if (!mounted) return;
     setState(() {
-      _questions = q;
+      _bundle = bundle;
+      _sections = sections;
       _isLoading = false;
     });
   }
 
+  String _sectionSubtitle(Map<String, dynamic> section) {
+    final scope = section['scope']?.toString() ?? '';
+    if (scope == 'event') {
+      return 'Applies to the whole event.';
+    }
+    return 'Applies only to the seminar you attended.';
+  }
+
   Future<void> _submit() async {
-    for (final q in _questions) {
-      if (q['required'] == true) {
-        final ans = _answers[q['id']];
-        if (ans == null || ans.toString().trim().isEmpty) {
+    for (final section in _sections) {
+      final scopeId = section['scope_id']?.toString() ?? '';
+      final questions = (section['questions'] as List?)
+              ?.whereType<Map>()
+              .map((row) => Map<String, dynamic>.from(row))
+              .toList() ??
+          <Map<String, dynamic>>[];
+
+      for (final question in questions) {
+        if (question['required'] != true) continue;
+        final questionId = question['id']?.toString() ?? '';
+        final value = _answers[_answerKey(scopeId, questionId)];
+        if (value == null || value.toString().trim().isEmpty) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Please answer all required questions (e.g. ${q['question_text']})')),
+            SnackBar(
+              content: Text(
+                'Please answer all required questions in ${section['title'] ?? 'this section'}.',
+              ),
+            ),
           );
           return;
         }
       }
     }
 
-    setState(() => _isLoading = true);
-    
-    final payload = _questions.map((q) {
-      return {
-        'question_id': q['id'],
-        'answer_text': _answers[q['id']] ?? '',
-      };
-    }).toList();
+    final payload = <Map<String, dynamic>>[];
+    for (final section in _sections) {
+      final scope = section['scope']?.toString() ?? '';
+      final scopeId = section['scope_id']?.toString() ?? '';
+      final questions = (section['questions'] as List?)
+              ?.whereType<Map>()
+              .map((row) => Map<String, dynamic>.from(row))
+              .toList() ??
+          <Map<String, dynamic>>[];
 
-    final res = await _eventService.submitEvaluation(
+      for (final question in questions) {
+        final questionId = question['id']?.toString() ?? '';
+        final answerText = _answers[_answerKey(scopeId, questionId)]?.toString() ?? '';
+        if (questionId.isEmpty || answerText.trim().isEmpty) continue;
+
+        payload.add({
+          'question_id': questionId,
+          'answer_text': answerText,
+          if (scope == 'session') 'session_id': scopeId,
+        });
+      }
+    }
+
+    if (payload.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please provide at least one answer before submitting.')),
+      );
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    final result = await _eventService.submitEvaluation(
       eventId: widget.eventId,
       studentId: widget.studentId,
       answers: payload,
@@ -68,62 +141,55 @@ class _StudentEventEvaluationScreenState extends State<StudentEventEvaluationScr
     if (!mounted) return;
     setState(() => _isLoading = false);
 
-    if (res['ok'] == true) {
+    if (result['ok'] == true) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Evaluation Submitted! You can now download your certificate.')),
+        const SnackBar(content: Text('Evaluation submitted successfully.')),
       );
-      Navigator.pop(context, true); // Returns true = success
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(res['error'] ?? 'Submission failed.')),
-      );
+      Navigator.pop(context, true);
+      return;
     }
-  }
 
-  Widget _buildRatingField(Map<String, dynamic> q) {
-    final val = int.tryParse(_answers[q['id']]?.toString() ?? '0') ?? 0;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final bool compact = constraints.maxWidth < 300;
-        final double buttonSize = compact ? 40 : 44;
-        final double iconSize = compact ? 30 : 34;
-
-        return Wrap(
-          alignment: WrapAlignment.center,
-          spacing: 2,
-          runSpacing: 2,
-          children: List.generate(5, (index) {
-            final starIndex = index + 1;
-            return SizedBox(
-              width: buttonSize,
-              height: buttonSize,
-              child: IconButton(
-                onPressed: () {
-                  setState(() {
-                    _answers[q['id']] = starIndex.toString();
-                  });
-                },
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-                splashRadius: buttonSize / 2,
-                icon: Icon(
-                  starIndex <= val ? Icons.star_rounded : Icons.star_border_rounded,
-                  color: const Color(0xFFD4A843),
-                  size: iconSize,
-                ),
-              ),
-            );
-          }),
-        );
-      },
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(result['error']?.toString() ?? 'Submission failed.')),
     );
   }
 
-  Widget _buildTextField(Map<String, dynamic> q) {
+  Widget _buildRatingField(String scopeId, Map<String, dynamic> question) {
+    final questionId = question['id']?.toString() ?? '';
+    final value = int.tryParse(
+          _answers[_answerKey(scopeId, questionId)]?.toString() ?? '0',
+        ) ??
+        0;
+
+    return Wrap(
+      spacing: 2,
+      runSpacing: 2,
+      children: List.generate(5, (index) {
+        final starIndex = index + 1;
+        return IconButton(
+          onPressed: () {
+            setState(() {
+              _answers[_answerKey(scopeId, questionId)] = starIndex.toString();
+            });
+          },
+          icon: Icon(
+            starIndex <= value ? Icons.star_rounded : Icons.star_border_rounded,
+            color: const Color(0xFFD4A843),
+            size: 34,
+          ),
+        );
+      }),
+    );
+  }
+
+  Widget _buildTextField(String scopeId, Map<String, dynamic> question) {
+    final questionId = question['id']?.toString() ?? '';
     return TextFormField(
-      initialValue: _answers[q['id']]?.toString() ?? '',
+      initialValue: _answers[_answerKey(scopeId, questionId)]?.toString() ?? '',
       maxLines: 4,
-      onChanged: (v) => _answers[q['id']] = v,
+      onChanged: (value) {
+        _answers[_answerKey(scopeId, questionId)] = value;
+      },
       decoration: InputDecoration(
         hintText: 'Type your feedback here...',
         filled: true,
@@ -136,88 +202,173 @@ class _StudentEventEvaluationScreenState extends State<StudentEventEvaluationScr
     );
   }
 
+  Widget _buildSectionCard(Map<String, dynamic> section) {
+    final scopeId = section['scope_id']?.toString() ?? '';
+    final questions = (section['questions'] as List?)
+            ?.whereType<Map>()
+            .map((row) => Map<String, dynamic>.from(row))
+            .toList() ??
+        <Map<String, dynamic>>[];
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: const Color(0xFFD4A843).withValues(alpha: 0.28)),
+        borderRadius: BorderRadius.circular(18),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            section['title']?.toString() ?? 'Evaluation Section',
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF1F2937),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            _sectionSubtitle(section),
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF6B7280),
+            ),
+          ),
+          const SizedBox(height: 18),
+          ...questions.map((question) {
+            final fieldType = question['field_type']?.toString() ?? 'text';
+            return Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF9FAFB),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: const Color(0xFFE5E7EB)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          question['question_text']?.toString() ?? '',
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF111827),
+                          ),
+                        ),
+                      ),
+                      if (question['required'] == true)
+                        const Text(
+                          ' *',
+                          style: TextStyle(color: Colors.red, fontSize: 16),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  if (fieldType == 'rating')
+                    _buildRatingField(scopeId, question)
+                  else
+                    _buildTextField(scopeId, question),
+                ],
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final eligible = _bundle['is_eligible'] == true;
+    final hasQuestions = _bundle['has_questions'] == true;
+
     return Scaffold(
-      backgroundColor: Colors.white,
+      backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
-        title: const Text('Event Evaluation', style: TextStyle(color: Color(0xFF1F2937), fontWeight: FontWeight.bold)),
+        title: const Text(
+          'Event Evaluation',
+          style: TextStyle(
+            color: Color(0xFF1F2937),
+            fontWeight: FontWeight.bold,
+          ),
+        ),
         backgroundColor: Colors.white,
         elevation: 0,
         iconTheme: const IconThemeData(color: Color(0xFF1F2937)),
       ),
-      body: _isLoading 
-        ? const Center(child: PulseConnectLoader())
-        : _questions.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.fact_check_outlined, size: 64, color: Colors.grey),
-                  const SizedBox(height: 16),
-                  const Text('No evaluation questions available.'),
-                  const SizedBox(height: 16),
-                  ElevatedButton(
-                     onPressed: () => Navigator.pop(context, true), // Force pass if no questions
-                     style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF064E3B)),
-                     child: const Text('SKIP & CLAIM CERTIFICATE', style: TextStyle(color: Colors.white)),
-                  )
-                ],
-              )
-            )
-          : ListView.separated(
-              padding: const EdgeInsets.all(24),
-              itemCount: _questions.length + 1,
-              separatorBuilder: (context, index) => const SizedBox(height: 24),
-              itemBuilder: (context, index) {
-                if (index == _questions.length) {
-                  return ElevatedButton(
-                    onPressed: _submit,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF064E3B),
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      body: _isLoading
+          ? const Center(child: PulseConnectLoader())
+          : !eligible
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(
+                      _bundle['message']?.toString() ??
+                          'Evaluation is only available for attendees.',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF6B7280),
+                      ),
                     ),
-                    child: const Text('SUBMIT EVALUATION', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, letterSpacing: 1)),
-                  );
-                }
-
-                final q = _questions[index];
-                return Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    border: Border.all(color: const Color(0xFFD4A843).withValues(alpha: 0.3)),
-                    borderRadius: BorderRadius.circular(16),
-                    boxShadow: [
-                      BoxShadow(color: Colors.black.withValues(alpha: 0.02), blurRadius: 10, offset: const Offset(0, 4))
-                    ]
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Expanded(
-                            child: Text(
-                              q['question_text'] ?? '',
-                              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Color(0xFF1F2937)),
+                )
+              : !hasQuestions
+                  ? const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Text(
+                          'No evaluation questions are available yet for the sections you attended.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF6B7280),
+                          ),
+                        ),
+                      ),
+                    )
+                  : ListView(
+                      padding: const EdgeInsets.all(20),
+                      children: [
+                        ..._sections.map(_buildSectionCard),
+                        const SizedBox(height: 8),
+                        ElevatedButton(
+                          onPressed: _submit,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF064E3B),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
                             ),
                           ),
-                          if (q['required'] == true)
-                            const Text(' *', style: TextStyle(color: Colors.red, fontSize: 16)),
-                        ],
-                      ),
-                      const SizedBox(height: 16),
-                      q['field_type'] == 'rating' 
-                        ? _buildRatingField(q)
-                        : _buildTextField(q),
-                    ],
-                  ),
-                );
-              },
-            ),
+                          child: const Text(
+                            'SUBMIT EVALUATION',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
     );
   }
 }

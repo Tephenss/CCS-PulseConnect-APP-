@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -7,6 +9,7 @@ import '../../widgets/custom_loader.dart';
 import 'student_event_details.dart';
 import 'student_event_evaluation.dart';
 import 'student_response_view.dart';
+import '../../utils/event_time_utils.dart';
 
 class StudentEvents extends StatefulWidget {
   const StudentEvents({super.key});
@@ -15,13 +18,13 @@ class StudentEvents extends StatefulWidget {
   State<StudentEvents> createState() => _StudentEventsState();
 }
 
-class _StudentEventsState extends State<StudentEvents> with SingleTickerProviderStateMixin {
+class _StudentEventsState extends State<StudentEvents>
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final _eventService = EventService();
   List<Map<String, dynamic>> _activeEvents = [];
   List<Map<String, dynamic>> _expiredEvents = [];
   List<Map<String, dynamic>> _filteredActive = [];
   List<Map<String, dynamic>> _filteredExpired = [];
-  final Map<String, bool> _expiredRegistered = {};
   final Map<String, bool> _expiredEvaluated = {};
   String _userId = '';
   bool _isLoading = true;
@@ -31,77 +34,112 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
   String _selectedEventFor = 'All';
 
   late TabController _tabController;
+  Timer? _refreshTimer;
+  bool _isRefreshingEvents = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(_handleTabSelection);
+    _refreshTimer = Timer.periodic(const Duration(seconds: 12), (_) {
+      _reloadEventsSilently();
+    });
     _loadEvents();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _refreshTimer?.cancel();
+    _tabController.removeListener(_handleTabSelection);
     _tabController.dispose();
     super.dispose();
   }
 
-  Future<void> _loadEvents() async {
-    setState(() => _isLoading = true);
-    final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString('user_id') ?? '';
-    
-    // Instead of using SharedPreferences directly for yearLevel,
-    // let's just use the AuthService helper because it's safer and up-to-date.
-    final authService = AuthService();
-    final yearLevel = await authService.getStudentYearLevel();
-    
-    final active = await _eventService.getActiveEvents(yearLevel: yearLevel);
-    final expired = await _eventService.getExpiredEvents(yearLevel: yearLevel);
-
-    final registeredMap = <String, bool>{};
-    final evaluatedMap = <String, bool>{};
-    if (userId.isNotEmpty && expired.isNotEmpty) {
-      final checks = await Future.wait(
-        expired.map((event) async {
-          final eventId = event['id']?.toString() ?? '';
-          if (eventId.isEmpty) {
-            return {'eventId': '', 'isRegistered': false, 'hasEvaluated': false};
-          }
-
-          final isRegistered = await _eventService.isRegistered(eventId, userId);
-          final hasEvaluated = isRegistered
-              ? await _eventService.isEvaluationSubmitted(eventId, userId)
-              : false;
-          return {
-            'eventId': eventId,
-            'isRegistered': isRegistered,
-            'hasEvaluated': hasEvaluated,
-          };
-        }),
-      );
-
-      for (final row in checks) {
-        final eventId = row['eventId']?.toString() ?? '';
-        if (eventId.isEmpty) continue;
-        registeredMap[eventId] = row['isRegistered'] == true;
-        evaluatedMap[eventId] = row['hasEvaluated'] == true;
-      }
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _reloadEventsSilently();
     }
+  }
 
-    if (mounted) {
-      setState(() {
-        _userId = userId;
-        _activeEvents = active;
-        _expiredEvents = expired;
-        _expiredRegistered
-          ..clear()
-          ..addAll(registeredMap);
-        _expiredEvaluated
-          ..clear()
-          ..addAll(evaluatedMap);
-        _applyFilters();
-        _isLoading = false;
-      });
+  void _handleTabSelection() {
+    if (_tabController.indexIsChanging) return;
+    if (_tabController.index == 1) {
+      _reloadEventsSilently();
+    }
+  }
+
+  Future<void> _reloadEventsSilently() async {
+    if (!mounted || _isRefreshingEvents) return;
+    await _loadEvents(showLoader: false);
+  }
+
+  Future<void> _loadEvents({bool showLoader = true}) async {
+    if (_isRefreshingEvents) return;
+    _isRefreshingEvents = true;
+    if (showLoader && mounted) {
+      setState(() => _isLoading = true);
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      // Instead of using SharedPreferences directly for yearLevel,
+      // let's just use the AuthService helper because it's safer and up-to-date.
+      final authService = AuthService();
+      final user = await authService.getCurrentUser();
+      final userId =
+          user?['id']?.toString().trim().isNotEmpty == true
+              ? user!['id'].toString().trim()
+              : (prefs.getString('user_id') ?? '');
+      final yearLevel = await authService.getStudentYearLevel();
+
+      final results = await Future.wait([
+        _eventService.getActiveEvents(yearLevel: yearLevel),
+        userId.isNotEmpty
+            ? _eventService.getExpiredEventsOpenForEvaluation(
+                studentId: userId,
+                yearLevel: yearLevel,
+              )
+            : Future.value(<Map<String, dynamic>>[]),
+      ]);
+      final active = List<Map<String, dynamic>>.from(results[0] as List);
+      final expired = List<Map<String, dynamic>>.from(results[1] as List);
+
+      final evaluatedMap = <String, bool>{};
+      if (userId.isNotEmpty && expired.isNotEmpty) {
+        for (final event in expired) {
+          final eventId = event['id']?.toString() ?? '';
+          if (eventId.isEmpty) continue;
+          final rawBundle = event['evaluation_bundle'];
+          final bundle = rawBundle is Map<String, dynamic>
+              ? rawBundle
+              : (rawBundle is Map
+                  ? Map<String, dynamic>.from(rawBundle)
+                  : <String, dynamic>{});
+          evaluatedMap[eventId] = bundle['is_complete'] == true;
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _userId = userId;
+          _activeEvents = active;
+          _expiredEvents = expired;
+          _expiredEvaluated
+            ..clear()
+            ..addAll(evaluatedMap);
+          _applyFilters();
+          _isLoading = false;
+        });
+      }
+    } finally {
+      _isRefreshingEvents = false;
+      if (mounted && _isLoading) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -139,9 +177,7 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
     );
 
     if (success == true && mounted) {
-      setState(() {
-        _expiredEvaluated[eventId] = true;
-      });
+      await _loadEvents();
     }
   }
 
@@ -478,15 +514,8 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
     final eventFor = _getTargetLabel(event['event_for']?.toString());
     String status = (event['status'] as String? ?? 'published').toLowerCase();
 
-    DateTime? startDate;
-    if (startAt != null) {
-      try { startDate = DateTime.parse(startAt).toLocal(); } catch (_) {}
-    }
-
-    DateTime? endDate;
-    if (endAt != null) {
-      try { endDate = DateTime.parse(endAt).toLocal(); } catch (_) {}
-    }
+    final startDate = parseStoredEventDateTime(startAt);
+    final endDate = parseStoredEventDateTime(endAt);
 
     // Event becomes expired only when it has already ended.
     if (status != 'archived' && endDate != null && endDate.isBefore(DateTime.now())) {
@@ -505,17 +534,23 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
       statusBg = const Color(0xFF6B7280);
     }
 
-    final isRegistered = eventId.isNotEmpty && (_expiredRegistered[eventId] ?? false);
     final hasEvaluated = eventId.isNotEmpty && (_expiredEvaluated[eventId] ?? false);
 
     return GestureDetector(
       onTap: () async {
-        await Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => StudentEventDetails(eventId: event['id'].toString()),
-          ),
-        );
+        if (showEvaluationActions) {
+          await _openExpiredEvaluation(event);
+        } else {
+          await Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => StudentEventDetails(
+                eventId: event['id'].toString(),
+                initialEvent: event,
+              ),
+            ),
+          );
+        }
         _loadEvents();
       },
       child: Container(
@@ -680,79 +715,60 @@ class _StudentEventsState extends State<StudentEvents> with SingleTickerProvider
                             ),
                             if (showEvaluationActions) ...[
                               const SizedBox(height: 12),
-                              if (isRegistered)
-                                InkWell(
-                                  borderRadius: BorderRadius.circular(10),
-                                  onTap: () => _openExpiredEvaluation(event),
-                                  child: Container(
-                                    width: double.infinity,
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                                    decoration: BoxDecoration(
-                                      color: hasEvaluated
-                                          ? const Color(0xFFECFDF5)
-                                          : const Color(0xFFFFF7ED),
-                                      borderRadius: BorderRadius.circular(10),
-                                      border: Border.all(
-                                        color: hasEvaluated
-                                            ? const Color(0xFF16A34A).withValues(alpha: 0.25)
-                                            : const Color(0xFFD4A843).withValues(alpha: 0.35),
-                                      ),
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        Icon(
-                                          hasEvaluated
-                                              ? Icons.fact_check_rounded
-                                              : Icons.rate_review_rounded,
-                                          size: 16,
-                                          color: hasEvaluated
-                                              ? const Color(0xFF166534)
-                                              : const Color(0xFF92400E),
-                                        ),
-                                        const SizedBox(width: 8),
-                                        Expanded(
-                                          child: Text(
-                                            hasEvaluated
-                                                ? 'Evaluation submitted - view response'
-                                                : 'Evaluation open - tap to answer',
-                                            style: TextStyle(
-                                              fontSize: 11,
-                                              fontWeight: FontWeight.w700,
-                                              color: hasEvaluated
-                                                  ? const Color(0xFF166534)
-                                                  : const Color(0xFF92400E),
-                                            ),
-                                          ),
-                                        ),
-                                        Icon(
-                                          Icons.chevron_right,
-                                          size: 16,
-                                          color: hasEvaluated
-                                              ? const Color(0xFF166534)
-                                              : const Color(0xFF92400E),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                )
-                              else
-                                Container(
+                              InkWell(
+                                borderRadius: BorderRadius.circular(10),
+                                onTap: () => _openExpiredEvaluation(event),
+                                child: Container(
                                   width: double.infinity,
                                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFFF3F4F6),
+                                    color: hasEvaluated
+                                        ? const Color(0xFFECFDF5)
+                                        : const Color(0xFFFFF7ED),
                                     borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: const Color(0xFFE5E7EB)),
-                                  ),
-                                  child: const Text(
-                                    'Evaluation is available to registered participants only.',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      fontWeight: FontWeight.w600,
-                                      color: Color(0xFF6B7280),
+                                    border: Border.all(
+                                      color: hasEvaluated
+                                          ? const Color(0xFF16A34A).withValues(alpha: 0.25)
+                                          : const Color(0xFFD4A843).withValues(alpha: 0.35),
                                     ),
                                   ),
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        hasEvaluated
+                                            ? Icons.fact_check_rounded
+                                            : Icons.rate_review_rounded,
+                                        size: 16,
+                                        color: hasEvaluated
+                                            ? const Color(0xFF166534)
+                                            : const Color(0xFF92400E),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Text(
+                                          hasEvaluated
+                                              ? 'Evaluation submitted - view response'
+                                              : 'Evaluation open - tap to answer',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w700,
+                                            color: hasEvaluated
+                                                ? const Color(0xFF166534)
+                                                : const Color(0xFF92400E),
+                                          ),
+                                        ),
+                                      ),
+                                      Icon(
+                                        Icons.chevron_right,
+                                        size: 16,
+                                        color: hasEvaluated
+                                            ? const Color(0xFF166534)
+                                            : const Color(0xFF92400E),
+                                      ),
+                                    ],
+                                  ),
                                 ),
+                              ),
                             ],
                           ],
                         ),

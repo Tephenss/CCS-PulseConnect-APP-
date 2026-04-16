@@ -21,17 +21,41 @@ class _TeacherSectionsState extends State<TeacherSections> {
     _fetchSections();
   }
 
+  int _extractYearLevel(String rawName) {
+    if (rawName.contains('-')) {
+      final parts = rawName.split('-');
+      final y = parts[0].trim();
+      if (y.contains('1')) return 1;
+      if (y.contains('2')) return 2;
+      if (y.contains('3')) return 3;
+      if (y.contains('4')) return 4;
+    } else {
+      final match = RegExp(r'(?:BSIT SD|BSIT BA|BSCS|BSIT)\s*(\d)').firstMatch(rawName);
+      if (match != null) {
+        return int.tryParse(match.group(1) ?? '99') ?? 99;
+      }
+    }
+    return 99; // Assume highest if unknown
+  }
+
   Future<void> _fetchSections() async {
     try {
       final response = await _supabase
           .from('sections')
           .select('id, name')
-          .eq('status', 'active')
-          .order('name', ascending: true);
+          .eq('status', 'active');
       
       if (mounted) {
+        final List<Map<String, dynamic>> fetched = List<Map<String, dynamic>>.from(response);
+        fetched.sort((a, b) {
+          int yearA = _extractYearLevel(a['name']?.toString() ?? '');
+          int yearB = _extractYearLevel(b['name']?.toString() ?? '');
+          if (yearA != yearB) return yearA.compareTo(yearB);
+          return (a['name']?.toString() ?? '').compareTo(b['name']?.toString() ?? '');
+        });
+
         setState(() {
-          _sections = List<Map<String, dynamic>>.from(response);
+          _sections = fetched;
           _isLoading = false;
         });
       }
@@ -90,6 +114,40 @@ class _TeacherSectionsState extends State<TeacherSections> {
                         style: TextStyle(
                           color: Colors.white.withValues(alpha: 0.8),
                           fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: Colors.white.withValues(alpha: 0.25),
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.view_module_rounded,
+                              size: 14,
+                              color: Colors.white,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              '${_sections.length} Active Sections',
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.95),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.2,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ],
@@ -157,9 +215,9 @@ class _TeacherSectionsState extends State<TeacherSections> {
               sliver: SliverGrid(
                 gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                   crossAxisCount: 2,
-                  mainAxisSpacing: 16,
-                  crossAxisSpacing: 16,
-                  childAspectRatio: 1.1,
+                  mainAxisSpacing: 14,
+                  crossAxisSpacing: 14,
+                  childAspectRatio: 0.98,
                 ),
                 delegate: SliverChildBuilderDelegate(
                   (context, index) {
@@ -198,38 +256,38 @@ class _TeacherSectionsState extends State<TeacherSections> {
       }
     }
 
-    return GestureDetector(
-      onTap: () {
-        if (sectionId.isNotEmpty) {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => TeacherSectionStudents(
-                sectionId: sectionId,
-                sectionName: rawName,
-              ),
-            ),
-          );
-        }
-      },
-      child: Container(
-        decoration: BoxDecoration(
-        color: Colors.white,
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.grey.shade200),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
+        onTap: () {
+          if (sectionId.isNotEmpty) {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => TeacherSectionStudents(
+                  sectionId: sectionId,
+                  sectionName: rawName,
+                ),
+              ),
+            );
+          }
+        },
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.grey.shade200),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.035),
+                blurRadius: 12,
+                offset: const Offset(0, 3),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: Stack(
-        children: [
-          // Content
-          Padding(
-            padding: const EdgeInsets.all(16),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -237,71 +295,80 @@ class _TeacherSectionsState extends State<TeacherSections> {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFD4A843).withValues(alpha: 0.15),
+                    color: const Color(0xFFD4A843).withValues(alpha: 0.14),
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(
-                      color: const Color(0xFFD4A843).withValues(alpha: 0.3),
+                      color: const Color(0xFFD4A843).withValues(alpha: 0.28),
                     ),
                   ),
                   child: Text(
                     yearLevel.toUpperCase(),
                     style: const TextStyle(
                       color: Color(0xFFB48A33),
-                      fontSize: 10,
+                      fontSize: 9,
                       fontWeight: FontWeight.w800,
-                      letterSpacing: 1,
+                      letterSpacing: 0.8,
                     ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Container(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF064E3B).withValues(alpha: 0.09),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.groups_rounded,
+                    size: 16,
+                    color: Color(0xFF064E3B),
                   ),
                 ),
                 const Spacer(),
                 Text(
                   sectionName,
                   style: const TextStyle(
-                    fontSize: 18,
+                    fontSize: 16,
                     fontWeight: FontWeight.w800,
                     color: Color(0xFF1F2937),
-                    height: 1.2,
+                    height: 1.15,
                   ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                 ),
                 const SizedBox(height: 4),
-                const Text(
-                  'CLASS SECTION',
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.grey,
-                    letterSpacing: 0.5,
-                  ),
+                Row(
+                  children: [
+                    const Text(
+                      'CLASS SECTION',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF9CA3AF),
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    const Spacer(),
+                    Container(
+                      width: 24,
+                      height: 24,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF3F4F6),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Icon(
+                        Icons.arrow_forward_rounded,
+                        size: 14,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                  ],
                 ),
               ],
             ),
           ),
-          
-          // Decorative corner element
-          Positioned(
-            bottom: 0,
-            right: 0,
-            child: Container(
-              width: 50,
-              height: 50,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    Colors.grey.shade100,
-                    Colors.transparent,
-                  ],
-                ),
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(30),
-                  bottomRight: Radius.circular(20),
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
+        ),
       ),
     );
   }

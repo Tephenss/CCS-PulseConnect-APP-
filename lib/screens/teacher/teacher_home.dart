@@ -14,6 +14,8 @@ import '../../widgets/animated_greeting_text.dart';
 import '../../widgets/card_swap_widget.dart';
 import '../../widgets/custom_loader.dart';
 import '../../widgets/shiny_text.dart';
+import '../../utils/event_time_utils.dart';
+import 'teacher_event_manage.dart';
 
 class TeacherHome extends StatefulWidget {
   const TeacherHome({super.key});
@@ -621,7 +623,8 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                       final startAt = e['start_at'] as String?;
                       if (startAt == null) return false;
                       try {
-                        final d = DateTime.parse(startAt);
+                        final d = parseStoredEventDateTime(startAt);
+                        if (d == null) return false;
                         return d.day == day && d.month == _calendarMonth.month && d.year == _calendarMonth.year;
                       } catch (_) { return false; }
                     }).toList();
@@ -656,12 +659,21 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                                     leading: const Icon(Icons.event_rounded, color: Color(0xFF064E3B)),
                                     title: Text(e['title'] ?? 'Event', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
                                     subtitle: Text(
-                                      e['start_at'] != null ? DateFormat('hh:mm a').format(DateTime.parse(e['start_at'])) : '',
+                                      e['start_at'] != null
+                                          ? (() {
+                                              final parsed = parseStoredEventDateTime(e['start_at']);
+                                              return parsed != null ? DateFormat('hh:mm a').format(parsed) : '';
+                                            })()
+                                          : '',
                                     ),
                                     onTap: () {
                                       Navigator.pop(context);
-                                      // Focus the event optionally
-                                      setState(() => _currentIndex = 1);
+                                      Navigator.push(
+                                        context,
+                                        MaterialPageRoute(
+                                          builder: (_) => TeacherEventManage(event: e),
+                                        ),
+                                      );
                                     },
                                   )).toList(),
                                 ),
@@ -693,14 +705,18 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     final title = event['title'] as String? ?? 'Untitled Event';
     final startAt = event['start_at'] as String?;
     final location = event['location'] as String? ?? '';
-    DateTime? startDate;
-    if (startAt != null) { try { startDate = DateTime.parse(startAt); } catch (_) {} }
+    final startDate = parseStoredEventDateTime(startAt);
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 6),
       child: GestureDetector(
         onTap: () {
-          // Nav to Teacher Event Detail
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => TeacherEventManage(event: event),
+            ),
+          );
         },
         child: Container(
           padding: const EdgeInsets.all(16),
@@ -752,3 +768,5 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     );
   }
 }
+
+

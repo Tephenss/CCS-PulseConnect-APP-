@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../utils/event_time_utils.dart';
 
 class StudentTicketView extends StatefulWidget {
   final Map<String, dynamic> ticket;
@@ -242,18 +243,14 @@ class _StudentTicketViewState extends State<StudentTicketView> {
     final checkOutAt = attendance?['check_out_at'] as String?;
     final ticketIdDisplay = ticketId.length > 8 ? ticketId.substring(0, 8).toUpperCase() : ticketId.toUpperCase();
 
-    DateTime? startDate;
-    if (startAt != null) {
-      try {
-        startDate = DateTime.parse(startAt);
-      } catch (_) {}
-    }
+    final startDate = parseStoredEventDateTime(startAt);
+    final endDate = parseStoredEventDateTime(endAt);
     
     String timeString = 'TBA';
-    if (startAt != null) {
-      final start = DateFormat('hh:mm a').format(DateTime.parse(startAt));
-      if (endAt != null) {
-        final end = DateFormat('hh:mm a').format(DateTime.parse(endAt));
+    if (startDate != null) {
+      final start = DateFormat('hh:mm a').format(startDate);
+      if (endDate != null) {
+        final end = DateFormat('hh:mm a').format(endDate);
         timeString = '$start - $end';
       } else {
         timeString = start;
@@ -557,7 +554,12 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                               _buildAttendanceRow(
                                 'Check-in',
                                 checkInAt != null
-                                    ? DateFormat('MMM dd, yyyy — hh:mm a').format(DateTime.parse(checkInAt))
+                                    ? (() {
+                                        final parsed = parseStoredEventDateTime(checkInAt);
+                                        return parsed != null
+                                            ? DateFormat('MMM dd, yyyy — hh:mm a').format(parsed)
+                                            : 'Not yet';
+                                      })()
                                     : 'Not yet',
                                 checkInAt != null,
                               ),
@@ -565,7 +567,12 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                               _buildAttendanceRow(
                                 'Check-out',
                                 checkOutAt != null
-                                    ? DateFormat('MMM dd, yyyy — hh:mm a').format(DateTime.parse(checkOutAt))
+                                    ? (() {
+                                        final parsed = parseStoredEventDateTime(checkOutAt);
+                                        return parsed != null
+                                            ? DateFormat('MMM dd, yyyy — hh:mm a').format(parsed)
+                                            : 'Not yet';
+                                      })()
                                     : 'Not yet',
                                 checkOutAt != null,
                               ),

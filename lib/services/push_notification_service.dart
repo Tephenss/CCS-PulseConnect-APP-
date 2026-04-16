@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../main.dart';
+import '../screens/student/student_certificates.dart';
 import '../screens/student/student_event_details.dart';
 import '../screens/teacher/teacher_event_manage.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -26,6 +27,18 @@ class PushNotificationService {
 
   AuthService get _authService => AuthService();
   EventService get _eventService => EventService();
+
+  bool _isCertificatePayload(String payload) {
+    return payload.trim().toLowerCase() == 'route:certificates';
+  }
+
+  void _openCertificatesScreen() {
+    PulseConnectApp.navigatorKey.currentState?.push(
+      MaterialPageRoute(
+        builder: (context) => const StudentCertificates(),
+      ),
+    );
+  }
 
   Future<void> initialize() async {
     // 1. Register background handler
@@ -69,8 +82,17 @@ class PushNotificationService {
       await _localNotificationsPlugin.initialize(
         initSettings,
         onDidReceiveNotificationResponse: (NotificationResponse response) {
-          // This handles clicking custom local notifications in foreground
-          // For now, we rely on standard FCM data handling, but could expand here
+          final payload = response.payload?.trim() ?? '';
+          if (payload.isEmpty) return;
+          if (_isCertificatePayload(payload)) {
+            _openCertificatesScreen();
+            return;
+          }
+          PulseConnectApp.navigatorKey.currentState?.push(
+            MaterialPageRoute(
+              builder: (context) => StudentEventDetails(eventId: payload),
+            ),
+          );
         },
       );
 
@@ -92,33 +114,134 @@ class PushNotificationService {
       // 4. Foreground message listener — show local notification popup
       FirebaseMessaging.onMessage.listen((RemoteMessage message) {
         RemoteNotification? notification = message.notification;
-        AndroidNotification? android = message.notification?.android;
+        final route = (message.data['route']?.toString() ?? '').trim().toLowerCase();
+        final eventId = (message.data['event_id']?.toString() ?? '').trim();
+        final payload = route == 'certificates'
+            ? 'route:certificates'
+            : (eventId.isNotEmpty ? eventId : null);
 
-        if (notification != null) {
-          _localNotificationsPlugin.show(
-            notification.hashCode,
-            notification.title,
-            notification.body,
-            NotificationDetails(
-              android: AndroidNotificationDetails(
-                channel.id,
-                channel.name,
-                channelDescription: channel.description,
-                icon: '@mipmap/ic_launcher',
-                importance: Importance.high,
-                priority: Priority.high,
-                playSound: true,
-              ),
-              iOS: const DarwinNotificationDetails(
-                presentAlert: true,
-                presentBadge: true,
-                presentSound: true,
+        final fallbackTitle =
+            route == 'certificates' ? 'Certificate Ready' : 'PulseConnect';
+        final fallbackBody = route == 'certificates'
+            ? 'Your certificate is now available. Open Certificates to view it.'
+            : 'You have a new notification.';
+
+        _localNotificationsPlugin.show(
+          notification?.hashCode ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          notification?.title ?? fallbackTitle,
+          notification?.body ?? fallbackBody,
+          NotificationDetails(
+            android: AndroidNotificationDetails(
+              channel.id,
+              channel.name,
+              channelDescription: channel.description,
+              icon: '@mipmap/ic_launcher',
+              importance: Importance.high,
+              priority: Priority.high,
+              playSound: true,
+              styleInformation: BigTextStyleInformation(
+                notification?.body ?? fallbackBody,
+                contentTitle: notification?.title ?? fallbackTitle,
+                summaryText: 'PulseConnect',
               ),
             ),
-          );
-        }
+            iOS: const DarwinNotificationDetails(
+              presentAlert: true,
+              presentBadge: true,
+              presentSound: true,
+            ),
+          ),
+          payload: payload,
+        );
       });
     }
+  }
+
+  Future<void> showLocalEventNotification({
+    required String title,
+    required String body,
+    String? eventId,
+  }) async {
+    const AndroidNotificationChannel channel = AndroidNotificationChannel(
+      'pulseconnect_events',
+      'PulseConnect Events',
+      description: 'Notifications for new events and registration updates.',
+      importance: Importance.max,
+      playSound: true,
+      enableVibration: true,
+      showBadge: true,
+    );
+
+    await _localNotificationsPlugin.show(
+      DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      title,
+      body,
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          channel.id,
+          channel.name,
+          channelDescription: channel.description,
+          icon: '@mipmap/ic_launcher',
+          importance: Importance.high,
+          priority: Priority.high,
+          playSound: true,
+          styleInformation: BigTextStyleInformation(
+            body,
+            contentTitle: title,
+            summaryText: 'PulseConnect',
+          ),
+        ),
+        iOS: const DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        ),
+      ),
+      payload: eventId,
+    );
+  }
+
+  Future<void> showLocalCertificateNotification({
+    required String title,
+    required String body,
+  }) async {
+    const AndroidNotificationChannel channel = AndroidNotificationChannel(
+      'pulseconnect_events',
+      'PulseConnect Events',
+      description: 'Notifications for new events and registration updates.',
+      importance: Importance.max,
+      playSound: true,
+      enableVibration: true,
+      showBadge: true,
+    );
+
+    await _localNotificationsPlugin.show(
+      DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      title,
+      body,
+      NotificationDetails(
+        android: AndroidNotificationDetails(
+          channel.id,
+          channel.name,
+          channelDescription: channel.description,
+          icon: '@mipmap/ic_launcher',
+          importance: Importance.high,
+          priority: Priority.high,
+          playSound: true,
+          styleInformation: BigTextStyleInformation(
+            body,
+            contentTitle: title,
+            summaryText: 'PulseConnect',
+          ),
+        ),
+        iOS: const DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
+        ),
+      ),
+      payload: 'route:certificates',
+    );
   }
 
   /// Gets the FCM Token and saves it to the `fcm_tokens` table in Supabase.
@@ -160,6 +283,12 @@ class PushNotificationService {
   /// Navigate to a specific event if the notification contains an event_id.
   /// Teachers are routed to TeacherEventManage, students to StudentEventDetails.
   Future<void> _handleNotificationClick(RemoteMessage message) async {
+    final route = (message.data['route']?.toString() ?? '').trim().toLowerCase();
+    if (route == 'certificates') {
+      _openCertificatesScreen();
+      return;
+    }
+
     String? eventId = message.data['event_id'];
     if (eventId != null && eventId.isNotEmpty) {
       print('[FCM] Tapped notification for event_id: $eventId');
@@ -191,3 +320,5 @@ class PushNotificationService {
     }
   }
 }
+
+

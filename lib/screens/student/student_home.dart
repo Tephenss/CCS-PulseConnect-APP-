@@ -9,12 +9,14 @@ import 'student_tickets.dart';
 import 'student_event_details.dart';
 import 'student_profile.dart';
 import 'student_scan.dart';
+import '../welcome_screen.dart';
 import '../../services/notification_service.dart';
 import '../../widgets/notifications_modal.dart';
 import '../../widgets/animated_greeting_text.dart';
 import '../../widgets/card_swap_widget.dart';
 import '../../widgets/shiny_text.dart';
 import '../../widgets/custom_loader.dart';
+import '../../utils/event_time_utils.dart';
 
 class StudentHome extends StatefulWidget {
   const StudentHome({super.key});
@@ -36,6 +38,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   final PageController _headerPageController = PageController();
   int _currentHeaderSlide = 0;
   StreamSubscription<int>? _unreadSubscription;
+  Timer? _absenceScopeRefreshTimer;
 
   // Section Selection Gate
   List<Map<String, dynamic>> _sections = [];
@@ -43,12 +46,66 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   bool _isUpdatingSection = false;
   String? _sectionError;
 
+  // Attendance Absence Reason Gate
+  final TextEditingController _absenceReasonController = TextEditingController();
+  List<Map<String, dynamic>> _pendingAbsenceScopes = [];
+  String? _selectedAbsenceScopeKey;
+  bool _isSubmittingAbsenceReason = false;
+  String? _absenceReasonError;
+  bool _isGateLoggingOut = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _startAbsenceScopeRefreshTicker();
     _loadData();
     _subscribeToNotifications();
+  }
+
+  void _startAbsenceScopeRefreshTicker() {
+    _absenceScopeRefreshTimer?.cancel();
+    _absenceScopeRefreshTimer = Timer.periodic(
+      const Duration(seconds: 45),
+      (_) => _refreshAbsenceScopesSilently(),
+    );
+  }
+
+  Future<void> _refreshAbsenceScopesSilently() async {
+    final userId = _user?['id']?.toString() ?? '';
+    if (!mounted || userId.isEmpty) return;
+
+    final refreshed = await _eventService.getStudentPendingAbsenceScopes(
+      studentId: userId,
+    );
+    if (!mounted) return;
+
+    final oldKeys = _pendingAbsenceScopes
+        .map((scope) => scope['scope_key']?.toString() ?? '')
+        .where((key) => key.isNotEmpty)
+        .toSet();
+    final newKeys = refreshed
+        .map((scope) => scope['scope_key']?.toString() ?? '')
+        .where((key) => key.isNotEmpty)
+        .toSet();
+
+    if (oldKeys.length == newKeys.length && oldKeys.containsAll(newKeys)) {
+      return;
+    }
+
+    String? selected = _selectedAbsenceScopeKey;
+    if (refreshed.isEmpty) {
+      selected = null;
+    } else {
+      final stillExists = selected != null &&
+          refreshed.any((scope) => (scope['scope_key']?.toString() ?? '') == selected);
+      selected = stillExists ? selected : (refreshed.first['scope_key']?.toString());
+    }
+
+    setState(() {
+      _pendingAbsenceScopes = refreshed;
+      _selectedAbsenceScopeKey = selected;
+    });
   }
 
   void _subscribeToNotifications() {
@@ -70,10 +127,10 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
 
   Future<void> _loadData() async {
     final user = await _authService.getCurrentUser();
+    final userId = user?['id']?.toString() ?? '';
     
     // Initialize Realtime once user is known
     if (user != null) {
-      final userId = user['id']?.toString() ?? '';
       if (userId.isNotEmpty) {
         _notifService.initRealtime(userId);
       }
@@ -83,12 +140,31 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     final events = await _eventService.getUpcomingEvents(yearLevel: yearLevel);
     final unread = await _notifService.getUnreadCount(forceRefresh: true);
     final sections = await _authService.getSections();
+    final pendingAbsenceScopes = userId.isNotEmpty
+        ? await _eventService.getStudentPendingAbsenceScopes(studentId: userId)
+        : <Map<String, dynamic>>[];
+    String? selectedAbsenceScopeKey = _selectedAbsenceScopeKey;
+    if (pendingAbsenceScopes.isEmpty) {
+      selectedAbsenceScopeKey = null;
+    } else {
+      final hasExisting = selectedAbsenceScopeKey != null &&
+          pendingAbsenceScopes.any(
+            (scope) =>
+                (scope['scope_key']?.toString() ?? '') == selectedAbsenceScopeKey,
+          );
+      selectedAbsenceScopeKey = hasExisting
+          ? selectedAbsenceScopeKey
+          : (pendingAbsenceScopes.first['scope_key']?.toString());
+    }
+
     if (mounted) {
       setState(() {
         _user = user;
         _upcomingEvents = events;
         _unreadCount = unread;
         _sections = sections;
+        _pendingAbsenceScopes = pendingAbsenceScopes;
+        _selectedAbsenceScopeKey = selectedAbsenceScopeKey;
         _isLoading = false;
       });
     }
@@ -105,6 +181,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _refreshUnreadCount();
+      _loadData();
     }
   }
 
@@ -112,8 +189,184 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _unreadSubscription?.cancel();
+    _absenceScopeRefreshTimer?.cancel();
     _headerPageController.dispose();
+    _absenceReasonController.dispose();
     super.dispose();
+  }
+
+  Map<String, dynamic>? _selectedAbsenceScope() {
+    if (_pendingAbsenceScopes.isEmpty) return null;
+
+    final selected = _selectedAbsenceScopeKey;
+    if (selected == null || selected.isEmpty) {
+      return _pendingAbsenceScopes.first;
+    }
+
+    for (final scope in _pendingAbsenceScopes) {
+      if ((scope['scope_key']?.toString() ?? '') == selected) {
+        return scope;
+      }
+    }
+
+    return _pendingAbsenceScopes.first;
+  }
+
+  String _formatScopeDateTime(dynamic rawIso) {
+    final parsed = parseStoredEventDateTime(rawIso?.toString());
+    if (parsed == null) return 'N/A';
+    return DateFormat('MMM dd, yyyy • h:mm a').format(parsed);
+  }
+
+  String _scopeSummaryLabel(Map<String, dynamic> scope) {
+    final scopeType = (scope['scope_type']?.toString() ?? 'event').toLowerCase();
+    final eventTitle = (scope['event_title']?.toString() ?? 'Event').trim();
+    if (scopeType == 'session') {
+      final sessionTitle =
+          (scope['session_title']?.toString() ?? 'Seminar').trim();
+      return '$eventTitle • $sessionTitle';
+    }
+    return eventTitle;
+  }
+
+  String _scopeWindowLabel(Map<String, dynamic> scope) {
+    final opens = _formatScopeDateTime(scope['window_opens_at']);
+    final closes = _formatScopeDateTime(scope['window_closes_at']);
+    return '$opens to $closes';
+  }
+
+  Future<void> _logoutFromGate() async {
+    if (_isGateLoggingOut) return;
+    setState(() => _isGateLoggingOut = true);
+    try {
+      await _authService.logout();
+      if (!mounted) return;
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+        (route) => false,
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isGateLoggingOut = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Failed to sign out. Please try again.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Widget _buildGateLogoutButton() {
+    return TextButton.icon(
+      onPressed: _isGateLoggingOut ? null : _logoutFromGate,
+      style: TextButton.styleFrom(
+        foregroundColor: const Color(0xFFF4F4F5),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      ),
+      icon: _isGateLoggingOut
+          ? const SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.logout_rounded, size: 18),
+      label: const Text(
+        'Logout',
+        style: TextStyle(fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+
+  String? _sectionSelectionSecurityError(String? sectionId) {
+    final sid = sectionId?.trim() ?? '';
+    if (sid.isEmpty) {
+      return 'Please select your current year level and section.';
+    }
+
+    final selected = _sections
+        .where((item) => (item['id']?.toString() ?? '') == sid)
+        .cast<Map<String, dynamic>>()
+        .toList();
+    if (selected.isEmpty) {
+      return 'Selected section is invalid. Please re-select.';
+    }
+
+    final label = (selected.first['name']?.toString() ?? '').trim();
+    if (label.isEmpty) {
+      return 'Section label is invalid. Please re-select.';
+    }
+
+    final hasYearIndicator = RegExp(r'(^|[^0-9])[1-4]([^0-9]|$)').hasMatch(label) ||
+        label.toLowerCase().contains('year');
+    if (!hasYearIndicator) {
+      return 'Security check failed: section has no valid year-level marker.';
+    }
+
+    return null;
+  }
+
+  Future<void> _submitAbsenceReason() async {
+    if (_isSubmittingAbsenceReason || _user == null) return;
+    final scope = _selectedAbsenceScope();
+    if (scope == null) return;
+
+    final studentId = _user?['id']?.toString() ?? '';
+    final eventId = scope['event_id']?.toString() ?? '';
+    final sessionId = scope['session_id']?.toString();
+    final reason = _absenceReasonController.text.trim();
+
+    if (studentId.isEmpty || eventId.isEmpty) {
+      setState(() {
+        _absenceReasonError = 'Missing event/student context. Please re-login.';
+      });
+      return;
+    }
+    if (reason.isEmpty) {
+      setState(() {
+        _absenceReasonError = 'Please enter your reason before submitting.';
+      });
+      return;
+    }
+
+    setState(() {
+      _isSubmittingAbsenceReason = true;
+      _absenceReasonError = null;
+    });
+
+    final result = await _eventService.submitAbsenceReason(
+      studentId: studentId,
+      eventId: eventId,
+      sessionId: (sessionId == null || sessionId.isEmpty) ? null : sessionId,
+      reasonText: reason,
+    );
+
+    if (result['ok'] == true) {
+      final refreshed = await _eventService.getStudentPendingAbsenceScopes(
+        studentId: studentId,
+      );
+      if (!mounted) return;
+      setState(() {
+        _pendingAbsenceScopes = refreshed;
+        _selectedAbsenceScopeKey = refreshed.isNotEmpty
+            ? (refreshed.first['scope_key']?.toString())
+            : null;
+        _absenceReasonController.clear();
+        _isSubmittingAbsenceReason = false;
+        _absenceReasonError = null;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Reason submitted successfully.')),
+      );
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _isSubmittingAbsenceReason = false;
+      _absenceReasonError = result['error']?.toString() ?? 'Failed to submit reason.';
+    });
   }
 
   @override
@@ -128,6 +381,9 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     ];
 
     final bool needsSection = _user != null && _user!['section_id'] == null;
+    final bool needsAbsenceReason =
+        _user != null && _pendingAbsenceScopes.isNotEmpty;
+    final gateMode = needsSection || needsAbsenceReason;
 
     return PopScope(
       canPop: false,
@@ -138,7 +394,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
         }
       },
       child: Scaffold(
-        backgroundColor: const Color(0xFFF9FAFB),
+        backgroundColor: gateMode ? const Color(0xFF09090B) : const Color(0xFFF9FAFB),
         body: Stack(
           children: [
             _isLoading
@@ -152,12 +408,16 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                     },
                     child: Container(
                       key: ValueKey<int>(_currentIndex),
-                      child: (needsSection ? _buildSectionSelection() : screens[_currentIndex]),
+                      child: needsSection
+                          ? _buildSectionSelection()
+                          : (needsAbsenceReason
+                              ? _buildAbsenceReasonLock()
+                              : screens[_currentIndex]),
                     ),
                   ),
             
             // New Floating Navigation Bar (Matches user design)
-            if (!_isLoading && !needsSection)
+            if (!_isLoading && !needsSection && !needsAbsenceReason)
               Positioned(
                 bottom: 24,
                 left: 20,
@@ -225,6 +485,211 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
 
   }
 
+  Widget _buildAbsenceReasonLock() {
+    final selectedScope = _selectedAbsenceScope();
+    if (selectedScope == null) {
+      return const Center(child: PulseConnectLoader());
+    }
+
+    final scopeType =
+        (selectedScope['scope_type']?.toString() ?? 'event').toLowerCase();
+    final scopeWindow = _scopeWindowLabel(selectedScope);
+    final pendingCount = _pendingAbsenceScopes.length;
+    final helperText = scopeType == 'session'
+        ? 'You missed the seminar scan window. Submit your reason to continue.'
+        : 'You missed the event scan window. Submit your reason to continue.';
+
+    return Container(
+      width: double.infinity,
+      height: double.infinity,
+      decoration: const BoxDecoration(
+        color: Color(0xFF09090B),
+      ),
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const SizedBox(width: 4),
+                    _buildGateLogoutButton(),
+                  ],
+                ),
+                _buildGateLogo(),
+                const SizedBox(height: 24),
+                const Text(
+                  'Attendance Follow-Up Required',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 26,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  helperText,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.75),
+                    fontSize: 14,
+                    height: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1C1C22),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFF2F2F36)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _scopeSummaryLabel(selectedScope),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 15,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Scan window: $scopeWindow',
+                        style: const TextStyle(
+                          color: Color(0xFFA1A1AA),
+                          fontSize: 12,
+                        ),
+                      ),
+                      if (pendingCount > 1) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          '$pendingCount pending absence records.',
+                          style: const TextStyle(
+                            color: Color(0xFFEAB308),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (_pendingAbsenceScopes.length > 1) ...[
+                  const SizedBox(height: 20),
+                  DropdownButtonFormField<String>(
+                    value: _selectedAbsenceScopeKey ??
+                        (_pendingAbsenceScopes.first['scope_key']?.toString()),
+                    dropdownColor: const Color(0xFF1C1C22),
+                    iconEnabledColor: const Color(0xFFA1A1AA),
+                    style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
+                    decoration: InputDecoration(
+                      filled: true,
+                      fillColor: const Color(0xFF1C1C22),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                    items: _pendingAbsenceScopes.map((scope) {
+                      final key = scope['scope_key']?.toString() ?? '';
+                      return DropdownMenuItem<String>(
+                        value: key,
+                        child: Text(_scopeSummaryLabel(scope)),
+                      );
+                    }).toList(),
+                    onChanged: (value) {
+                      setState(() {
+                        _selectedAbsenceScopeKey = value;
+                        _absenceReasonError = null;
+                      });
+                    },
+                  ),
+                ],
+                const SizedBox(height: 20),
+                TextField(
+                  controller: _absenceReasonController,
+                  minLines: 4,
+                  maxLines: 6,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    hintText: 'Explain why you missed the scan window...',
+                    hintStyle: const TextStyle(color: Color(0xFF71717A)),
+                    filled: true,
+                    fillColor: const Color(0xFF1C1C22),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    contentPadding: const EdgeInsets.all(14),
+                  ),
+                ),
+                if (_absenceReasonError != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    _absenceReasonError!,
+                    style: const TextStyle(
+                      color: Color(0xFFFCA5A5),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: _isSubmittingAbsenceReason ? null : _submitAbsenceReason,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF9F1239),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                    ),
+                    child: _isSubmittingAbsenceReason
+                        ? const PulseConnectLoader(size: 14)
+                        : const Text(
+                            'Submit Reason',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGateLogo() {
+    return Image.asset(
+      'assets/ccs_lock_logo.png',
+      height: 88,
+      width: 88,
+      fit: BoxFit.contain,
+      errorBuilder: (_, __, ___) => Image.asset(
+        'assets/BSIT.png',
+        height: 88,
+        width: 88,
+        fit: BoxFit.contain,
+        errorBuilder: (_, __, ___) => Image.asset(
+          'assets/CCS.png',
+          height: 88,
+          width: 88,
+          fit: BoxFit.contain,
+        ),
+      ),
+    );
+  }
+
   Widget _buildSectionSelection() {
     return Container(
       width: double.infinity,
@@ -234,11 +699,15 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
       child: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Image.asset('assets/CCS.png', height: 48, width: 48, fit: BoxFit.contain),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+              Align(
+                alignment: Alignment.centerRight,
+                child: _buildGateLogoutButton(),
+              ),
+              _buildGateLogo(),
               const SizedBox(height: 24),
               const Text(
                 'Welcome Back!',
@@ -311,6 +780,14 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                   onPressed: _isUpdatingSection || _selectedSectionId == null
                       ? null
                       : () {
+                          final securityError =
+                              _sectionSelectionSecurityError(_selectedSectionId);
+                          if (securityError != null) {
+                            setState(() {
+                              _sectionError = securityError;
+                            });
+                            return;
+                          }
                           showDialog(
                             context: context,
                             builder: (context) => AlertDialog(
@@ -851,7 +1328,8 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                       final startAt = e['start_at'] as String?;
                       if (startAt == null) return false;
                       try {
-                        final d = DateTime.parse(startAt).toLocal();
+                        final d = parseStoredEventDateTime(startAt);
+                        if (d == null) return false;
                         return d.day == day &&
                             d.month == _calendarMonth.month &&
                             d.year == _calendarMonth.year;
@@ -917,7 +1395,12 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                                     leading: const Icon(Icons.event_rounded, color: Color(0xFF7F1D1D)),
                                     title: Text(e['title'] ?? 'Event', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1F2937))),
                                     subtitle: Text(
-                                      e['start_at'] != null ? DateFormat('hh:mm a').format(DateTime.parse(e['start_at']).toLocal()) : '',
+                                      e['start_at'] != null
+                                          ? (() {
+                                              final parsed = parseStoredEventDateTime(e['start_at']);
+                                              return parsed != null ? DateFormat('hh:mm a').format(parsed) : '';
+                                            })()
+                                          : '',
                                       style: const TextStyle(color: Color(0xFF71717A)),
                                     ),
                                     onTap: () {
@@ -953,12 +1436,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     final startAt = event['start_at'] as String?;
     final location = event['location'] as String? ?? '';
 
-    DateTime? startDate;
-    if (startAt != null) {
-      try {
-        startDate = DateTime.parse(startAt).toLocal();
-      } catch (_) {}
-    }
+    final startDate = parseStoredEventDateTime(startAt);
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 6),

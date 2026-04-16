@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import '../../widgets/custom_loader.dart';
 import 'teacher_create_event.dart';
 import 'teacher_event_manage.dart';
+import '../../utils/event_time_utils.dart';
 
 class TeacherEventsTab extends StatefulWidget {
   const TeacherEventsTab({super.key});
@@ -146,18 +147,14 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
   }
 
   Widget _buildEventList(String statusFilter) {
-    final now = DateTime.now();
+    final now = DateTime.now().toUtc().add(kManilaOffset);
 
     var filteredEvents = _events.where((e) {
       final status = (e['status'] as String? ?? 'pending').toLowerCase(); // Normalize string
       
       // Calculate if the event is truly expired based on event end time.
       final endAtStr = e['end_at'] as String?;
-      DateTime? endDate;
-      
-      if (endAtStr != null && endAtStr.isNotEmpty) {
-        try { endDate = DateTime.parse(endAtStr); } catch (_) {}
-      }
+      final endDate = parseStoredEventDateTime(endAtStr);
 
       bool isPast = endDate != null && endDate.isBefore(now);
 
@@ -220,17 +217,12 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
     String status = event['status'] as String? ?? 'active';
     final target = _getTargetLabel(event['event_for']?.toString());
 
-    DateTime? startDate;
-    if (startAt != null) {
-      try { startDate = DateTime.parse(startAt); } catch (_) {}
-    }
+    final startDate = parseStoredEventDateTime(startAt);
+    final endDate = parseStoredEventDateTime(endAt);
 
-    DateTime? endDate;
-    if (endAt != null) {
-      try { endDate = DateTime.parse(endAt); } catch (_) {}
-    }
-
-    if (status != 'archived' && endDate != null && endDate.isBefore(DateTime.now())) {
+    if (status != 'archived' &&
+        endDate != null &&
+        endDate.isBefore(DateTime.now().toUtc().add(kManilaOffset))) {
       status = 'expired';
     }
 
@@ -393,3 +385,5 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
     );
   }
 }
+
+

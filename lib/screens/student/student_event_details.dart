@@ -4,10 +4,17 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'student_ticket_view.dart';
+import '../../utils/event_time_utils.dart';
 
 class StudentEventDetails extends StatefulWidget {
   final String eventId;
-  const StudentEventDetails({super.key, required this.eventId});
+  final Map<String, dynamic>? initialEvent;
+
+  const StudentEventDetails({
+    super.key,
+    required this.eventId,
+    this.initialEvent,
+  });
 
   @override
   State<StudentEventDetails> createState() => _StudentEventDetailsState();
@@ -20,25 +27,39 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
   bool _isRegistered = false;
   bool _isRegistering = false;
   int _participantCount = 0;
+  List<Map<String, dynamic>> _eventSessions = [];
 
   @override
   void initState() {
     super.initState();
+    if (widget.initialEvent != null) {
+      _event = Map<String, dynamic>.from(widget.initialEvent!);
+      _isLoading = false;
+    }
     _loadEvent();
   }
 
   Future<void> _loadEvent() async {
-    final event = await _eventService.getEventById(widget.eventId);
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id') ?? '';
-    final isReg = await _eventService.isRegistered(widget.eventId, userId);
-    final count = await _eventService.getParticipantCount(widget.eventId);
+    final results = await Future.wait([
+      _eventService.getEventById(widget.eventId),
+      _eventService.isRegistered(widget.eventId, userId),
+      _eventService.getParticipantCount(widget.eventId),
+      _eventService.getEventSessions(widget.eventId),
+    ]);
+
+    final event = results[0] as Map<String, dynamic>?;
+    final isReg = results[1] as bool;
+    final count = results[2] as int;
+    final sessions = results[3] as List<Map<String, dynamic>>;
 
     if (mounted) {
       setState(() {
-        _event = event;
+        _event = event ?? _event;
         _isRegistered = isReg;
         _participantCount = count;
+        _eventSessions = sessions;
         _isLoading = false;
       });
     }
@@ -85,19 +106,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id') ?? '';
-      
-      // Fetch tickets with a 10-second timeout to prevent infinite loading if network hangs
-      final tickets = await _eventService.getMyTickets(userId).timeout(const Duration(seconds: 10));
 
-      if (!mounted) return;
-      setState(() => _isRegistering = false);
-
-      final myTicket = tickets.firstWhere(
-        (t) => t['event_id']?.toString() == widget.eventId.toString(),
-        orElse: () => <String, dynamic>{},
-      );
+      final myTicket = await _eventService
+          .getTicketForEvent(widget.eventId, userId)
+          .timeout(const Duration(seconds: 10));
 
       if (myTicket.isNotEmpty && mounted) {
+        setState(() => _isRegistering = false);
         Navigator.push(
           context,
           MaterialPageRoute(
@@ -105,6 +120,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
           ),
         );
       } else {
+        if (mounted) {
+          setState(() => _isRegistering = false);
+        }
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Could not load ticket details. Please check your network connection.')),
@@ -152,24 +170,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     final eventType = _event!['event_type'] as String? ?? '';
     final eventForRaw = _event!['event_for'] as String? ?? '';
     final eventSpan = _event!['event_span'] as String? ?? '';
-    final graceTime = _event!['grace_time'] as String? ?? '';
+    final graceTime = _event!['grace_time']?.toString() ?? '';
 
-    DateTime? startDate, endDate;
-    if (startAt != null) {
-      try { startDate = DateTime.parse(startAt).toLocal(); } catch (_) {}
-    }
-    if (endAt != null) {
-      try { endDate = DateTime.parse(endAt).toLocal(); } catch (_) {}
-    }
-
-    bool isMultiDay = false;
-    if (startDate != null && endDate != null) {
-      isMultiDay = startDate.day != endDate.day ||
-          startDate.month != endDate.month ||
-          startDate.year != endDate.year;
-    }
+    final startDate = parseStoredEventDateTime(startAt);
+    final endDate = parseStoredEventDateTime(endAt);
 
     bool isRegistrationOpen = _event!['status'] == 'published';
+    final usesSessions = usesEventSessions(_event!) || _eventSessions.isNotEmpty;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -285,7 +292,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                         const SizedBox(width: 8),
                         _buildInfoChip(
                           Icons.date_range_rounded,
-                          eventSpan == 'multi-day' ? 'Multi-Day' : 'Single',
+                          eventSpan == 'multi-day' || eventSpan == 'multi_day'
+                              ? 'Multi-Day'
+                              : 'Single',
                           'Span',
                         ),
                       ],
@@ -308,18 +317,12 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                   _buildDetailRow(
                     Icons.calendar_today_rounded,
                     'Date',
-                    startDate != null
-                        ? isMultiDay && endDate != null
-                            ? '${DateFormat('MMMM dd, yyyy').format(startDate)} - ${DateFormat('MMMM dd, yyyy').format(endDate)}'
-                            : DateFormat('MMMM dd, yyyy').format(startDate)
-                        : 'TBA',
+                    formatDateRange(startDate, endDate),
                   ),
                   _buildDetailRow(
                     Icons.schedule_rounded,
                     'Time',
-                    startDate != null
-                        ? '${DateFormat('hh:mm a').format(startDate)}${endDate != null ? ' - ${DateFormat('hh:mm a').format(endDate)}' : ''}'
-                        : 'TBA',
+                    formatTimeRange(startDate, endDate),
                   ),
                   _buildDetailRow(
                     Icons.location_on_rounded,
@@ -338,6 +341,19 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                       'Grace Time',
                       '$graceTime min',
                     ),
+                  if (usesSessions) ...[
+                    const SizedBox(height: 4),
+                    const Text(
+                      'Seminar Sessions',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF1F2937),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    _buildSessionScheduleSection(),
+                  ],
 
                   const SizedBox(height: 28),
 
@@ -361,7 +377,6 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                       ),
                     ),
                   ],
-
                   const SizedBox(height: 40),
                 ],
               ),
@@ -531,6 +546,90 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildSessionScheduleSection() {
+    if (_eventSessions.isEmpty) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFFE5E7EB)),
+        ),
+        child: Text(
+          'No seminar schedule found for this event yet.',
+          style: TextStyle(
+            fontSize: 14,
+            color: Colors.grey.shade700,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      children: _eventSessions.asMap().entries.map((entry) {
+        final index = entry.key;
+        final session = entry.value;
+        final sessionStart = parseStoredEventDateTime(session['start_at']);
+        final sessionEnd = parseStoredEventDateTime(session['end_at']);
+        final rawTitle = (session['title']?.toString() ?? '').trim();
+        final sessionTitle = rawTitle.isNotEmpty
+            ? rawTitle
+            : buildSessionDisplayName(session);
+
+        return Container(
+          width: double.infinity,
+          margin: EdgeInsets.only(bottom: index == _eventSessions.length - 1 ? 0 : 12),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: const Color(0xFFE5E7EB)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Seminar ${index + 1}',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF6B7280),
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                sessionTitle,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF111827),
+                ),
+              ),
+              const SizedBox(height: 10),
+              _buildDetailRow(
+                Icons.calendar_today_rounded,
+                'Date',
+                formatDateRange(sessionStart, sessionEnd),
+              ),
+              _buildDetailRow(
+                Icons.login_rounded,
+                'Start Time',
+                sessionStart != null ? DateFormat('hh:mm a').format(sessionStart) : 'TBA',
+              ),
+              _buildDetailRow(
+                Icons.logout_rounded,
+                'End Time',
+                sessionEnd != null ? DateFormat('hh:mm a').format(sessionEnd) : 'TBA',
+              ),
+            ],
+          ),
+        );
+      }).toList(),
     );
   }
 

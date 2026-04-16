@@ -2,6 +2,8 @@ import 'dart:async';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'auth_service.dart';
+import 'event_service.dart';
+import 'push_notification_service.dart';
 
 enum NotificationType { info, success, warning, error, event }
 
@@ -33,6 +35,9 @@ class NotificationService {
   factory NotificationService() => _instance;
 
   final _supabase = Supabase.instance.client;
+  final EventService _eventService = EventService();
+  final PushNotificationService _pushNotificationService =
+      PushNotificationService();
   final _unreadController = StreamController<int>.broadcast();
   Stream<int> get unreadCountStream => _unreadController.stream;
 
@@ -131,6 +136,35 @@ class NotificationService {
       },
     );
 
+    // Listen for student certificate issuance so the bell updates immediately.
+    _notifChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'certificates',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'student_id',
+        value: userId,
+      ),
+      callback: (payload) {
+        scheduleRefresh();
+      },
+    );
+
+    _notifChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'event_session_certificates',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'student_id',
+        value: userId,
+      ),
+      callback: (payload) {
+        scheduleRefresh();
+      },
+    );
+
     _notifChannel!.subscribe();
     _startPolling();
     unawaited(refresh(force: true));
@@ -149,6 +183,212 @@ class NotificationService {
     _unreadController.add(unread);
   }
 
+  bool _eventUsesSessionFlow(Map<String, dynamic> event) {
+    final structure = event['event_structure']?.toString().toLowerCase() ?? '';
+    final mode = event['event_mode']?.toString().toLowerCase() ?? '';
+    return event['uses_sessions'] == true ||
+        structure == 'one_seminar' ||
+        structure == 'two_seminars' ||
+        mode == 'seminar_based';
+  }
+
+  DateTime? _tryParseLocalDate(dynamic raw) {
+    final text = raw?.toString().trim() ?? '';
+    if (text.isEmpty) return null;
+    return DateTime.tryParse(text)?.toLocal();
+  }
+
+  Map<String, dynamic> _asStringMap(dynamic raw) {
+    if (raw is Map<String, dynamic>) return raw;
+    if (raw is Map) return Map<String, dynamic>.from(raw);
+    return <String, dynamic>{};
+  }
+
+  Map<String, dynamic> _extractRelatedMap(dynamic raw) {
+    if (raw is List && raw.isNotEmpty) {
+      return _asStringMap(raw.first);
+    }
+    return _asStringMap(raw);
+  }
+
+  String _sessionNotificationTitle(Map<String, dynamic> session) {
+    final title = session['title']?.toString().trim() ?? '';
+    if (title.isNotEmpty) return title;
+    final topic = session['topic']?.toString().trim() ?? '';
+    if (topic.isNotEmpty) return topic;
+    return 'Seminar';
+  }
+
+  Future<List<AppNotification>> _loadCertificateNotifications(
+    String userId,
+  ) async {
+    final notifications = <AppNotification>[];
+    final trimmedUserId = userId.trim();
+    if (trimmedUserId.isEmpty) {
+      return notifications;
+    }
+
+    try {
+      final simpleRows = await _supabase
+          .from('certificates')
+          .select('id, issued_at, event_id, events(title)')
+          .eq('student_id', trimmedUserId)
+          .order('issued_at', ascending: false)
+          .limit(40);
+
+      for (final raw in List<Map<String, dynamic>>.from(simpleRows)) {
+        final row = _asStringMap(raw);
+        final certId = row['id']?.toString().trim() ?? '';
+        final issuedAt = _tryParseLocalDate(row['issued_at']);
+        if (certId.isEmpty || issuedAt == null) {
+          continue;
+        }
+
+        final eventId = row['event_id']?.toString().trim() ?? '';
+        final event = _extractRelatedMap(row['events']);
+        final eventTitle = event['title']?.toString().trim().isNotEmpty == true
+            ? event['title'].toString().trim()
+            : 'Event';
+
+        notifications.add(
+          AppNotification(
+            id: 'cert_simple_$certId',
+            title: 'Certificate Ready',
+            message:
+                'Your certificate for "$eventTitle" is now available in Certificates.',
+            timestamp: issuedAt,
+            type: NotificationType.success,
+            eventId: eventId.isEmpty ? null : eventId,
+          ),
+        );
+      }
+    } catch (_) {
+      // Keep notification feed working even if certificate lookup fails.
+    }
+
+    try {
+      final sessionRows = await _supabase
+          .from('event_session_certificates')
+          .select(
+            'id, issued_at, session_id, '
+            'event_sessions(id, event_id, title, topic, events(id, title))',
+          )
+          .eq('student_id', trimmedUserId)
+          .order('issued_at', ascending: false)
+          .limit(60);
+
+      for (final raw in List<Map<String, dynamic>>.from(sessionRows)) {
+        final row = _asStringMap(raw);
+        final certId = row['id']?.toString().trim() ?? '';
+        final issuedAt = _tryParseLocalDate(row['issued_at']);
+        if (certId.isEmpty || issuedAt == null) {
+          continue;
+        }
+
+        final session = _extractRelatedMap(row['event_sessions']);
+        final event = _extractRelatedMap(session['events']);
+        final eventId = event['id']?.toString().trim() ??
+            session['event_id']?.toString().trim() ??
+            '';
+        final eventTitle = event['title']?.toString().trim().isNotEmpty == true
+            ? event['title'].toString().trim()
+            : 'Event';
+        final sessionTitle = _sessionNotificationTitle(session);
+
+        notifications.add(
+          AppNotification(
+            id: 'cert_session_$certId',
+            title: 'Certificate Ready',
+            message:
+                'Your certificate for "$eventTitle - $sessionTitle" is now available in Certificates.',
+            timestamp: issuedAt,
+            type: NotificationType.success,
+            eventId: eventId.isEmpty ? null : eventId,
+          ),
+        );
+      }
+    } catch (_) {
+      // Keep notification feed working even if seminar certificate lookup fails.
+    }
+
+    return notifications;
+  }
+
+  Future<DateTime> _resolveEffectiveEventEnd(
+    Map<String, dynamic> event,
+    DateTime fallback,
+  ) async {
+    if (!_eventUsesSessionFlow(event)) {
+      return fallback;
+    }
+
+    try {
+      final eventId = event['id']?.toString() ?? '';
+      if (eventId.isEmpty) return fallback;
+
+      final sessions = await _eventService.getEventSessions(eventId);
+      if (sessions.isEmpty) return fallback;
+
+      var effectiveEnd = fallback;
+      for (final session in sessions) {
+        final sessionEnd =
+            _tryParseLocalDate(session['end_at']) ??
+            _tryParseLocalDate(session['start_at']);
+        if (sessionEnd != null && sessionEnd.isAfter(effectiveEnd)) {
+          effectiveEnd = sessionEnd;
+        }
+      }
+
+      return effectiveEnd;
+    } catch (_) {
+      return fallback;
+    }
+  }
+
+  Future<void> _showFreshInteractiveNotifications(
+    List<AppNotification> previousNotifications,
+    List<AppNotification> nextNotifications,
+  ) async {
+    final previousIds = previousNotifications.map((n) => n.id).toSet();
+    final prefs = await SharedPreferences.getInstance();
+    final shownIds = (prefs.getStringList('shown_local_interactive_notifications') ?? [])
+        .toSet();
+    var didChange = false;
+
+    for (final notification in nextNotifications) {
+      final isEvalOpen = notification.id.startsWith('eval_open_');
+      final isCertificateReady = notification.id.startsWith('cert_');
+      if ((!isEvalOpen && !isCertificateReady) ||
+          notification.isRead ||
+          previousIds.contains(notification.id) ||
+          shownIds.contains(notification.id)) {
+        continue;
+      }
+
+      if (isCertificateReady) {
+        await _pushNotificationService.showLocalCertificateNotification(
+          title: notification.title,
+          body: notification.message,
+        );
+      } else {
+        await _pushNotificationService.showLocalEventNotification(
+          title: notification.title,
+          body: notification.message,
+          eventId: notification.eventId,
+        );
+      }
+      shownIds.add(notification.id);
+      didChange = true;
+    }
+
+    if (didChange) {
+      await prefs.setStringList(
+        'shown_local_interactive_notifications',
+        shownIds.toList(),
+      );
+    }
+  }
+
   Future<void> refresh({bool force = false}) async {
     if (_isRefreshing) return;
     if (!force && _isCacheFresh) {
@@ -158,7 +398,15 @@ class NotificationService {
 
     _isRefreshing = true;
     try {
-      _cachedNotifications = await _fetchNotifications();
+      final previousNotifications = List<AppNotification>.from(
+        _cachedNotifications,
+      );
+      final nextNotifications = await _fetchNotifications();
+      await _showFreshInteractiveNotifications(
+        previousNotifications,
+        nextNotifications,
+      );
+      _cachedNotifications = nextNotifications;
       _lastRefreshAt = DateTime.now();
       _emitUnreadCount();
     } finally {
@@ -233,6 +481,7 @@ class NotificationService {
       for (var event in events) {
         final startAt = DateTime.parse(event['start_at']).toLocal();
         final endAt = DateTime.parse(event['end_at']).toLocal();
+        final effectiveEndAt = await _resolveEffectiveEventEnd(event, endAt);
         final status = event['status'];
         final title = event['title'];
         final eventId = event['id'].toString();
@@ -244,7 +493,7 @@ class NotificationService {
         final description = event['description'] ?? '';
 
         // Check if event has actually ended
-        bool isFinished = endAt.isBefore(now);
+        final bool isFinished = !effectiveEndAt.isAfter(now);
         final bool isTeacherCreator = role == 'teacher' && currentUserId.isNotEmpty && createdBy == currentUserId;
         final bool isTeacherAssigned = role == 'teacher' && teacherAssignedEventIds.containsKey(eventId);
         final DateTime? assignedAt = isTeacherAssigned ? teacherAssignedEventIds[eventId] : null;
@@ -362,14 +611,14 @@ class NotificationService {
           }
 
           // Matatapos na (Event ending within 1 hour)
-          if (now.isAfter(startAt) && now.isBefore(endAt)) {
-            final minsUtilEnd = endAt.difference(now).inMinutes;
+          if (now.isAfter(startAt) && now.isBefore(effectiveEndAt)) {
+            final minsUtilEnd = effectiveEndAt.difference(now).inMinutes;
             if (minsUtilEnd <= 60 && minsUtilEnd > 0) {
               notifications.add(AppNotification(
                 id: 'end_$eventId',
                 title: 'Ending Soon',
                 message: '"$title" ends in $minsUtilEnd minutes.',
-                timestamp: endAt.subtract(const Duration(hours: 1)),
+                timestamp: effectiveEndAt.subtract(const Duration(hours: 1)),
                 type: NotificationType.warning,
                 eventId: eventId,
               ));
@@ -387,34 +636,54 @@ class NotificationService {
         }
 
         // Expired/Finished events
-        if (isFinished || status == 'expired') {
+        if (isFinished || status == 'expired' || status == 'finished') {
           // Only show recent completions (within last 3 days)
           // Use endAt as the actual time it happened
-          if (now.difference(endAt).inDays <= 3 && endAt.isBefore(now)) {
+          if (now.difference(effectiveEndAt).inDays <= 3 &&
+              !effectiveEndAt.isAfter(now)) {
             if (role == 'student') {
-              // Only notify students for events they actually joined.
               if (registeredEventIds.contains(eventId)) {
+                bool shouldShowEvaluation = false;
+                try {
+                  final bundle = await _eventService.getEvaluationBundle(
+                    eventId: eventId,
+                    studentId: currentUserId,
+                  );
+                  shouldShowEvaluation = bundle['ok'] == true &&
+                      bundle['is_eligible'] == true &&
+                      bundle['has_questions'] == true &&
+                      bundle['is_complete'] != true;
+                } catch (_) {}
+
+                if (shouldShowEvaluation) {
                 notifications.add(AppNotification(
                   id: 'eval_open_$eventId',
                   title: 'Evaluation Open',
-                  message: '"$title" has ended. Evaluation is now open. Submit it to qualify for your certificate.',
-                  timestamp: endAt,
+                  message: '"$title" ended. Tap to answer the evaluation.',
+                  timestamp: effectiveEndAt,
                   type: NotificationType.warning,
                   eventId: eventId,
                 ));
+                }
               }
             } else {
               notifications.add(AppNotification(
                 id: 'finished_$eventId',
                 title: 'Event Completed',
                 message: 'The event "$title" has ended.',
-                timestamp: endAt,
+                timestamp: effectiveEndAt,
                 type: NotificationType.error,
                 eventId: eventId,
               ));
             }
           }
         }
+      }
+
+      if (role == 'student' && currentUserId.isNotEmpty) {
+        notifications.addAll(
+          await _loadCertificateNotifications(currentUserId),
+        );
       }
 
       // Add local 'Password Changed' notifications
