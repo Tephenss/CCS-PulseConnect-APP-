@@ -1221,6 +1221,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     final monthName = DateFormat('MMMM yyyy').format(_calendarMonth);
     final daysInMonth = DateTime(_calendarMonth.year, _calendarMonth.month + 1, 0).day;
     final firstWeekday = DateTime(_calendarMonth.year, _calendarMonth.month, 1).weekday % 7;
+    final weekCount = ((daysInMonth + firstWeekday + 6) / 7).ceil();
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 4),
@@ -1237,89 +1238,106 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
           ),
         ],
       ),
-      child: Column(
-        children: [
-          // Month Header
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final safeHeight = constraints.maxHeight > 0 ? constraints.maxHeight : 300.0;
+          const monthRowHeight = 40.0;
+          const sectionGap = 12.0;
+          const dayHeaderHeight = 20.0;
+          final usableGridHeight = (safeHeight -
+                  monthRowHeight -
+                  sectionGap -
+                  dayHeaderHeight -
+                  sectionGap)
+              .clamp(150.0, 260.0);
+          final gridSpacing = weekCount > 1 ? 4.0 : 0.0;
+          final cellSize = ((usableGridHeight - (gridSpacing * (weekCount - 1))) / weekCount)
+              .clamp(24.0, 32.0);
+          final dayFontSize = (cellSize * 0.40).clamp(10.0, 13.0);
+
+          return Column(
             children: [
-              Container(
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.1),
-                  shape: BoxShape.circle,
-                ),
-                child: IconButton(
-                  icon: const Icon(Icons.chevron_left_rounded, color: Colors.white, size: 20),
-                  onPressed: () {
-                    setState(() {
-                      _calendarMonth = DateTime(_calendarMonth.year, _calendarMonth.month - 1, 1);
-                    });
-                  },
-                  constraints: const BoxConstraints(),
-                  padding: const EdgeInsets.all(8),
-                ),
-              ),
-              Text(
-                monthName,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 16,
-                  letterSpacing: 0.5,
-                ),
-              ),
-              Container(
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.1),
-                  shape: BoxShape.circle,
-                ),
-                child: IconButton(
-                  icon: const Icon(Icons.chevron_right_rounded, color: Colors.white, size: 20),
-                  onPressed: () {
-                    setState(() {
-                      _calendarMonth = DateTime(_calendarMonth.year, _calendarMonth.month + 1, 1);
-                    });
-                  },
-                  constraints: const BoxConstraints(),
-                  padding: const EdgeInsets.all(8),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-
-          // Day headers
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
-            children: ['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) {
-              return SizedBox(
-                width: 32,
-                child: Text(
-                  d,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.6),
-                    fontWeight: FontWeight.w700,
-                    fontSize: 12,
+              // Month Header
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: IconButton(
+                      icon: const Icon(Icons.chevron_left_rounded, color: Colors.white, size: 20),
+                      onPressed: () {
+                        setState(() {
+                          _calendarMonth = DateTime(_calendarMonth.year, _calendarMonth.month - 1, 1);
+                        });
+                      },
+                      constraints: const BoxConstraints(),
+                      padding: const EdgeInsets.all(8),
+                    ),
                   ),
-                ),
-              );
-            }).toList(),
-          ),
-          const SizedBox(height: 12),
+                  Text(
+                    monthName,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                      fontSize: 16,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.1),
+                      shape: BoxShape.circle,
+                    ),
+                    child: IconButton(
+                      icon: const Icon(Icons.chevron_right_rounded, color: Colors.white, size: 20),
+                      onPressed: () {
+                        setState(() {
+                          _calendarMonth = DateTime(_calendarMonth.year, _calendarMonth.month + 1, 1);
+                        });
+                      },
+                      constraints: const BoxConstraints(),
+                      padding: const EdgeInsets.all(8),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: sectionGap),
 
-          // Calendar Grid
-          ...List.generate(
-            ((daysInMonth + firstWeekday + 6) / 7).ceil(),
-            (week) {
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: List.generate(7, (weekday) {
+              // Day headers
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: ['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) {
+                  return SizedBox(
+                    width: cellSize,
+                    child: Text(
+                      d,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.6),
+                        fontWeight: FontWeight.w700,
+                        fontSize: 12,
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: sectionGap),
+
+              // Calendar Grid
+              ...List.generate(
+                weekCount,
+                (week) {
+                  return Padding(
+                    padding: EdgeInsets.only(bottom: week == weekCount - 1 ? 0 : gridSpacing),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: List.generate(7, (weekday) {
                     final day = week * 7 + weekday - firstWeekday + 1;
                     if (day < 1 || day > daysInMonth) {
-                      return const SizedBox(width: 32, height: 32);
+                      return SizedBox(width: cellSize, height: cellSize);
                     }
 
                     final isToday = day == now.day && _calendarMonth.month == now.month && _calendarMonth.year == now.year;
@@ -1341,8 +1359,8 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                     final hasEvent = eventsOnThisDay.isNotEmpty;
 
                     Widget dayWidget = Container(
-                      width: 32,
-                      height: 32,
+                      width: cellSize,
+                      height: cellSize,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         color: isToday
@@ -1359,7 +1377,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                                   ? const Color(0xFF450A0A)
                                   : Colors.white.withValues(alpha: 0.9),
                               fontWeight: isToday ? FontWeight.w900 : FontWeight.w600,
-                              fontSize: 13,
+                              fontSize: dayFontSize,
                             ),
                           ),
                           if (hasEvent)
@@ -1421,12 +1439,14 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                     }
 
                     return dayWidget;
-                  }),
-                ),
-              );
-            },
-          ),
-        ],
+                      }),
+                    ),
+                  );
+                },
+              ),
+            ],
+          );
+        },
       ),
     );
   }

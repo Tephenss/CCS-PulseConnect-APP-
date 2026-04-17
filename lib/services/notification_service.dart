@@ -136,6 +136,21 @@ class NotificationService {
       },
     );
 
+    // Listen for student QR assistant assignment changes.
+    _notifChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'event_assistants',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'student_id',
+        value: userId,
+      ),
+      callback: (payload) {
+        scheduleRefresh();
+      },
+    );
+
     // Listen for student certificate issuance so the bell updates immediately.
     _notifChannel!.onPostgresChanges(
       event: PostgresChangeEvent.all,
@@ -358,7 +373,8 @@ class NotificationService {
     for (final notification in nextNotifications) {
       final isEvalOpen = notification.id.startsWith('eval_open_');
       final isCertificateReady = notification.id.startsWith('cert_');
-      if ((!isEvalOpen && !isCertificateReady) ||
+      final isScannerAssigned = notification.id.startsWith('scan_assign_');
+      if ((!isEvalOpen && !isCertificateReady && !isScannerAssigned) ||
           notification.isRead ||
           previousIds.contains(notification.id) ||
           shownIds.contains(notification.id)) {
@@ -681,6 +697,46 @@ class NotificationService {
       }
 
       if (role == 'student' && currentUserId.isNotEmpty) {
+        try {
+          final rows = await _supabase
+              .from('event_assistants')
+              .select('event_id, assigned_by_teacher_id, allow_scan, created_at, events(title)')
+              .eq('student_id', currentUserId)
+              .eq('allow_scan', true)
+              .not('assigned_by_teacher_id', 'is', null)
+              .limit(60);
+
+          for (final raw in (rows as List)) {
+            final row = _asStringMap(raw);
+            final eventId = row['event_id']?.toString() ?? '';
+            if (eventId.isEmpty) continue;
+
+            final assignedAtRaw = row['created_at'];
+            final assignedAt = _tryParseLocalDate(assignedAtRaw);
+            if (assignedAt == null) continue;
+            if (now.difference(assignedAt).inDays > 14) continue;
+
+            final event = _extractRelatedMap(row['events']);
+            final eventTitle = event['title']?.toString().trim().isNotEmpty == true
+                ? event['title'].toString().trim()
+                : 'Event';
+
+            notifications.add(
+              AppNotification(
+                id: 'scan_assign_$eventId',
+                title: 'QR Scanner Access Granted',
+                message:
+                    'You were assigned as QR scanner assistant for "$eventTitle".',
+                timestamp: assignedAt,
+                type: NotificationType.info,
+                eventId: eventId,
+              ),
+            );
+          }
+        } catch (_) {
+          // Keep notifications working if assistant assignment lookup fails.
+        }
+
         notifications.addAll(
           await _loadCertificateNotifications(currentUserId),
         );

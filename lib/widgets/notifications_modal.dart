@@ -8,9 +8,22 @@ import '../screens/student/student_event_details.dart';
 import '../screens/teacher/teacher_event_manage.dart';
 import 'custom_loader.dart';
 
+bool _isNotificationsModalOpen = false;
+
 Future<int?> showNotificationsModal(BuildContext context) {
+  if (!context.mounted) {
+    return Future<int?>.value(null);
+  }
+
+  final route = ModalRoute.of(context);
+  if (route == null || !route.isCurrent || _isNotificationsModalOpen) {
+    return Future<int?>.value(null);
+  }
+
+  _isNotificationsModalOpen = true;
   return showGeneralDialog<int>(
     context: context,
+    useRootNavigator: false,
     barrierDismissible: true,
     barrierLabel: 'Notifications',
     barrierColor: Colors.black.withValues(alpha: 0.28),
@@ -32,7 +45,9 @@ Future<int?> showNotificationsModal(BuildContext context) {
         ),
       );
     },
-  );
+  ).whenComplete(() {
+    _isNotificationsModalOpen = false;
+  });
 }
 
 class _NotificationsFloatingModal extends StatefulWidget {
@@ -163,7 +178,7 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
                                   physics: const AlwaysScrollableScrollPhysics(),
                                   padding: const EdgeInsets.symmetric(vertical: 6),
                                   itemCount: previewCount,
-                                  separatorBuilder: (_, __) => const Divider(height: 1),
+                                  separatorBuilder: (_, _) => const Divider(height: 1),
                                   itemBuilder: (context, index) => _buildNotificationRow(_notifications[index]),
                                 ),
                               ),

@@ -93,11 +93,6 @@ class _StudentTicketsState extends State<StudentTickets> {
   }
 
   DateTime _extractSortDate(Map<String, dynamic> ticketMap) {
-    final event = ticketMap['events'];
-    final startAt = event is Map ? (event['start_at'] ?? '').toString() : '';
-    final eventDate = parseStoredEventDateTime(startAt);
-    if (eventDate != null) return eventDate;
-
     try {
       final registeredAt = (ticketMap['registered_at'] ?? '').toString();
       if (registeredAt.isNotEmpty) return DateTime.parse(registeredAt);
@@ -107,6 +102,11 @@ class _StudentTicketsState extends State<StudentTickets> {
       final downloadedAt = (ticketMap['downloaded_at_local'] ?? '').toString();
       if (downloadedAt.isNotEmpty) return DateTime.parse(downloadedAt);
     } catch (_) {}
+
+    final event = ticketMap['events'];
+    final startAt = event is Map ? (event['start_at'] ?? '').toString() : '';
+    final eventDate = parseStoredEventDateTime(startAt);
+    if (eventDate != null) return eventDate;
 
     return DateTime.fromMillisecondsSinceEpoch(0);
   }

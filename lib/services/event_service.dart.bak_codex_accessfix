@@ -1932,6 +1932,25 @@ class EventService {
         nowUtc: nowUtc,
       );
     } catch (_) {
+      try {
+        final fallbackEvents = await getTeacherAccessibleEvents(teacherId);
+        final publishedEvents = fallbackEvents.where((event) {
+          return (event['status']?.toString() ?? '').toLowerCase() == 'published';
+        }).map((event) => Map<String, dynamic>.from(event)).toList();
+
+        final nowUtc = DateTime.now().toUtc();
+        final contexts = <Map<String, dynamic>>[];
+        for (final event in publishedEvents) {
+          contexts.add(await _resolveSingleEventScanContext(event, nowUtc));
+        }
+
+        return _finalizeTeacherScanContext(
+          events: publishedEvents,
+          contexts: contexts,
+          nowUtc: nowUtc,
+        );
+      } catch (_) {}
+
       return {
         'ok': false,
         'status': 'error',
@@ -1950,24 +1969,32 @@ class EventService {
     try {
       final rows = await _supabase
           .from('event_assistants')
-          .select('event_id,allow_scan,assigned_by_teacher_id')
+          .select(
+            'event_id,allow_scan,assigned_by_teacher_id,events(id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure)',
+          )
           .eq('student_id', studentId)
           .eq('allow_scan', true)
+          .not('assigned_by_teacher_id', 'is', null)
           .limit(200);
       return List<Map<String, dynamic>>.from(rows);
     } catch (_) {
       try {
         final rows = await _supabase
             .from('event_assistants')
-            .select('event_id,allow_scan,assigned_by_teacher_id')
+            .select(
+              'event_id,allow_scan,assigned_by_teacher_id,events(id,title,status,start_at,end_at,location,uses_sessions,event_structure)',
+            )
             .eq('student_id', studentId)
             .eq('allow_scan', true)
+            .not('assigned_by_teacher_id', 'is', null)
             .limit(200);
         return List<Map<String, dynamic>>.from(rows);
       } catch (_) {
         final rows = await _supabase
             .from('event_assistants')
-            .select('event_id,allow_scan')
+            .select(
+              'event_id,allow_scan,assigned_by_teacher_id,events(id,title,status,start_at,end_at,location,uses_sessions)',
+            )
             .eq('student_id', studentId)
             .eq('allow_scan', true)
             .limit(200);
@@ -1991,121 +2018,28 @@ class EventService {
 
     try {
       final rows = await _fetchStudentAssistantScanRows(studentId);
-      final candidateRows = <Map<String, dynamic>>[];
-      final teacherIds = <String>{};
-      final eventIds = <String>{};
+      final events = <Map<String, dynamic>>[];
 
       for (final row in List<Map<String, dynamic>>.from(rows)) {
         final assignedBy = row['assigned_by_teacher_id']?.toString().trim() ?? '';
-        final eventId = row['event_id']?.toString() ?? '';
-        // Only accept rows explicitly assigned by a teacher.
-        // This prevents legacy rows (without assigning teacher) from
-        // accidentally granting scanner context.
-        if (eventId.isEmpty || assignedBy.isEmpty) continue;
-        candidateRows.add({
-          'assigned_by_teacher_id': assignedBy,
-          'event_id': eventId,
-        });
-        teacherIds.add(assignedBy);
-        eventIds.add(eventId);
-      }
-
-      if (candidateRows.isEmpty || eventIds.isEmpty) {
-        return _finalizeTeacherScanContext(
-          events: const [],
-          contexts: const [],
-          nowUtc: DateTime.now().toUtc(),
-        );
-      }
-
-      final eventsById = <String, Map<String, dynamic>>{};
-      try {
-        dynamic eventRows;
-        try {
-          eventRows = await _supabase
-              .from('events')
-              .select(
-                'id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure',
-              )
-              .inFilter('id', eventIds.toList())
-              .eq('status', 'published')
-              .limit(500);
-        } catch (_) {
-          try {
-            eventRows = await _supabase
-                .from('events')
-                .select('id,title,status,start_at,end_at,location,uses_sessions')
-                .inFilter('id', eventIds.toList())
-                .eq('status', 'published')
-                .limit(500);
-          } catch (_) {
-            // Last-resort backward compatible schema (no uses_sessions).
-            eventRows = await _supabase
-                .from('events')
-                .select('id,title,status,start_at,end_at,location')
-                .inFilter('id', eventIds.toList())
-                .eq('status', 'published')
-                .limit(500);
-          }
+        if (assignedBy.isEmpty) continue;
+        final rawEvent = row['events'];
+        Map<String, dynamic>? event;
+        if (rawEvent is Map<String, dynamic>) {
+          event = rawEvent;
+        } else if (rawEvent is Map) {
+          event = Map<String, dynamic>.from(rawEvent);
+        } else if (rawEvent is List &&
+            rawEvent.isNotEmpty &&
+            rawEvent.first is Map) {
+          event = Map<String, dynamic>.from(rawEvent.first as Map);
         }
-
-        for (final row in List<Map<String, dynamic>>.from(eventRows)) {
-          final id = row['id']?.toString() ?? '';
-          if (id.isEmpty) continue;
-          eventsById[id] = Map<String, dynamic>.from(row);
-        }
-      } catch (_) {
-        return {
-          'ok': false,
-          'status': 'error',
-          'scanner_enabled': false,
-          'message': 'Unable to load scanner context right now.',
-          'context': null,
-          'assignments': 0,
-          'server_time': DateTime.now().toUtc().toIso8601String(),
-        };
-      }
-
-      // Best-effort check only:
-      // Do not block assistant scanner access here when event_assistants already
-      // has an explicit allow_scan=true row. Web/app assignments should be the
-      // source of truth for assistants.
-      if (teacherIds.isNotEmpty) {
-        try {
-          await _supabase
-              .from('event_teacher_assignments')
-              .select('event_id,teacher_id,can_scan,can_manage_assistants')
-              .inFilter('event_id', eventIds.toList())
-              .inFilter('teacher_id', teacherIds.toList())
-              .or('can_scan.eq.true,can_manage_assistants.eq.true')
-              .limit(1);
-        } catch (_) {
-          // Ignore verification errors; do not hard-fail assistant access.
-        }
-      }
-
-      final events = <Map<String, dynamic>>[];
-      final seenEventIds = <String>{};
-      for (final row in candidateRows) {
-        final eventId = row['event_id']?.toString().trim() ?? '';
-        if (eventId.isEmpty) continue;
-        final event = eventsById[eventId];
         if (event == null) continue;
-        if (!seenEventIds.add(eventId)) continue;
+        final status = (event['status']?.toString() ?? '').toLowerCase();
+        if (status != 'published') continue;
+        final eventId = event['id']?.toString() ?? '';
+        if (eventId.isEmpty) continue;
         events.add(event);
-      }
-
-      // Fallback: if assistant rows exist but strict pair verification filtered
-      // everything out, trust explicit assistant assignment rows.
-      if (events.isEmpty && candidateRows.isNotEmpty) {
-        for (final row in candidateRows) {
-          final eventId = row['event_id']?.toString().trim() ?? '';
-          if (eventId.isEmpty || !seenEventIds.add(eventId)) continue;
-          final event = eventsById[eventId];
-          if (event != null) {
-            events.add(event);
-          }
-        }
       }
 
       if (events.isEmpty) {
@@ -2126,12 +2060,12 @@ class EventService {
         contexts: contexts,
         nowUtc: nowUtc,
       );
-    } catch (e) {
+    } catch (_) {
       return {
         'ok': false,
         'status': 'error',
         'scanner_enabled': false,
-        'message': 'Unable to load scanner context right now. ${e.toString()}',
+        'message': 'Unable to load scanner context right now.',
         'context': null,
         'assignments': 0,
         'server_time': DateTime.now().toUtc().toIso8601String(),
@@ -2541,10 +2475,7 @@ class EventService {
       if (normalizedId.isNotEmpty) {
         await _supabase
             .from('event_assistants')
-            .update({
-              'allow_scan': allowScan,
-              'assigned_by_teacher_id': teacherId,
-            })
+            .update({'allow_scan': allowScan})
             .eq('id', normalizedId);
         return {'ok': true};
       }
@@ -2556,10 +2487,7 @@ class EventService {
 
       await _supabase
           .from('event_assistants')
-          .update({
-            'allow_scan': allowScan,
-            'assigned_by_teacher_id': teacherId,
-          })
+          .update({'allow_scan': allowScan})
           .eq('event_id', eId)
           .eq('student_id', sId);
 
@@ -3950,121 +3878,28 @@ class EventService {
           }
         }
 
-        final sessionMeta = <Map<String, dynamic>>[];
-        DateTime? earliestSessionStart;
-        DateTime? latestWindowClose;
-        DateTime? latestSessionEnd;
         for (final session in sessions) {
           final sessionId = session['id']?.toString() ?? '';
           if (sessionId.isEmpty) continue;
 
           final startAt = _toUtcDate(session['start_at']);
           if (startAt == null) continue;
-          if (earliestSessionStart == null ||
-              startAt.isBefore(earliestSessionStart)) {
-            earliestSessionStart = startAt;
-          }
-
           final windowMinutes = _sessionWindowMinutes(session);
           final closesAt = startAt.add(Duration(minutes: windowMinutes));
-          if (latestWindowClose == null || closesAt.isAfter(latestWindowClose)) {
-            latestWindowClose = closesAt;
-          }
 
-          final sessionEndAt = _toUtcDate(session['end_at']) ?? closesAt;
-          if (latestSessionEnd == null || sessionEndAt.isAfter(latestSessionEnd)) {
-            latestSessionEnd = sessionEndAt;
-          }
-
-          sessionMeta.add({
-            'session': session,
-            'session_id': sessionId,
-            'start_at': startAt,
-            'closes_at': closesAt,
-            'window_minutes': windowMinutes,
-            'end_at': sessionEndAt,
-          });
-        }
-
-        if (sessionMeta.isEmpty) {
-          continue;
-        }
-
-        // Seminar-based lock should trigger only after the whole event ends.
-        final eventEndAt = _toUtcDate(event['end_at']);
-        final lockAt = eventEndAt ?? latestSessionEnd ?? latestWindowClose;
-        if (lockAt != null && !nowUtc.isAfter(lockAt)) {
-          continue;
-        }
-
-        final hasAnyPresent = sessionMeta.any((meta) {
-          final sid = meta['session_id']?.toString() ?? '';
-          if (sid.isEmpty) return false;
-          return presentBySession[sid] == true;
-        });
-
-        final missedSessions = <Map<String, dynamic>>[];
-        for (final meta in sessionMeta) {
-          final sid = meta['session_id']?.toString() ?? '';
-          if (sid.isEmpty) continue;
-          final closesAt = meta['closes_at'] as DateTime;
-          if (!nowUtc.isAfter(closesAt)) continue;
-          if (presentBySession[sid] == true) continue;
-          missedSessions.add(meta);
-        }
-
-        if (missedSessions.isEmpty) {
-          continue;
-        }
-
-        if (!hasAnyPresent) {
-          // If student attended none of the seminars, show one event-level lock item.
-          final scopeKey = _absenceScopeKey(eventId);
-          if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
+          if (!nowUtc.isAfter(closesAt)) {
             continue;
           }
-          seenKeys.add(scopeKey);
 
-          final windowOpensAt =
-              earliestSessionStart ?? _toUtcDate(event['start_at']) ?? nowUtc;
-          final windowClosesAt =
-              latestWindowClose ?? lockAt ?? windowOpensAt.add(const Duration(minutes: 30));
-
-          pending.add({
-            'scope_key': scopeKey,
-            'scope_type': 'event',
-            'event_id': eventId,
-            'event_title': eventTitle,
-            'event_location': eventLocation,
-            'event_start_at': event['start_at'],
-            'event_end_at': event['end_at'],
-            'session_id': null,
-            'session_title': null,
-            'session_start_at': null,
-            'session_end_at': null,
-            'window_minutes': 30,
-            'window_opens_at': windowOpensAt.toIso8601String(),
-            'window_closes_at': windowClosesAt.toIso8601String(),
-          });
-          continue;
-        }
-
-        for (final meta in missedSessions) {
-          final sessionId = meta['session_id']?.toString() ?? '';
-          if (sessionId.isEmpty) continue;
+          if (presentBySession[sessionId] == true) {
+            continue;
+          }
 
           final scopeKey = _absenceScopeKey(eventId, sessionId: sessionId);
           if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
             continue;
           }
           seenKeys.add(scopeKey);
-
-          final session = Map<String, dynamic>.from(
-            meta['session'] as Map<String, dynamic>,
-          );
-          final startAt = meta['start_at'] as DateTime;
-          final closesAt = meta['closes_at'] as DateTime;
-          final windowMinutes = meta['window_minutes'] as int;
 
           pending.add({
             'scope_key': scopeKey,
@@ -4093,11 +3928,6 @@ class EventService {
       }
       final closesAt = eventStartAt.add(const Duration(minutes: 30));
       if (!nowUtc.isAfter(closesAt)) {
-        continue;
-      }
-      final eventEndAt = _toUtcDate(event['end_at']);
-      final lockAt = eventEndAt ?? closesAt;
-      if (!nowUtc.isAfter(lockAt)) {
         continue;
       }
 

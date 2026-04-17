@@ -244,10 +244,16 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> with Ticker
                             ),
                             child: ClipOval(
                               child: Image.asset(
-                                'assets/CCS.png',
+                                'assets/ccs_lock_logo.png',
                                 width: 105,
                                 height: 105,
                                 fit: BoxFit.cover,
+                                errorBuilder: (_, __, ___) => Image.asset(
+                                  'assets/CCS.png',
+                                  width: 105,
+                                  height: 105,
+                                  fit: BoxFit.cover,
+                                ),
                               ),
                             ),
                           ),

@@ -4,6 +4,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../utils/event_time_utils.dart';
+import '../../services/event_service.dart';
 
 class StudentTicketView extends StatefulWidget {
   final Map<String, dynamic> ticket;
@@ -16,13 +17,64 @@ class StudentTicketView extends StatefulWidget {
 
 class _StudentTicketViewState extends State<StudentTicketView> {
   static const String _downloadedTicketKeyPrefix = 'downloaded_tickets_';
+  final EventService _eventService = EventService();
   bool _isDownloading = false;
   bool _isAlreadyDownloaded = false;
+  bool _isLoadingSeminarAttendance = false;
+  List<Map<String, dynamic>> _seminarAttendance = [];
 
   @override
   void initState() {
     super.initState();
     _loadDownloadedState();
+    _loadSeminarAttendance();
+  }
+
+  Future<void> _loadSeminarAttendance() async {
+    final ticket = widget.ticket;
+    final event = ticket['events'] as Map<String, dynamic>? ?? {};
+    if (!_isSeminarBasedEvent(event)) {
+      if (mounted) {
+        setState(() {
+          _seminarAttendance = [];
+          _isLoadingSeminarAttendance = false;
+        });
+      }
+      return;
+    }
+
+    final eventId = (event['id'] ?? '').toString().trim();
+    final registrationId = (ticket['id'] ?? '').toString().trim();
+    final ticketData = ticket['tickets'];
+    final ticketId = ticketData is List && ticketData.isNotEmpty
+        ? (ticketData[0]['id'] ?? '').toString()
+        : ticketData is Map
+            ? (ticketData['id'] ?? '').toString()
+            : '';
+
+    if (eventId.isEmpty || registrationId.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _seminarAttendance = [];
+          _isLoadingSeminarAttendance = false;
+        });
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() => _isLoadingSeminarAttendance = true);
+    }
+    final rows = await _eventService.getTicketSeminarAttendance(
+      eventId: eventId,
+      registrationId: registrationId,
+      ticketId: ticketId,
+    );
+    if (!mounted) return;
+    setState(() {
+      _seminarAttendance = rows;
+      _isLoadingSeminarAttendance = false;
+    });
   }
 
   Future<void> _loadDownloadedState() async {
@@ -215,6 +267,7 @@ class _StudentTicketViewState extends State<StudentTicketView> {
     final location = event['location'] as String? ?? 'TBA';
     final eventType = event['event_type'] as String? ?? '';
     final graceTime = event['grace_time']?.toString() ?? '';
+    final isSeminarBased = _isSeminarBasedEvent(event);
     final ticketData = ticket['tickets'];
     final ticketId = ticketData is List && ticketData.isNotEmpty
         ? ticketData[0]['id']?.toString() ?? ''
@@ -240,7 +293,6 @@ class _StudentTicketViewState extends State<StudentTicketView> {
 
     final scanStatus = attendance?['status'] as String? ?? 'unscanned';
     final checkInAt = attendance?['check_in_at'] as String?;
-    final checkOutAt = attendance?['check_out_at'] as String?;
     final ticketIdDisplay = ticketId.length > 8 ? ticketId.substring(0, 8).toUpperCase() : ticketId.toUpperCase();
 
     final startDate = parseStoredEventDateTime(startAt);
@@ -550,32 +602,24 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                               ),
                               const SizedBox(height: 16),
 
-                              // Check-in time
-                              _buildAttendanceRow(
-                                'Check-in',
-                                checkInAt != null
-                                    ? (() {
-                                        final parsed = parseStoredEventDateTime(checkInAt);
-                                        return parsed != null
-                                            ? DateFormat('MMM dd, yyyy — hh:mm a').format(parsed)
-                                            : 'Not yet';
-                                      })()
-                                    : 'Not yet',
-                                checkInAt != null,
-                              ),
-                              const SizedBox(height: 10),
-                              _buildAttendanceRow(
-                                'Check-out',
-                                checkOutAt != null
-                                    ? (() {
-                                        final parsed = parseStoredEventDateTime(checkOutAt);
-                                        return parsed != null
-                                            ? DateFormat('MMM dd, yyyy — hh:mm a').format(parsed)
-                                            : 'Not yet';
-                                      })()
-                                    : 'Not yet',
-                                checkOutAt != null,
-                              ),
+                              if (isSeminarBased) ...[
+                                _buildSeminarAttendanceRows(),
+                              ] else ...[
+                                _buildAttendanceRow(
+                                  'Check-in',
+                                  checkInAt != null
+                                      ? (() {
+                                          final parsed = parseStoredEventDateTime(checkInAt);
+                                          return parsed != null
+                                              ? DateFormat('MMM dd, yyyy — hh:mm a').format(parsed)
+                                              : 'Not yet';
+                                        })()
+                                      : 'Not yet',
+                                  checkInAt != null,
+                                ),
+                                const SizedBox(height: 10),
+                                _buildAttendanceRow('Flow', 'Simple event', true),
+                              ],
 
                               // Event Type & Grace Time
                               if (eventType.isNotEmpty || graceTime.isNotEmpty) ...[
@@ -682,6 +726,72 @@ class _StudentTicketViewState extends State<StudentTicketView> {
             fontWeight: FontWeight.w700,
           ),
         ),
+      ],
+    );
+  }
+
+  bool _isSeminarBasedEvent(Map<String, dynamic> event) {
+    final mode = (event['event_mode']?.toString() ?? '').trim().toLowerCase();
+    final structure = (event['event_structure']?.toString() ?? '').trim().toLowerCase();
+    final usesSessionsRaw = event['uses_sessions'];
+    final usesSessions = usesSessionsRaw == true ||
+        (usesSessionsRaw is num && usesSessionsRaw > 0) ||
+        (usesSessionsRaw is String && usesSessionsRaw.toLowerCase() == 'true');
+    return mode == 'seminar_based' ||
+        structure == 'seminar_based' ||
+        structure.contains('seminar') ||
+        usesSessions;
+  }
+
+  Widget _buildSeminarAttendanceRows() {
+    if (_isLoadingSeminarAttendance) {
+      return const Padding(
+        padding: EdgeInsets.only(top: 6),
+        child: SizedBox(
+          height: 18,
+          width: 18,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      );
+    }
+    if (_seminarAttendance.isEmpty) {
+      return _buildAttendanceRow('Seminars', 'No seminar schedule found', false);
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildAttendanceRow(
+          'Seminars',
+          _seminarAttendance.length == 1 ? '1 Seminar' : '${_seminarAttendance.length} Seminars',
+          true,
+        ),
+        const SizedBox(height: 10),
+        ..._seminarAttendance.asMap().entries.map((entry) {
+          final row = entry.value;
+          final title = (row['title']?.toString() ?? '').trim().isNotEmpty
+              ? row['title'].toString().trim()
+              : 'Seminar ${entry.key + 1}';
+          final rawCheckIn = (row['check_in_at']?.toString() ?? '').trim();
+          String checkIn = 'Not yet';
+          if (rawCheckIn.isNotEmpty) {
+            final parsed = parseStoredEventDateTime(rawCheckIn);
+            if (parsed != null) {
+              checkIn = DateFormat('MMM dd, yyyy — hh:mm a').format(parsed);
+            }
+          }
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildAttendanceRow('Title', title, true),
+                const SizedBox(height: 6),
+                _buildAttendanceRow('Check-in', checkIn, rawCheckIn.isNotEmpty),
+              ],
+            ),
+          );
+        }),
       ],
     );
   }

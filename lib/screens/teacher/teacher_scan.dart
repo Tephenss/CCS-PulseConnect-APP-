@@ -46,8 +46,11 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
   final EventService _eventService = EventService();
 
   bool get _hasPermission =>
+      _scanContext != null &&
+      _scanContext?['ok'] == true &&
       _teacherId.isNotEmpty &&
-      (_scanContext?['status']?.toString() ?? '') != 'no_assignment';
+      (_scanContext?['status']?.toString() ?? '') != 'no_assignment' &&
+      (_scanContext?['status']?.toString() ?? '') != 'error';
   bool get _scannerEnabled => _scanContext?['scanner_enabled'] == true;
 
   @override
@@ -92,7 +95,8 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
           _scanStatus = 'Checking scanner assignment...';
           _statusColor = Colors.grey.shade700;
           _hasScanResult = false;
-          _isLoading = false;
+          _scanContext = null;
+          _isLoading = true;
         });
       }
 
@@ -134,6 +138,10 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
           _isLoading = false;
         });
       }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -153,6 +161,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
         context is Map<String, dynamic> ? context : null,
       );
       final status = result['status']?.toString() ?? 'closed';
+      final normalizedStatus = status.toLowerCase();
       final scannerEnabled = result['scanner_enabled'] == true;
       final message = (result['message']?.toString() ?? '').trim();
       final availability = _scanAvailabilityNote(
@@ -163,13 +172,21 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
 
       setState(() {
         _scanContext = result;
-        _selectedEventTitle = eventTitle;
+        _selectedEventTitle =
+            (normalizedStatus == 'no_assignment' || normalizedStatus == 'error')
+                ? ''
+                : eventTitle;
 
         if (scannerEnabled && !_manualPause) {
           _isScanning = true;
         } else {
           _isScanning = false;
           if (!scannerEnabled) _manualPause = false;
+        }
+
+        if (normalizedStatus == 'no_assignment' || normalizedStatus == 'error') {
+          _isScanning = false;
+          _manualPause = false;
         }
 
         if (!_hasScanResult) {
@@ -184,11 +201,20 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
     } catch (_) {
       if (!mounted) return;
       setState(() {
+        _scanContext = {
+          'ok': false,
+          'status': 'error',
+          'scanner_enabled': false,
+          'message': 'Unable to load scanner context right now.',
+          'context': null,
+        };
+        _selectedEventTitle = '';
         if (!_hasScanResult) {
           _scanStatus = _scannerClosedLabel;
           _statusColor = Colors.red.shade700;
         }
         _isScanning = false;
+        _manualPause = false;
       });
     } finally {
       _isRefreshingContext = false;
@@ -789,7 +815,13 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
   }
 
   Widget _buildNoPermission() {
-    final message = (_scanContext?['message']?.toString() ?? '').trim();
+    final status = (_scanContext?['status']?.toString() ?? '').toLowerCase();
+    final serviceMessage = (_scanContext?['message']?.toString() ?? '').trim();
+    final message = (status == 'no_assignment' || status == 'error')
+        ? 'You can\'t access this feature. Only teachers assigned by admin can use the QR scanner.'
+        : (serviceMessage.isNotEmpty
+            ? serviceMessage
+            : 'You can\'t access this feature. Only teachers assigned by admin can use the QR scanner.');
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
@@ -819,9 +851,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
             ),
             const SizedBox(height: 12),
             Text(
-              message.isNotEmpty
-                  ? message
-                  : 'This feature is only available for teachers assigned by admin before publish.',
+              message,
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 15,
@@ -835,5 +865,4 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
     );
   }
 }
-
 

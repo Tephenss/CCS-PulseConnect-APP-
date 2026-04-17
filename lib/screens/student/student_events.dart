@@ -31,7 +31,6 @@ class _StudentEventsState extends State<StudentEvents>
 
   // Filter state
   String _selectedEventType = 'All';
-  String _selectedEventFor = 'All';
 
   late TabController _tabController;
   Timer? _refreshTimer;
@@ -184,12 +183,8 @@ class _StudentEventsState extends State<StudentEvents>
   List<Map<String, dynamic>> _filterList(List<Map<String, dynamic>> events) {
     return events.where((e) {
       final type = e['event_type'] as String? ?? '';
-      final eventFor = e['event_for'] as String? ?? '';
 
       if (_selectedEventType != 'All' && type != _selectedEventType) {
-        return false;
-      }
-      if (_selectedEventFor != 'All' && eventFor != _selectedEventFor) {
         return false;
       }
       return true;
@@ -198,7 +193,6 @@ class _StudentEventsState extends State<StudentEvents>
 
   void _showFilterSheet() {
     String tempType = _selectedEventType;
-    String tempFor = _selectedEventFor;
 
     showModalBottomSheet(
       context: context,
@@ -255,32 +249,7 @@ class _StudentEventsState extends State<StudentEvents>
                         side: BorderSide.none,
                         onSelected: (_) => setSheetState(() => tempType = type),
                       );
-                    }).toList(),
-                  ),
-                  const SizedBox(height: 20),
-
-                  // Event For Section
-                  const Text('Event For', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFF6B7280))),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: ['All', '1st Year', '2nd Year', '3rd Year', '4th Year'].map((grade) {
-                      final selected = tempFor == grade;
-                      return ChoiceChip(
-                        label: Text(grade, style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: selected ? Colors.white : const Color(0xFF374151),
-                        )),
-                        selected: selected,
-                        selectedColor: const Color(0xFF7F1D1D),
-                        backgroundColor: Colors.grey.shade100,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                        side: BorderSide.none,
-                        onSelected: (_) => setSheetState(() => tempFor = grade),
-                      );
-                    }).toList(),
+                    }                  ).toList(),
                   ),
                   const SizedBox(height: 28),
 
@@ -292,7 +261,6 @@ class _StudentEventsState extends State<StudentEvents>
                           onPressed: () {
                             setSheetState(() {
                               tempType = 'All';
-                              tempFor = 'All';
                             });
                           },
                           style: OutlinedButton.styleFrom(
@@ -311,7 +279,6 @@ class _StudentEventsState extends State<StudentEvents>
                           onPressed: () {
                             setState(() {
                               _selectedEventType = tempType;
-                              _selectedEventFor = tempFor;
                               _applyFilters();
                             });
                             Navigator.pop(context);
@@ -336,7 +303,7 @@ class _StudentEventsState extends State<StudentEvents>
     );
   }
 
-  bool get _hasActiveFilter => _selectedEventType != 'All' || _selectedEventFor != 'All';
+  bool get _hasActiveFilter => _selectedEventType != 'All';
 
   @override
   Widget build(BuildContext context) {
@@ -465,7 +432,6 @@ class _StudentEventsState extends State<StudentEvents>
                 onPressed: () {
                   setState(() {
                     _selectedEventType = 'All';
-                    _selectedEventFor = 'All';
                     _applyFilters();
                   });
                 },
@@ -489,18 +455,6 @@ class _StudentEventsState extends State<StudentEvents>
         },
       ),
     );
-  }
-
-  String _getTargetLabel(String? val) {
-    if (val == null || val.toLowerCase() == 'all') return 'All Year Levels';
-    if (val.toLowerCase() == 'none') return 'No Target';
-    final map = {
-      '1': '1st Year',
-      '2': '2nd Year',
-      '3': '3rd Year',
-      '4': '4th Year',
-    };
-    return map[val] ?? val;
   }
 
   Widget _buildEventCard(
@@ -782,6 +736,18 @@ class _StudentEventsState extends State<StudentEvents>
         ),
       ),
     );
+  }
+
+  String _getTargetLabel(String? val) {
+    if (val == null || val.toLowerCase() == 'all') return 'All Year Levels';
+    if (val.toLowerCase() == 'none') return 'No Target';
+    final map = {
+      '1': '1st Year',
+      '2': '2nd Year',
+      '3': '3rd Year',
+      '4': '4th Year',
+    };
+    return map[val] ?? val;
   }
 
 }

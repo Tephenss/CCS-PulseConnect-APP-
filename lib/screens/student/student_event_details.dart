@@ -168,7 +168,6 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     final startAt = _event!['start_at'] as String?;
     final endAt = _event!['end_at'] as String?;
     final eventType = _event!['event_type'] as String? ?? '';
-    final eventForRaw = _event!['event_for'] as String? ?? '';
     final eventSpan = _event!['event_span'] as String? ?? '';
     final graceTime = _event!['grace_time']?.toString() ?? '';
 
@@ -329,12 +328,6 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                     'Location',
                     location,
                   ),
-                  if (eventForRaw.isNotEmpty)
-                    _buildDetailRow(
-                      Icons.school_rounded,
-                      'Event For',
-                      _getTargetLabel(eventForRaw),
-                    ),
                   if (graceTime.isNotEmpty)
                     _buildDetailRow(
                       Icons.timer_rounded,
@@ -631,18 +624,6 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
         );
       }).toList(),
     );
-  }
-
-  String _getTargetLabel(String? val) {
-    if (val == null || val.toLowerCase() == 'all') return 'All Year Levels';
-    if (val.toLowerCase() == 'none') return 'No Target';
-    final map = {
-      '1': '1st Year',
-      '2': '2nd Year',
-      '3': '3rd Year',
-      '4': '4th Year',
-    };
-    return map[val] ?? val;
   }
 
   Color _getEventTypeColor(String type) {
