@@ -25,6 +25,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
   Map<String, dynamic>? _event;
   bool _isLoading = true;
   bool _isRegistered = false;
+  bool _isRegistrationResolved = false;
   bool _isRegistering = false;
   int _participantCount = 0;
   List<Map<String, dynamic>> _eventSessions = [];
@@ -35,6 +36,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     if (widget.initialEvent != null) {
       _event = Map<String, dynamic>.from(widget.initialEvent!);
       _isLoading = false;
+      _isRegistrationResolved = false;
     }
     _loadEvent();
   }
@@ -50,9 +52,20 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     ]);
 
     final event = results[0] as Map<String, dynamic>?;
-    final isReg = results[1] as bool;
+    var isReg = results[1] as bool;
     final count = results[2] as int;
     final sessions = results[3] as List<Map<String, dynamic>>;
+
+    if (!isReg) {
+      // Fallback: if registration row check misses, verify by ticket existence.
+      final ticket = await _eventService.getTicketForEvent(
+        widget.eventId,
+        userId,
+      );
+      if (ticket.isNotEmpty) {
+        isReg = true;
+      }
+    }
 
     if (mounted) {
       setState(() {
@@ -60,6 +73,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
         _isRegistered = isReg;
         _participantCount = count;
         _eventSessions = sessions;
+        _isRegistrationResolved = true;
         _isLoading = false;
       });
     }
@@ -125,7 +139,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
         }
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not load ticket details. Please check your network connection.')),
+            const SnackBar(
+              content: Text(
+                'Could not load ticket details. Please check your network connection.',
+              ),
+            ),
           );
         }
       }
@@ -133,7 +151,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
       if (mounted) {
         setState(() => _isRegistering = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Connection timeout or error. Please try again.')),
+          SnackBar(
+            content: Text('Connection timeout or error. Please try again.'),
+          ),
         );
       }
     }
@@ -144,9 +164,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     if (_isLoading) {
       return const Scaffold(
         backgroundColor: Colors.white,
-        body: Center(
-          child: PulseConnectLoader(),
-        ),
+        body: Center(child: PulseConnectLoader()),
       );
     }
 
@@ -155,10 +173,18 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
         backgroundColor: Colors.white,
         appBar: AppBar(
           backgroundColor: const Color(0xFF7F1D1D),
-          title: const Text('Event Details', style: TextStyle(color: Colors.white)),
+          title: const Text(
+            'Event Details',
+            style: TextStyle(color: Colors.white),
+          ),
           iconTheme: const IconThemeData(color: Colors.white),
         ),
-        body: Center(child: Text('Event not found', style: TextStyle(color: Colors.grey.shade600))),
+        body: Center(
+          child: Text(
+            'Event not found',
+            style: TextStyle(color: Colors.grey.shade600),
+          ),
+        ),
       );
     }
 
@@ -168,6 +194,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     final startAt = _event!['start_at'] as String?;
     final endAt = _event!['end_at'] as String?;
     final eventType = _event!['event_type'] as String? ?? '';
+    final eventFor = (_event!['event_for'] as String?)?.trim() ?? 'all';
     final eventSpan = _event!['event_span'] as String? ?? '';
     final graceTime = _event!['grace_time']?.toString() ?? '';
 
@@ -175,7 +202,12 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     final endDate = parseStoredEventDateTime(endAt);
 
     bool isRegistrationOpen = _event!['status'] == 'published';
-    final usesSessions = usesEventSessions(_event!) || _eventSessions.isNotEmpty;
+    final usesSessions =
+        usesEventSessions(_event!) || _eventSessions.isNotEmpty;
+    final canTapAction =
+        _isRegistrationResolved &&
+        !_isRegistering &&
+        !(!isRegistrationOpen && !_isRegistered);
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -207,12 +239,17 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                           shape: BoxShape.circle,
                           color: Colors.white.withValues(alpha: 0.1),
                           border: Border.all(
-                            color: const Color(0xFFD4A843).withValues(alpha: 0.5),
+                            color: const Color(
+                              0xFFD4A843,
+                            ).withValues(alpha: 0.5),
                             width: 2,
                           ),
                         ),
-                        child: const Icon(Icons.event_rounded,
-                            color: Color(0xFFD4A843), size: 32),
+                        child: const Icon(
+                          Icons.event_rounded,
+                          color: Color(0xFFD4A843),
+                          size: 32,
+                        ),
                       ),
                       const SizedBox(height: 12),
                       Padding(
@@ -241,7 +278,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                   color: Colors.white.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Icon(Icons.arrow_back_ios_rounded, size: 18, color: Colors.white),
+                child: const Icon(
+                  Icons.arrow_back_ios_rounded,
+                  size: 18,
+                  color: Colors.white,
+                ),
               ),
               onPressed: () => Navigator.pop(context),
             ),
@@ -256,55 +297,48 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                   // Event Type Badge
                   if (eventType.isNotEmpty)
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
                       margin: const EdgeInsets.only(bottom: 16),
                       decoration: BoxDecoration(
-                        color: _getEventTypeColor(eventType).withValues(alpha: 0.12),
+                        color: _getEventTypeColor(
+                          eventType,
+                        ).withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(_getEventTypeIcon(eventType), size: 16, color: _getEventTypeColor(eventType)),
+                          Icon(
+                            _getEventTypeIcon(eventType),
+                            size: 16,
+                            color: _getEventTypeColor(eventType),
+                          ),
                           const SizedBox(width: 6),
-                          Text(eventType, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: _getEventTypeColor(eventType))),
+                          Text(
+                            eventType,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: _getEventTypeColor(eventType),
+                            ),
+                          ),
                         ],
                       ),
                     ),
 
-                  // Info Cards Row
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _buildInfoChip(
-                        Icons.people_rounded,
-                        '$_participantCount',
-                        'Participants',
-                      ),
-                      const SizedBox(width: 8),
-                      _buildInfoChip(
-                        isRegistrationOpen ? Icons.check_circle_rounded : Icons.info_outline_rounded,
-                        _isRegistered ? 'Registered' : (isRegistrationOpen ? 'Open' : 'Closed'),
-                        'Status',
-                      ),
-                      if (eventSpan.isNotEmpty) ...[
-                        const SizedBox(width: 8),
-                        _buildInfoChip(
-                          Icons.date_range_rounded,
-                          eventSpan == 'multi-day' || eventSpan == 'multi_day'
-                              ? 'Multi-Day'
-                              : 'Single',
-                          'Span',
-                        ),
-                      ],
-                    ],
+                  _buildTopStatsGrid(
+                    isRegistrationOpen: isRegistrationOpen,
+                    eventSpan: eventSpan,
                   ),
 
                   const SizedBox(height: 28),
 
-                  // Event Details Section
+                  // Event Schedule & Info (aligned with website layout)
                   const Text(
-                    'Event Details',
+                    'Event Schedule & Info',
                     style: TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.w800,
@@ -312,30 +346,16 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                     ),
                   ),
                   const SizedBox(height: 16),
-
-                  _buildDetailRow(
-                    Icons.calendar_today_rounded,
-                    'Date',
-                    formatDateRange(startDate, endDate),
+                  _buildScheduleInfoGrid(
+                    startDate: startDate,
+                    endDate: endDate,
+                    location: location,
+                    eventType: eventType,
+                    eventFor: eventFor,
+                    graceTime: graceTime,
                   ),
-                  _buildDetailRow(
-                    Icons.schedule_rounded,
-                    'Time',
-                    formatTimeRange(startDate, endDate),
-                  ),
-                  _buildDetailRow(
-                    Icons.location_on_rounded,
-                    'Location',
-                    location,
-                  ),
-                  if (graceTime.isNotEmpty)
-                    _buildDetailRow(
-                      Icons.timer_rounded,
-                      'Grace Time',
-                      '$graceTime min',
-                    ),
                   if (usesSessions) ...[
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 12),
                     const Text(
                       'Seminar Sessions',
                       style: TextStyle(
@@ -393,7 +413,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
         ),
         child: SizedBox(
           width: double.infinity,
-          height: 60, // Prevents the loader's Center from expanding to fill the screen
+          height:
+              60, // Prevents the loader's Center from expanding to fill the screen
           child: Container(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(16),
@@ -404,19 +425,20 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
               ),
               boxShadow: [
                 BoxShadow(
-                  color: (_isRegistered
-                          ? const Color(0xFFD4A843)
-                          : const Color(0xFF7F1D1D))
-                      .withValues(alpha: 0.3),
+                  color:
+                      (_isRegistered
+                              ? const Color(0xFFD4A843)
+                              : const Color(0xFF7F1D1D))
+                          .withValues(alpha: 0.3),
                   blurRadius: 15,
                   offset: const Offset(0, 4),
                 ),
               ],
             ),
             child: ElevatedButton(
-              onPressed: _isRegistering || (!isRegistrationOpen && !_isRegistered)
-                  ? null 
-                  : (_isRegistered ? _handleViewTicket : _handleRegister),
+              onPressed: canTapAction
+                  ? (_isRegistered ? _handleViewTicket : _handleRegister)
+                  : null,
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.transparent,
                 shadowColor: Colors.transparent,
@@ -426,7 +448,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                   borderRadius: BorderRadius.circular(16),
                 ),
               ),
-              child: _isRegistering
+              child: (_isRegistering || !_isRegistrationResolved)
                   ? const PulseConnectLoader(size: 14)
                   : Row(
                       mainAxisAlignment: MainAxisAlignment.center,
@@ -439,9 +461,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                         ),
                         const SizedBox(width: 10),
                         Text(
-                          _isRegistered 
-                            ? 'See Ticket' 
-                            : (isRegistrationOpen ? 'Register' : 'Registration Closed'),
+                          _isRegistered
+                              ? 'See Ticket'
+                              : (isRegistrationOpen
+                                    ? 'Register'
+                                    : 'Registration Closed'),
                           style: const TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.w800,
@@ -456,14 +480,65 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     );
   }
 
-  Widget _buildInfoChip(IconData icon, String value, String label) {
-    return Expanded(
+  Widget _buildTopStatsGrid({
+    required bool isRegistrationOpen,
+    required String eventSpan,
+  }) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final availableWidth = screenWidth - 48;
+    final hasSpan = eventSpan.isNotEmpty;
+    final spacing = 8.0;
+    final itemWidth = hasSpan
+        ? ((availableWidth - (spacing * 2)) / 3)
+        : ((availableWidth - spacing) / 2);
+
+    final items = <Widget>[
+      _buildInfoChip(
+        Icons.people_rounded,
+        '$_participantCount',
+        'Participants',
+        itemWidth,
+      ),
+      _buildInfoChip(
+        isRegistrationOpen
+            ? Icons.check_circle_rounded
+            : Icons.info_outline_rounded,
+        _isRegistered ? 'Registered' : (isRegistrationOpen ? 'Open' : 'Closed'),
+        'Status',
+        itemWidth,
+      ),
+    ];
+
+    if (hasSpan) {
+      items.add(
+        _buildInfoChip(
+          Icons.date_range_rounded,
+          eventSpan == 'multi-day' || eventSpan == 'multi_day'
+              ? 'Multi-Day'
+              : 'Single',
+          'Span',
+          itemWidth,
+        ),
+      );
+    }
+
+    return Wrap(spacing: spacing, runSpacing: spacing, children: items);
+  }
+
+  Widget _buildInfoChip(
+    IconData icon,
+    String value,
+    String label,
+    double width,
+  ) {
+    return SizedBox(
+      width: width,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
         decoration: BoxDecoration(
           color: const Color(0xFFFFF1F2),
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFFFECDD3)), // Rose 200 border
+          border: Border.all(color: const Color(0xFFFECDD3)),
         ),
         child: Column(
           children: [
@@ -484,60 +559,12 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
             Text(
               label,
               textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 10,
-                color: Colors.grey.shade600,
-              ),
+              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildDetailRow(IconData icon, String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 40,
-            height: 40,
-            decoration: BoxDecoration(
-              color: const Color(0xFFFFF1F2),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Icon(icon, color: const Color(0xFF7F1D1D), size: 20),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                 Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade600,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  value,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF1F2937),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -576,7 +603,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
 
         return Container(
           width: double.infinity,
-          margin: EdgeInsets.only(bottom: index == _eventSessions.length - 1 ? 0 : 12),
+          margin: EdgeInsets.only(
+            bottom: index == _eventSessions.length - 1 ? 0 : 12,
+          ),
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
             color: Colors.white,
@@ -603,21 +632,21 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                   color: Color(0xFF111827),
                 ),
               ),
-              const SizedBox(height: 10),
-              _buildDetailRow(
-                Icons.calendar_today_rounded,
-                'Date',
-                formatDateRange(sessionStart, sessionEnd),
-              ),
-              _buildDetailRow(
-                Icons.login_rounded,
-                'Start Time',
-                sessionStart != null ? DateFormat('hh:mm a').format(sessionStart) : 'TBA',
-              ),
-              _buildDetailRow(
-                Icons.logout_rounded,
-                'End Time',
-                sessionEnd != null ? DateFormat('hh:mm a').format(sessionEnd) : 'TBA',
+              const SizedBox(height: 12),
+              Column(
+                children: [
+                  _buildSessionMetaRow(
+                    icon: Icons.calendar_today_rounded,
+                    label: 'Date',
+                    value: formatDateRange(sessionStart, sessionEnd),
+                  ),
+                  const SizedBox(height: 8),
+                  _buildSessionMetaRow(
+                    icon: Icons.schedule_rounded,
+                    label: 'Time',
+                    value: formatTimeRange(sessionStart, sessionEnd),
+                  ),
+                ],
               ),
             ],
           ),
@@ -626,23 +655,220 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     );
   }
 
+  Widget _buildScheduleInfoGrid({
+    required DateTime? startDate,
+    required DateTime? endDate,
+    required String location,
+    required String eventType,
+    required String eventFor,
+    required String graceTime,
+  }) {
+    final cards = <Widget>[
+      _buildScheduleInfoCard(
+        icon: Icons.calendar_month_rounded,
+        title: 'Start Date & Time',
+        value: startDate != null
+            ? DateFormat('MMM d, yyyy, h:mm a').format(startDate)
+            : 'TBA',
+      ),
+      _buildScheduleInfoCard(
+        icon: Icons.event_available_rounded,
+        title: 'End Date & Time',
+        value: endDate != null
+            ? DateFormat('MMM d, yyyy, h:mm a').format(endDate)
+            : 'TBA',
+      ),
+      _buildScheduleInfoCard(
+        icon: Icons.location_on_rounded,
+        title: 'Location / Venue',
+        value: location,
+      ),
+      _buildScheduleInfoCard(
+        icon: _getEventTypeIcon(eventType),
+        title: 'Event Type',
+        value: eventType.isNotEmpty ? eventType : 'General Event',
+      ),
+      _buildScheduleInfoCard(
+        icon: Icons.groups_rounded,
+        title: 'Target Participants',
+        value: _targetParticipantsLabel(eventFor),
+        fullWidth: true,
+      ),
+    ];
+
+    if (graceTime.isNotEmpty) {
+      cards.add(
+        _buildScheduleInfoCard(
+          icon: Icons.timer_rounded,
+          title: 'Grace Time',
+          value: '$graceTime min',
+        ),
+      );
+    }
+
+    return Wrap(spacing: 12, runSpacing: 12, children: cards);
+  }
+
+  Widget _buildScheduleInfoCard({
+    required IconData icon,
+    required String title,
+    required String value,
+    bool fullWidth = false,
+  }) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final horizontalPadding = 24.0;
+    final wrapSpacing = 12.0;
+    final availableWidth = screenWidth - (horizontalPadding * 2);
+    final useTwoColumns = availableWidth >= 380;
+    final cardWidth = (fullWidth || !useTwoColumns)
+        ? availableWidth
+        : ((availableWidth - wrapSpacing) / 2);
+
+    return Container(
+      width: cardWidth,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFF1F2),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(icon, color: const Color(0xFF7F1D1D), size: 16),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.grey.shade600,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF111827),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSessionMetaRow({
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF9FAFB),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 16, color: const Color(0xFF6B7280)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF1F2937),
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _targetParticipantsLabel(String value) {
+    final normalized = value.toLowerCase();
+    if (normalized.isEmpty || normalized == 'all') return 'All Year Levels';
+    if (normalized == 'none') return 'No Target';
+    switch (normalized) {
+      case '1':
+        return '1st Year Students';
+      case '2':
+        return '2nd Year Students';
+      case '3':
+        return '3rd Year Students';
+      case '4':
+        return '4th Year Students';
+      default:
+        return value;
+    }
+  }
+
   Color _getEventTypeColor(String type) {
     switch (type.toLowerCase()) {
-      case 'seminar': return const Color(0xFF1D4ED8);
-      case 'off-campus activity': return const Color(0xFF059669);
-      case 'sports event': return const Color(0xFFD97706);
-      case 'other': return const Color(0xFF7C3AED);
-      default: return const Color(0xFF6B7280);
+      case 'seminar':
+        return const Color(0xFF1D4ED8);
+      case 'off-campus activity':
+        return const Color(0xFF059669);
+      case 'sports event':
+        return const Color(0xFFD97706);
+      case 'other':
+        return const Color(0xFF7C3AED);
+      default:
+        return const Color(0xFF6B7280);
     }
   }
 
   IconData _getEventTypeIcon(String type) {
     switch (type.toLowerCase()) {
-      case 'seminar': return Icons.school_rounded;
-      case 'off-campus activity': return Icons.directions_bus_rounded;
-      case 'sports event': return Icons.sports_basketball_rounded;
-      case 'other': return Icons.category_rounded;
-      default: return Icons.event_rounded;
+      case 'seminar':
+        return Icons.school_rounded;
+      case 'off-campus activity':
+        return Icons.directions_bus_rounded;
+      case 'sports event':
+        return Icons.sports_basketball_rounded;
+      case 'other':
+        return Icons.category_rounded;
+      default:
+        return Icons.event_rounded;
     }
   }
 }
