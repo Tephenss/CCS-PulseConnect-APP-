@@ -6,6 +6,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
+import '../../utils/course_theme_utils.dart';
 
 class StudentScanScreen extends StatefulWidget {
   const StudentScanScreen({super.key});
@@ -38,8 +39,14 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
   Timer? _scanResumeTimer;
   Timer? _contextRefreshTimer;
 
+  Color _studentPrimary(BuildContext context) =>
+      Theme.of(context).colorScheme.primary;
+  Color _studentDark(BuildContext context) =>
+      CourseThemeUtils.studentDarkFromPrimary(_studentPrimary(context));
+
   bool get _hasPermission =>
       _scanContext != null &&
+      _scanContext?['ok'] == true &&
       _studentId.isNotEmpty &&
       (_scanContext?['status']?.toString() ?? '') != 'no_assignment' &&
       (_scanContext?['status']?.toString() ?? '') != 'error';
@@ -306,15 +313,15 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
         30,
       ),
       decoration: BoxDecoration(
-        gradient: const LinearGradient(
+        gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFF450A0A), Color(0xFF7F1D1D)],
+          colors: [_studentDark(context), _studentPrimary(context)],
         ),
         borderRadius: const BorderRadius.vertical(bottom: Radius.circular(32)),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF7F1D1D).withValues(alpha: 0.3),
+            color: _studentPrimary(context).withValues(alpha: 0.3),
             blurRadius: 20,
             offset: const Offset(0, 8),
           ),
@@ -518,6 +525,123 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
     return text;
   }
 
+  String _studentScannerFrameAsset(BuildContext context) {
+    return CourseThemeUtils.isGreenStudentPrimary(_studentPrimary(context))
+        ? 'assets/bscs_student_scanner_trimmed.png'
+        : 'assets/bsit_student_scanner_trimmed.png';
+  }
+
+  Widget _buildCameraSurface() {
+    return (_isScanning && _scannerEnabled)
+        ? MobileScanner(
+            fit: BoxFit.cover,
+            onDetect: _handleDetect,
+            errorBuilder: (context, error, child) {
+              return Container(
+                color: Colors.black,
+                alignment: Alignment.center,
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(
+                        Icons.error_outline_rounded,
+                        color: Colors.white,
+                        size: 30,
+                      ),
+                      const SizedBox(height: 10),
+                      const Text(
+                        'Camera unavailable',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Allow camera permission in app settings, then try again.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.grey.shade300,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          )
+        : Container(
+            color: Colors.black,
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.camera_alt_rounded,
+                    size: 64,
+                    color: Colors.grey.shade300,
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    _scannerEnabled ? 'Camera Paused' : 'Scanner Closed',
+                    style: TextStyle(
+                      color: Colors.grey.shade500,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+  }
+
+  Widget _buildFramedScannerWindow() {
+    final frameAsset = _studentScannerFrameAsset(context);
+
+    return AspectRatio(
+      // Trimmed frames keep full body visible without edge cutting.
+      aspectRatio: 0.74,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth;
+          final height = constraints.maxHeight;
+          final cameraPadding = EdgeInsets.fromLTRB(
+            width * 0.13,
+            height * 0.148,
+            width * 0.13,
+            height * 0.162,
+          );
+
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              Positioned.fill(
+                child: Padding(
+                  padding: cameraPadding,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: _buildCameraSurface(),
+                  ),
+                ),
+              ),
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Image.asset(
+                    frameAsset,
+                    fit: BoxFit.contain,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   Widget _buildScannerView() {
     final media = MediaQuery.of(context);
     final bottomNavClearance = media.padding.bottom + 98;
@@ -540,90 +664,7 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
               padding: EdgeInsets.fromLTRB(24, 14, 24, bottomNavClearance),
               child: Column(
                 children: [
-                  Container(
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(32),
-                      border: Border.all(
-                        color: const Color(0xFFD4A843).withValues(alpha: 0.8),
-                        width: 3,
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFF7F1D1D).withValues(alpha: 0.16),
-                          blurRadius: 24,
-                          offset: const Offset(0, 8),
-                        ),
-                      ],
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(28),
-                      child: AspectRatio(
-                        aspectRatio: 1,
-                        child: (_isScanning && _scannerEnabled)
-                            ? MobileScanner(
-                                onDetect: _handleDetect,
-                                errorBuilder: (context, error, child) {
-                                  return Container(
-                                    color: Colors.black,
-                                    alignment: Alignment.center,
-                                    child: Padding(
-                                      padding: const EdgeInsets.all(20),
-                                      child: Column(
-                                        mainAxisAlignment: MainAxisAlignment.center,
-                                        children: [
-                                          const Icon(
-                                            Icons.error_outline_rounded,
-                                            color: Colors.white,
-                                            size: 30,
-                                          ),
-                                          const SizedBox(height: 10),
-                                          const Text(
-                                            'Camera unavailable',
-                                            style: TextStyle(
-                                              color: Colors.white,
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                          const SizedBox(height: 6),
-                                          Text(
-                                            'Allow camera permission in app settings, then try again.',
-                                            textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                              color: Colors.grey.shade300,
-                                              fontSize: 12,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  );
-                                },
-                              )
-                            : Center(
-                                child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    Icon(
-                                      Icons.camera_alt_rounded,
-                                      size: 64,
-                                      color: Colors.grey.shade300,
-                                    ),
-                                    const SizedBox(height: 16),
-                                    Text(
-                                      _scannerEnabled
-                                          ? 'Camera Paused'
-                                          : 'Scanner Closed',
-                                      style: TextStyle(
-                                        color: Colors.grey.shade500,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                      ),
-                    ),
-                  ),
+                  _buildFramedScannerWindow(),
                   const SizedBox(height: 20),
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 300),
@@ -714,10 +755,10 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
                             ? Colors.grey.shade400
                             : (_isScanning
                                 ? Colors.red.shade600
-                                : const Color(0xFF7F1D1D)),
+                                : _studentPrimary(context)),
                         foregroundColor: Colors.white,
                         elevation: _isScanning ? 0 : 8,
-                        shadowColor: const Color(0xFF7F1D1D).withValues(
+                        shadowColor: _studentPrimary(context).withValues(
                           alpha: 0.4,
                         ),
                         padding: const EdgeInsets.symmetric(vertical: 16),
@@ -768,10 +809,10 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
                 color: Color(0xFFFFF7ED),
                 shape: BoxShape.circle,
               ),
-              child: const Icon(
+              child: Icon(
                 Icons.qr_code_scanner_rounded,
                 size: 64,
-                color: Color(0xFF7F1D1D),
+                color: _studentPrimary(context),
               ),
             ),
             const SizedBox(height: 24),

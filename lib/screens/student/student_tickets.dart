@@ -7,6 +7,7 @@ import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'student_ticket_view.dart';
 import '../../utils/event_time_utils.dart';
+import '../../utils/course_theme_utils.dart';
 
 class StudentTickets extends StatefulWidget {
   const StudentTickets({super.key});
@@ -39,7 +40,11 @@ class _StudentTicketsState extends State<StudentTickets> {
         : await _eventService.getMyTickets(userId);
 
     // Keep online list behavior: show active events only.
-    final activeOnlineTickets = allTickets.where(_isTicketActive).map((ticket) {
+    // Also require an actual ticket id from Supabase; registration rows without
+    // a ticket should not appear here (prevents "ghost" tickets).
+    final activeOnlineTickets = allTickets
+        .where((t) => _isTicketActive(t) && _hasTicketId(t))
+        .map((ticket) {
       final normalized = Map<String, dynamic>.from(ticket);
       normalized['local_cached'] = false;
       return normalized;
@@ -72,6 +77,16 @@ class _StudentTicketsState extends State<StudentTickets> {
       }
     }
     return true;
+  }
+
+  bool _hasTicketId(Map<String, dynamic> ticketMap) {
+    final ticketData = ticketMap['tickets'];
+    final ticketId = ticketData is List && ticketData.isNotEmpty
+        ? (ticketData[0]['id'] ?? '').toString()
+        : ticketData is Map
+            ? (ticketData['id'] ?? '').toString()
+            : '';
+    return ticketId.trim().isNotEmpty;
   }
 
   String _ticketUniqueKey(Map<String, dynamic> ticketMap) {
@@ -124,6 +139,10 @@ class _StudentTicketsState extends State<StudentTickets> {
         final decoded = jsonDecode(row);
         if (decoded is! Map) continue;
         final ticket = Map<String, dynamic>.from(decoded);
+        // Only treat tickets as offline-saved when user explicitly tapped
+        // the Download Ticket button. This prevents legacy/accidental cache
+        // entries from making the download feature pointless.
+        if (ticket['downloaded_explicit'] != true) continue;
         ticket['local_cached'] = true;
         parsed.add(ticket);
       } catch (_) {
@@ -166,11 +185,14 @@ class _StudentTicketsState extends State<StudentTickets> {
 
   @override
   Widget build(BuildContext context) {
+    final chromeColor = CourseThemeUtils.studentChromeFromPrimary(
+      Theme.of(context).colorScheme.primary,
+    );
     return Scaffold(
       backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        backgroundColor: const Color(0xFF7F1D1D),
+        backgroundColor: chromeColor,
         title: const Text(
           'My Tickets',
           style: TextStyle(fontWeight: FontWeight.w800, fontSize: 20, color: Colors.white),
@@ -182,7 +204,7 @@ class _StudentTicketsState extends State<StudentTickets> {
               ? _buildEmptyState()
               : RefreshIndicator(
                   onRefresh: _loadTickets,
-                  color: const Color(0xFF7F1D1D),
+                  color: chromeColor,
                   child: ListView.builder(
                     padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
                     itemCount: _tickets.length,
@@ -240,8 +262,12 @@ class _StudentTicketsState extends State<StudentTickets> {
         ? ticketId.substring(0, 8).toUpperCase()
         : ticketId.toUpperCase();
 
-    final Color primaryColor = const Color(0xFF7F1D1D); // Maroon
-    final Color accentColor = const Color(0xFFD4A843); // Gold
+    final Color themePrimary = Theme.of(context).colorScheme.primary;
+    final List<Color> ticketGradient =
+        CourseThemeUtils.studentTicketGradientFromPrimary(themePrimary);
+    final Color chromeColor =
+        CourseThemeUtils.studentChromeFromPrimary(themePrimary);
+    final Color accentColor = Theme.of(context).colorScheme.secondary;
 
     return GestureDetector(
       onTap: () async {
@@ -259,7 +285,7 @@ class _StudentTicketsState extends State<StudentTickets> {
         decoration: BoxDecoration(
           boxShadow: [
             BoxShadow(
-              color: primaryColor.withOpacity(0.3),
+              color: chromeColor.withOpacity(0.35),
               blurRadius: 20,
               offset: const Offset(0, 10),
             ),
@@ -275,12 +301,7 @@ class _StudentTicketsState extends State<StudentTickets> {
                   gradient: LinearGradient(
                     begin: Alignment.topLeft,
                     end: Alignment.bottomRight,
-                    colors: [
-                      primaryColor,
-                      const Color(0xFFA52A2A), // Lighter Maroon/Brown
-                      primaryColor.withBlue(40), // Brighter variant
-                      primaryColor,
-                    ],
+                    colors: ticketGradient,
                     stops: const [0.0, 0.4, 0.6, 1.0],
                   ),
                 ),
@@ -474,11 +495,11 @@ class _StudentTicketsState extends State<StudentTickets> {
                                   size: 75,
                                   eyeStyle: QrEyeStyle(
                                     eyeShape: QrEyeShape.square,
-                                    color: primaryColor,
+                                    color: chromeColor,
                                   ),
                                   dataModuleStyle: QrDataModuleStyle(
                                     dataModuleShape: QrDataModuleShape.square,
-                                    color: primaryColor,
+                                    color: chromeColor,
                                   ),
                                 ),
                               ),

@@ -3,6 +3,7 @@ import '../main.dart';
 import 'auth/login_screen.dart';
 import 'auth/register_screen.dart';
 import '../widgets/shiny_text.dart';
+import '../utils/teacher_theme_utils.dart';
 
 class WelcomeScreen extends StatefulWidget {
   const WelcomeScreen({super.key});
@@ -214,8 +215,8 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                             center: Alignment(-0.3 + 0.6 * t, -0.5 + 0.3 * t),
                             radius: 1.1 + 0.15 * t,
                             colors: [
-                              (_selectedRole == 'Teacher' ? const Color(0xFF15803D) : const Color(0xFF6F1D2D)).withValues(alpha: 0.82 + 0.08 * t),
-                              (_selectedRole == 'Teacher' ? const Color(0xFF14532D) : const Color(0xFF4C0519)).withValues(alpha: 0.5 + 0.15 * t),
+                              (_selectedRole == 'Teacher' ? TeacherThemeUtils.dark : const Color(0xFF6F1D2D)).withValues(alpha: 0.82 + 0.08 * t),
+                              (_selectedRole == 'Teacher' ? TeacherThemeUtils.primary : const Color(0xFF4C0519)).withValues(alpha: 0.5 + 0.15 * t),
                               const Color(0xFF09090B),
                             ],
                             stops: [0.0, 0.35 + 0.1 * t, 0.8],
@@ -384,7 +385,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                                           opacity: csOpacity.clamp(0.0, 1.0),
                                           child: Container(
                                             decoration: BoxDecoration(
-                                              boxShadow: [BoxShadow(color: const Color(0xFF16A34A).withValues(alpha: 0.5), blurRadius: 20)],
+                                              boxShadow: [BoxShadow(color: const Color(0xFF1D4ED8).withValues(alpha: 0.5), blurRadius: 20)],
                                             ),
                                             child: Image.asset('assets/CS.png', width: 80, height: 80),
                                           ),
@@ -504,7 +505,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                           final isSelected = _selectedRole == role;
                           // Dynamic role color: Maroon for Student, Green for Teacher
                           final activeColor = role == 'Teacher' 
-                              ? const Color(0xFF064E3B) 
+                              ? TeacherThemeUtils.primary 
                               : const Color(0xFF9F1239);
 
                           return Expanded(

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:bcrypt/bcrypt.dart';
 import '../../widgets/custom_loader.dart';
+import '../../utils/teacher_theme_utils.dart';
 
 class ForgotPasswordScreen extends StatefulWidget {
   final String role;
@@ -29,8 +30,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> with Ticker
   String? _verifiedUserId;
 
   bool get _isTeacher => widget.role.toLowerCase() == 'teacher';
-  Color get _primaryColor => _isTeacher ? const Color(0xFF064E3B) : const Color(0xFF9F1239);
-  Color get _accentColor => _isTeacher ? const Color(0xFF059669) : const Color(0xFFBE123C);
+  Color get _primaryColor => _isTeacher ? TeacherThemeUtils.primary : const Color(0xFF9F1239);
+  Color get _accentColor => _isTeacher ? TeacherThemeUtils.mid : const Color(0xFFBE123C);
 
   @override
   void initState() {
@@ -200,8 +201,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> with Ticker
                             center: Alignment(-0.9 + 1.8 * t, -0.6 + 1.2 * t),
                             radius: 1.4 + 0.4 * t,
                             colors: [
-                              (_isTeacher ? const Color(0xFF064E3B) : const Color(0xFF6F1D2D)).withValues(alpha: 0.85 + 0.1 * t),
-                              (_isTeacher ? const Color(0xFF15803D) : const Color(0xFF7F1D1D)).withValues(alpha: 0.5 + 0.2 * t),
+                              (_isTeacher ? TeacherThemeUtils.dark : const Color(0xFF6F1D2D)).withValues(alpha: 0.85 + 0.1 * t),
+                              (_isTeacher ? const Color(0xFF1D4ED8) : const Color(0xFF7F1D1D)).withValues(alpha: 0.5 + 0.2 * t),
                               Colors.transparent,
                             ],
                             stops: [0.0, 0.45 + 0.2 * t, 1.0],
@@ -421,7 +422,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> with Ticker
               color: _primaryColor.withValues(alpha: 0.15),
               shape: BoxShape.circle,
             ),
-            child: Icon(Icons.check_circle_rounded, size: 64, color: _isTeacher ? const Color(0xFF10B981) : const Color(0xFFBE123C)),
+            child: Icon(Icons.check_circle_rounded, size: 64, color: _isTeacher ? const Color(0xFF60A5FA) : const Color(0xFFBE123C)),
           ),
           const SizedBox(height: 32),
           const Text(

@@ -10,6 +10,7 @@ import 'student_event_details.dart';
 import 'student_event_evaluation.dart';
 import 'student_response_view.dart';
 import '../../utils/event_time_utils.dart';
+import '../../utils/course_theme_utils.dart';
 
 class StudentEvents extends StatefulWidget {
   const StudentEvents({super.key});
@@ -94,9 +95,10 @@ class _StudentEventsState extends State<StudentEvents>
               ? user!['id'].toString().trim()
               : (prefs.getString('user_id') ?? '');
       final yearLevel = await authService.getStudentYearLevel();
+      final courseCode = await authService.getStudentCourseCode();
 
       final results = await Future.wait([
-        _eventService.getActiveEvents(yearLevel: yearLevel),
+        _eventService.getActiveEvents(yearLevel: yearLevel, courseCode: courseCode),
         userId.isNotEmpty
             ? _eventService.getExpiredEventsOpenForEvaluation(
                 studentId: userId,
@@ -201,6 +203,9 @@ class _StudentEventsState extends State<StudentEvents>
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setSheetState) {
+            final primaryDark = CourseThemeUtils.studentChromeFromPrimary(
+              Theme.of(context).colorScheme.primary,
+            );
             return Container(
               padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
               decoration: const BoxDecoration(
@@ -243,7 +248,7 @@ class _StudentEventsState extends State<StudentEvents>
                           color: selected ? Colors.white : const Color(0xFF374151),
                         )),
                         selected: selected,
-                        selectedColor: const Color(0xFF7F1D1D),
+                        selectedColor: primaryDark,
                         backgroundColor: Colors.grey.shade100,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
                         side: BorderSide.none,
@@ -264,8 +269,8 @@ class _StudentEventsState extends State<StudentEvents>
                             });
                           },
                           style: OutlinedButton.styleFrom(
-                            foregroundColor: const Color(0xFF7F1D1D),
-                            side: const BorderSide(color: Color(0xFF7F1D1D)),
+                            foregroundColor: primaryDark,
+                            side: BorderSide(color: primaryDark),
                             padding: const EdgeInsets.symmetric(vertical: 14),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                           ),
@@ -284,7 +289,7 @@ class _StudentEventsState extends State<StudentEvents>
                             Navigator.pop(context);
                           },
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF7F1D1D),
+                            backgroundColor: primaryDark,
                             foregroundColor: Colors.white,
                             padding: const EdgeInsets.symmetric(vertical: 14),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
@@ -307,6 +312,8 @@ class _StudentEventsState extends State<StudentEvents>
 
   @override
   Widget build(BuildContext context) {
+    final primaryColor = Theme.of(context).colorScheme.primary;
+    final primaryDark = CourseThemeUtils.studentChromeFromPrimary(primaryColor);
     return Scaffold(
       backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
@@ -368,11 +375,11 @@ class _StudentEventsState extends State<StudentEvents>
               indicatorSize: TabBarIndicatorSize.tab,
               dividerColor: Colors.transparent,
               indicator: BoxDecoration(
-                color: const Color(0xFF7F1D1D),
+                color: primaryDark,
                 borderRadius: BorderRadius.circular(12),
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFF7F1D1D).withValues(alpha: 0.2),
+                    color: primaryDark.withValues(alpha: 0.2),
                     blurRadius: 8,
                     offset: const Offset(0, 2),
                   ),
@@ -415,6 +422,8 @@ class _StudentEventsState extends State<StudentEvents>
     String emptyMessage, {
     required bool isExpiredTab,
   }) {
+    final primaryColor = Theme.of(context).colorScheme.primary;
+    final primaryDark = CourseThemeUtils.studentChromeFromPrimary(primaryColor);
     if (events.isEmpty) {
       return Center(
         child: Column(
@@ -435,7 +444,10 @@ class _StudentEventsState extends State<StudentEvents>
                     _applyFilters();
                   });
                 },
-                child: const Text('Clear filters', style: TextStyle(color: Color(0xFF7F1D1D), fontWeight: FontWeight.w600)),
+                child: Text(
+                  'Clear filters',
+                  style: TextStyle(color: primaryDark, fontWeight: FontWeight.w600),
+                ),
               ),
             ],
           ],
@@ -445,9 +457,15 @@ class _StudentEventsState extends State<StudentEvents>
 
     return RefreshIndicator(
       onRefresh: _loadEvents,
-      color: const Color(0xFF7F1D1D),
+      color: primaryDark,
       child: ListView.builder(
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+        // Extra bottom space so the last card isn't hidden behind the floating nav bar.
+        padding: EdgeInsets.fromLTRB(
+          24,
+          8,
+          24,
+          8 + 120 + MediaQuery.of(context).padding.bottom,
+        ),
         itemCount: events.length,
         itemBuilder: (context, index) {
           final event = events[index];
@@ -461,6 +479,8 @@ class _StudentEventsState extends State<StudentEvents>
     Map<String, dynamic> event, {
     required bool showEvaluationActions,
   }) {
+    final primaryColor = Theme.of(context).colorScheme.primary;
+    final primaryDark = CourseThemeUtils.studentChromeFromPrimary(primaryColor);
     final eventId = event['id']?.toString() ?? '';
     final title = event['title'] as String? ?? 'Untitled';
     final startAt = event['start_at'] as String?;
@@ -543,13 +563,13 @@ class _StudentEventsState extends State<StudentEvents>
                   children: [
                     Container(
                       width: 75,
-                      decoration: const BoxDecoration(
+                      decoration: BoxDecoration(
                         gradient: LinearGradient(
                           begin: Alignment.topCenter,
                           end: Alignment.bottomCenter,
                           colors: [
-                            Color(0xFF991B1B),
-                            Color(0xFF7F1D1D),
+                            primaryDark,
+                            CourseThemeUtils.studentDarkFromPrimary(primaryColor),
                           ],
                         ),
                       ),

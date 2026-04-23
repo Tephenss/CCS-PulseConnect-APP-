@@ -6,6 +6,7 @@ import '../../widgets/custom_loader.dart';
 import 'teacher_create_event.dart';
 import 'teacher_event_manage.dart';
 import '../../utils/event_time_utils.dart';
+import '../../utils/teacher_theme_utils.dart';
 
 class TeacherEventsTab extends StatefulWidget {
   const TeacherEventsTab({super.key});
@@ -76,7 +77,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF064E3B),
+                      color: TeacherThemeUtils.primary,
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: const Row(
@@ -105,11 +106,11 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
               indicatorSize: TabBarIndicatorSize.tab,
               dividerColor: Colors.transparent,
               indicator: BoxDecoration(
-                color: const Color(0xFF064E3B),
+                color: TeacherThemeUtils.primary,
                 borderRadius: BorderRadius.circular(12),
                 boxShadow: [
                   BoxShadow(
-                    color: const Color(0xFF064E3B).withValues(alpha: 0.2),
+                    color: TeacherThemeUtils.primary.withValues(alpha: 0.2),
                     blurRadius: 8,
                     offset: const Offset(0, 2),
                   ),
@@ -170,18 +171,41 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
       }
       return false;
     }).toList();
-    
-    if (filteredEvents.isEmpty) {
-      return _buildEmptyState('No $statusFilter events found');
-    }
 
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
-      itemCount: filteredEvents.length,
-      itemBuilder: (context, index) {
-        final event = filteredEvents[index];
-        return _buildEventCard(event);
-      },
+    // Sort by event date for predictable ordering:
+    // - Active/Approval: nearest date first
+    // - Expired: most recently ended first
+    filteredEvents.sort((a, b) {
+      final aDate = parseStoredEventDateTime(a['start_at']) ?? DateTime(2100);
+      final bDate = parseStoredEventDateTime(b['start_at']) ?? DateTime(2100);
+      if (statusFilter == 'expired') {
+        return bDate.compareTo(aDate);
+      }
+      return aDate.compareTo(bDate);
+    });
+    
+    return RefreshIndicator(
+      onRefresh: _loadEvents,
+      color: TeacherThemeUtils.primary,
+      child: filteredEvents.isEmpty
+          ? ListView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              children: [
+                SizedBox(
+                  height: MediaQuery.of(context).size.height * 0.62,
+                  child: _buildEmptyState('No $statusFilter events found'),
+                ),
+              ],
+            )
+          : ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+              itemCount: filteredEvents.length,
+              itemBuilder: (context, index) {
+                final event = filteredEvents[index];
+                return _buildEventCard(event);
+              },
+            ),
     );
   }
 
@@ -199,15 +223,29 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
   }
 
   String _getTargetLabel(String? val) {
-    if (val == null || val.toLowerCase() == 'all') return 'All Year Levels';
-    if (val.toLowerCase() == 'none') return 'No Target';
-    final map = {
+    final raw = (val ?? '').trim().toUpperCase();
+    if (raw.isEmpty || raw == 'ALL' || raw == 'ALL LEVELS') {
+      return 'All Courses & Years';
+    }
+    if (raw == 'NONE') return 'No Target';
+
+    final pair = RegExp(r'^(BSIT|BSCS)\s*[-_|]\s*([1-4])$').firstMatch(raw);
+    if (pair != null) {
+      final course = pair.group(1) == 'BSIT' ? 'IT' : 'CS';
+      final year = pair.group(2);
+      return '$course - ${year}Y';
+    }
+
+    if (raw == 'BSIT') return 'IT Students';
+    if (raw == 'BSCS') return 'CS Students';
+
+    const yearMap = {
       '1': '1st Year',
       '2': '2nd Year',
       '3': '3rd Year',
       '4': '4th Year',
     };
-    return map[val] ?? val;
+    return yearMap[raw] ?? raw;
   }
 
   Widget _buildEventCard(Map<String, dynamic> event) {
@@ -226,7 +264,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
       status = 'expired';
     }
 
-    Color statusBg = const Color(0xFF064E3B);
+    Color statusBg = TeacherThemeUtils.primary;
     String displayStatus = status.toUpperCase();
 
     if (displayStatus == 'PENDING') {
@@ -290,10 +328,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
                         gradient: LinearGradient(
                           begin: Alignment.topCenter,
                           end: Alignment.bottomCenter,
-                          colors: [
-                            Color(0xFF064E3B),
-                            Color(0xFF047857),
-                          ],
+                          colors: TeacherThemeUtils.chromeGradient,
                         ),
                       ),
                       child: Column(

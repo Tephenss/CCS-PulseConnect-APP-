@@ -12,8 +12,18 @@ import 'package:pulse_connect_app/main.dart';
 
 void main() {
   testWidgets('App loads smoke test', (WidgetTester tester) async {
+    // Default test surface (800×600) overflows WelcomeScreen; use a taller viewport.
+    await tester.binding.setSurfaceSize(const Size(800, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
     // Build our app and trigger a frame.
-    await tester.pumpWidget(const PulseConnectApp(isLoggedIn: false, userRole: ''));
+    await tester.pumpWidget(
+      const PulseConnectApp(
+        isLoggedIn: false,
+        userRole: '',
+        studentCourse: 'IT',
+      ),
+    );
 
     // Verify that the title or initial screen is present
     expect(find.byType(MaterialApp), findsOneWidget);

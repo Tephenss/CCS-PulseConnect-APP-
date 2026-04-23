@@ -8,6 +8,8 @@ import 'services/auth_service.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'services/push_notification_service.dart';
 import 'config/env.dart';
+import 'utils/course_theme_utils.dart';
+import 'utils/teacher_theme_utils.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,25 +30,41 @@ void main() async {
   final authService = AuthService();
   final isLoggedIn = await authService.isLoggedIn();
   String role = 'student';
+  String studentCourse = 'IT';
   
   if (isLoggedIn) {
     final userData = await authService.getCurrentUser();
     role = userData?['role']?.toString().toLowerCase() ?? 'student';
+    studentCourse = CourseThemeUtils.normalizeCourse(userData?['course']) == 'CS'
+        ? 'CS'
+        : 'IT';
     
     // Save/Update FCM Token on app startup
     await PushNotificationService().updateToken();
   }
 
-  runApp(PulseConnectApp(isLoggedIn: isLoggedIn, userRole: role));
+  runApp(
+    PulseConnectApp(
+      isLoggedIn: isLoggedIn,
+      userRole: role,
+      studentCourse: studentCourse,
+    ),
+  );
 }
 
 class PulseConnectApp extends StatefulWidget {
   final bool isLoggedIn;
   final String userRole;
+  final String studentCourse;
 
   static final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
-  const PulseConnectApp({super.key, required this.isLoggedIn, required this.userRole});
+  const PulseConnectApp({
+    super.key,
+    required this.isLoggedIn,
+    required this.userRole,
+    required this.studentCourse,
+  });
 
   static _PulseConnectAppState of(BuildContext context) =>
       context.findAncestorStateOfType<_PulseConnectAppState>()!;
@@ -57,16 +75,25 @@ class PulseConnectApp extends StatefulWidget {
 
 class _PulseConnectAppState extends State<PulseConnectApp> {
   late String _currentRole;
+  late String _currentStudentCourse;
 
   @override
   void initState() {
     super.initState();
     _currentRole = widget.userRole;
+    _currentStudentCourse = widget.studentCourse;
   }
 
-  void updateTheme(String role) {
-    if (_currentRole != role) {
-      setState(() => _currentRole = role);
+  void updateTheme(String role, {String? course}) {
+    final normalizedRole = role.toLowerCase();
+    final nextCourse = normalizedRole == 'student'
+        ? (CourseThemeUtils.isComputerScienceCourse(course) ? 'CS' : 'IT')
+        : _currentStudentCourse;
+    if (_currentRole != role || _currentStudentCourse != nextCourse) {
+      setState(() {
+        _currentRole = role;
+        _currentStudentCourse = nextCourse;
+      });
     }
   }
 
@@ -76,17 +103,21 @@ class _PulseConnectAppState extends State<PulseConnectApp> {
       navigatorKey: PulseConnectApp.navigatorKey,
       title: 'CCS PulseConnect',
       debugShowCheckedModeBanner: false,
-      theme: _getTheme(_currentRole),
+      theme: _getTheme(_currentRole, _currentStudentCourse),
       home: widget.isLoggedIn 
           ? (_currentRole.toLowerCase() == 'teacher' ? const TeacherHome() : const StudentHome()) 
           : const WelcomeScreen(),
     );
   }
 
-  ThemeData _getTheme(String role) {
+  ThemeData _getTheme(String role, String studentCourse) {
     final bool isStudent = role.toLowerCase() == 'student';
-    final Color primaryColor = isStudent ? const Color(0xFF9F1239) : const Color(0xFF064E3B);
-    final Color secondaryColor = const Color(0xFFD4A843);
+    final Color primaryColor = isStudent
+        ? CourseThemeUtils.studentPrimaryForCourse(studentCourse)
+        : TeacherThemeUtils.primary;
+    final Color secondaryColor = isStudent
+        ? CourseThemeUtils.studentSecondaryForCourse(studentCourse)
+        : const Color(0xFFD4A843);
     
     return ThemeData(
       useMaterial3: true,

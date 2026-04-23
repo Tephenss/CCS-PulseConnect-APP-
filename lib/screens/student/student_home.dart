@@ -17,6 +17,7 @@ import '../../widgets/card_swap_widget.dart';
 import '../../widgets/shiny_text.dart';
 import '../../widgets/custom_loader.dart';
 import '../../utils/event_time_utils.dart';
+import '../../utils/course_theme_utils.dart';
 
 class StudentHome extends StatefulWidget {
   const StudentHome({super.key});
@@ -53,6 +54,17 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   bool _isSubmittingAbsenceReason = false;
   String? _absenceReasonError;
   bool _isGateLoggingOut = false;
+
+  Color _studentPrimary(BuildContext context) =>
+      CourseThemeUtils.studentPrimaryForCourse(_user?['course']);
+  Color _studentDark(BuildContext context) =>
+      CourseThemeUtils.studentDarkForCourse(_user?['course']);
+  Color _studentSoft(BuildContext context) =>
+      CourseThemeUtils.studentSoftForCourse(_user?['course']);
+  Color _studentAction(BuildContext context) =>
+      CourseThemeUtils.studentActionForCourse(_user?['course']);
+  Color _studentChrome(BuildContext context) =>
+      CourseThemeUtils.studentChromeFromPrimary(_studentPrimary(context));
 
   @override
   void initState() {
@@ -137,9 +149,14 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     }
 
     final yearLevel = await _authService.getStudentYearLevel();
-    final events = await _eventService.getUpcomingEvents(yearLevel: yearLevel);
+    final courseCode = await _authService.getStudentCourseCode();
+    final events = await _eventService.getUpcomingEvents(
+      yearLevel: yearLevel,
+      courseCode: courseCode,
+    );
     final unread = await _notifService.getUnreadCount(forceRefresh: true);
     final sections = await _authService.getSections();
+    final filteredSections = _filterSectionsForDetectedCourse(sections, user);
     final pendingAbsenceScopes = userId.isNotEmpty
         ? await _eventService.getStudentPendingAbsenceScopes(studentId: userId)
         : <Map<String, dynamic>>[];
@@ -162,7 +179,13 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
         _user = user;
         _upcomingEvents = events;
         _unreadCount = unread;
-        _sections = sections;
+        _sections = filteredSections;
+        if (_selectedSectionId != null &&
+            filteredSections.every(
+              (section) => section['id']?.toString() != _selectedSectionId,
+            )) {
+          _selectedSectionId = null;
+        }
         _pendingAbsenceScopes = pendingAbsenceScopes;
         _selectedAbsenceScopeKey = selectedAbsenceScopeKey;
         _isLoading = false;
@@ -277,6 +300,32 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
         style: TextStyle(fontWeight: FontWeight.w600),
       ),
     );
+  }
+
+  String _detectedCourseCode() {
+    final normalized = CourseThemeUtils.normalizeCourse(_user?['course']);
+    if (normalized == 'CS') return 'BSCS';
+    if (normalized == 'IT') return 'BSIT';
+    return '';
+  }
+
+  List<Map<String, dynamic>> _filterSectionsForDetectedCourse(
+    List<Map<String, dynamic>> source,
+    Map<String, dynamic>? user,
+  ) {
+    final normalizedCourse = CourseThemeUtils.normalizeCourse(user?['course']);
+    if (normalizedCourse != 'IT' && normalizedCourse != 'CS') {
+      return source;
+    }
+
+    return source.where((section) {
+      final name = (section['name']?.toString() ?? '').trim().toUpperCase();
+      if (name.isEmpty) return false;
+      if (normalizedCourse == 'CS') {
+        return name.startsWith('BSCS') || name.startsWith('CS ');
+      }
+      return name.startsWith('BSIT');
+    }).toList();
   }
 
   String? _sectionSelectionSecurityError(String? sectionId) {
@@ -461,11 +510,11 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                         width: 58,
                         height: 58,
                         decoration: BoxDecoration(
-                          color: const Color(0xFF7F1D1D), // Theme Color
+                          color: _studentChrome(context),
                           shape: BoxShape.circle,
                           boxShadow: [
                             BoxShadow(
-                              color: const Color(0xFF7F1D1D).withValues(alpha: 0.4),
+                              color: _studentChrome(context).withValues(alpha: 0.4),
                               blurRadius: 20,
                               spreadRadius: 1,
                               offset: const Offset(0, 8),
@@ -643,7 +692,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                   child: ElevatedButton(
                     onPressed: _isSubmittingAbsenceReason ? null : _submitAbsenceReason,
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF9F1239),
+                      backgroundColor: _studentAction(context),
                       foregroundColor: Colors.white,
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(
@@ -651,7 +700,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                       ),
                     ),
                     child: _isSubmittingAbsenceReason
-                        ? const PulseConnectLoader(size: 14)
+                        ? const PulseConnectLoader(size: 14, color: Colors.white)
                         : const Text(
                             'Submit Reason',
                             style: TextStyle(
@@ -691,6 +740,10 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   }
 
   Widget _buildSectionSelection() {
+    final courseLabel = _detectedCourseCode();
+    final hasCourseFilter = courseLabel.isNotEmpty;
+    final hasSelectableSections = _sections.isNotEmpty;
+
     return Container(
       width: double.infinity,
       decoration: const BoxDecoration(
@@ -699,149 +752,223 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
       child: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-              Align(
-                alignment: Alignment.centerRight,
-                child: _buildGateLogoutButton(),
+          child: Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  _buildGateLogoutButton(),
+                ],
               ),
-              _buildGateLogo(),
-              const SizedBox(height: 24),
-              const Text(
-                'Welcome Back!',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 28,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 12),
-              RichText(
-                text: TextSpan(
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.7),
-                    fontSize: 14,
-                    height: 1.5,
-                    fontFamily: 'Inter', // Ensuring font consistency
-                  ),
-                  children: const [
-                    TextSpan(text: 'Please select your current Year Level and Section to continue using the app. Make sure this is correct, as '),
-                    TextSpan(
-                      text: 'some events are restricted to specific year levels.',
-                      style: TextStyle(color: Color(0xFFEAB308), fontWeight: FontWeight.w700), // Amber warning color
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 32),
-              if (_sectionError != null)
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  margin: const EdgeInsets.only(bottom: 24),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF450A0A),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFF7F1D1D)),
-                  ),
-                  child: Text(
-                    _sectionError!,
-                    style: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 13),
-                  ),
-                ),
-              DropdownButtonFormField<String>(
-                value: _selectedSectionId,
-                dropdownColor: const Color(0xFF1C1C22),
-                iconEnabledColor: const Color(0xFFA1A1AA),
-                style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                hint: const Text(
-                  'Select Year Level & Section',
-                  style: TextStyle(color: Color(0xFF71717A), fontSize: 14),
-                ),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: const Color(0xFF1C1C22),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
-                ),
-                items: _sections.map((s) {
-                  return DropdownMenuItem<String>(
-                    value: s['id'].toString(),
-                    child: Text(s['name'] as String? ?? ''),
-                  );
-                }).toList(),
-                onChanged: (val) => setState(() => _selectedSectionId = val),
-              ),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _isUpdatingSection || _selectedSectionId == null
-                      ? null
-                      : () {
-                          final securityError =
-                              _sectionSelectionSecurityError(_selectedSectionId);
-                          if (securityError != null) {
-                            setState(() {
-                              _sectionError = securityError;
-                            });
-                            return;
-                          }
-                          showDialog(
-                            context: context,
-                            builder: (context) => AlertDialog(
-                              backgroundColor: Colors.white,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                              title: const Text('Are you sure?', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: Color(0xFF1F2937))),
-                              content: const Text(
-                                'Once you select your section, this cannot be changed manually until the next school year reset. Please ensure you have selected your correct current year and section. If you select the wrong section, you might not be able to join some events and your attendance logs will be misplaced.\n\nDo you want to proceed?',
-                                style: TextStyle(color: Color(0xFF4B5563), fontSize: 14, height: 1.5),
+              Expanded(
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 520),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _buildGateLogo(),
+                          const SizedBox(height: 24),
+                          const Text(
+                            'Welcome Back!',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 28,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          RichText(
+                            text: TextSpan(
+                              style: TextStyle(
+                                color: Colors.white.withValues(alpha: 0.7),
+                                fontSize: 14,
+                                height: 1.5,
+                                fontFamily: 'Inter',
                               ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.pop(context), 
-                                  child: const Text('Cancel', style: TextStyle(color: Color(0xFF71717A)))
+                              children: const [
+                                TextSpan(
+                                  text:
+                                      'Please select your current Year Level and Section to continue using the app. Make sure this is correct, as ',
                                 ),
-                                ElevatedButton(
-                                  onPressed: () async {
-                                    Navigator.pop(context);
-                                    setState(() {
-                                      _isUpdatingSection = true;
-                                      _sectionError = null;
-                                    });
-                                    final res = await _authService.updateSection(_selectedSectionId!);
-                                    if (res['ok']) {
-                                      _loadData(); // Will hide this screen
-                                    } else {
-                                      setState(() {
-                                        _sectionError = res['error'];
-                                        _isUpdatingSection = false;
-                                      });
-                                    }
-                                  },
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: const Color(0xFF9F1239),
-                                    foregroundColor: Colors.white,
-                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                TextSpan(
+                                  text:
+                                      'some events are restricted to specific year levels.',
+                                  style: TextStyle(
+                                    color: Color(0xFFEAB308),
+                                    fontWeight: FontWeight.w700,
                                   ),
-                                  child: const Text('Yes, Confirm'),
                                 ),
                               ],
                             ),
-                          );
-                        },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF9F1239),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
+                          ),
+                          const SizedBox(height: 32),
+                          if (_sectionError != null)
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              margin: const EdgeInsets.only(bottom: 24),
+                              decoration: BoxDecoration(
+                                color: _studentDark(context),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: _studentChrome(context)),
+                              ),
+                              child: Text(
+                                _sectionError!,
+                                style: const TextStyle(
+                                  color: Color(0xFFFCA5A5),
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ),
+                          DropdownButtonFormField<String>(
+                            value: _selectedSectionId,
+                            dropdownColor: const Color(0xFF1C1C22),
+                            iconEnabledColor: const Color(0xFFA1A1AA),
+                            style: const TextStyle(
+                              fontSize: 14,
+                              color: Color(0xFFF4F4F5),
+                            ),
+                            hint: const Text(
+                              'Select Year Level & Section',
+                              style: TextStyle(color: Color(0xFF71717A), fontSize: 14),
+                            ),
+                            decoration: InputDecoration(
+                              filled: true,
+                              fillColor: const Color(0xFF1C1C22),
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 16,
+                              ),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                            items: _sections.map((s) {
+                              return DropdownMenuItem<String>(
+                                value: s['id'].toString(),
+                                child: Text(s['name'] as String? ?? ''),
+                              );
+                            }).toList(),
+                            onChanged: (val) => setState(() => _selectedSectionId = val),
+                          ),
+                          if (!hasSelectableSections) ...[
+                            const SizedBox(height: 10),
+                            Text(
+                              hasCourseFilter
+                                  ? 'No sections found for $courseLabel. Please contact admin.'
+                                  : 'No sections available right now. Please contact admin.',
+                              style: const TextStyle(
+                                color: Color(0xFFFCA5A5),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 24),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton(
+                              onPressed: _isUpdatingSection ||
+                                      _selectedSectionId == null ||
+                                      !hasSelectableSections
+                                  ? null
+                                  : () {
+                                      final securityError =
+                                          _sectionSelectionSecurityError(_selectedSectionId);
+                                      if (securityError != null) {
+                                        setState(() {
+                                          _sectionError = securityError;
+                                        });
+                                        return;
+                                      }
+                                      showDialog(
+                                        context: context,
+                                        builder: (context) => AlertDialog(
+                                          backgroundColor: Colors.white,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(20),
+                                          ),
+                                          title: const Text(
+                                            'Are you sure?',
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.w800,
+                                              fontSize: 18,
+                                              color: Color(0xFF1F2937),
+                                            ),
+                                          ),
+                                          content: const Text(
+                                            'Once you select your section, this cannot be changed manually until the next school year reset. Please ensure you have selected your correct current year and section. If you select the wrong section, you might not be able to join some events and your attendance logs will be misplaced.\n\nDo you want to proceed?',
+                                            style: TextStyle(
+                                              color: Color(0xFF4B5563),
+                                              fontSize: 14,
+                                              height: 1.5,
+                                            ),
+                                          ),
+                                          actions: [
+                                            TextButton(
+                                              onPressed: () => Navigator.pop(context),
+                                              child: const Text(
+                                                'Cancel',
+                                                style: TextStyle(color: Color(0xFF71717A)),
+                                              ),
+                                            ),
+                                            ElevatedButton(
+                                              onPressed: () async {
+                                                Navigator.pop(context);
+                                                setState(() {
+                                                  _isUpdatingSection = true;
+                                                  _sectionError = null;
+                                                });
+                                                final res = await _authService.updateSection(
+                                                  _selectedSectionId!,
+                                                );
+                                                if (res['ok']) {
+                                                  _loadData();
+                                                } else {
+                                                  setState(() {
+                                                    _sectionError = res['error'];
+                                                    _isUpdatingSection = false;
+                                                  });
+                                                }
+                                              },
+                                              style: ElevatedButton.styleFrom(
+                                                backgroundColor: _studentAction(context),
+                                                foregroundColor: Colors.white,
+                                                shape: RoundedRectangleBorder(
+                                                  borderRadius: BorderRadius.circular(10),
+                                                ),
+                                              ),
+                                              child: const Text('Yes, Confirm'),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                    },
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: _studentAction(context),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                              child: _isUpdatingSection
+                                  ? const PulseConnectLoader(size: 14, color: Colors.white)
+                                  : const Text(
+                                      'Save & Continue',
+                                      style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                  child: _isUpdatingSection
-                      ? const PulseConnectLoader(size: 14)
-                      : const Text('Save & Continue', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 ),
               ),
             ],
@@ -863,7 +990,9 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
           vertical: 8,
         ),
         decoration: BoxDecoration(
-          color: isActive ? const Color(0xFF7F1D1D).withValues(alpha: 0.08) : Colors.transparent,
+          color: isActive
+              ? _studentChrome(context).withValues(alpha: 0.08)
+              : Colors.transparent,
           borderRadius: BorderRadius.circular(20),
         ),
         child: Row(
@@ -871,15 +1000,15 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
           children: [
             Icon(
               icon,
-              color: isActive ? const Color(0xFF7F1D1D) : const Color(0xFFA1A1AA),
+              color: isActive ? _studentChrome(context) : const Color(0xFFA1A1AA),
               size: 20, // Reduced icon size
             ),
             if (isActive) ...[
               const SizedBox(width: 6),
               Text(
                 label,
-                style: const TextStyle(
-                  color: Color(0xFF7F1D1D),
+                style: TextStyle(
+                  color: _studentChrome(context),
                   fontSize: 11, // Reduced font size
                   fontWeight: FontWeight.w800,
                 ),
@@ -896,16 +1025,20 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   Widget _buildHomeContent() {
     final firstName = _user?['first_name'] as String? ?? 'Student';
     
-    return CustomScrollView(
-      slivers: [
+    return RefreshIndicator(
+      onRefresh: _loadData,
+      color: _studentChrome(context),
+      child: CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
         // App Bar Header — Solid Dark Maroon Design
         SliverToBoxAdapter(
           child: Container(
-            decoration: const BoxDecoration(
+            decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: [Color(0xFF450A0A), Color(0xFF7F1D1D)],
+                colors: [_studentDark(context), _studentPrimary(context)],
               ),
               borderRadius: BorderRadius.vertical(
                 bottom: Radius.circular(32),
@@ -980,7 +1113,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                                   fontWeight: FontWeight.w800,
                                 ),
                                 baseColor: Colors.white,
-                                scanColor: const Color(0xFFFCA5A5), // Soft red/orange glow for Student
+                                scanColor: _studentSoft(context),
                               ),
                             ],
                           ),
@@ -1014,7 +1147,10 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                                     decoration: BoxDecoration(
                                       color: const Color(0xFFEF4444),
                                       shape: BoxShape.circle,
-                                      border: Border.all(color: const Color(0xFF7F1D1D), width: 1.5),
+                                      border: Border.all(
+                                        color: _studentChrome(context),
+                                        width: 1.5,
+                                      ),
                                     ),
                                     constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
                                     child: Center(
@@ -1063,12 +1199,12 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                 const Spacer(),
                 GestureDetector(
                   onTap: () => setState(() => _currentIndex = 1),
-                  child: const Text(
+                  child: Text(
                     'See All',
                     style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w700,
-                      color: Color(0xFF7F1D1D),
+                      color: _studentChrome(context),
                     ),
                   ),
                 ),
@@ -1116,8 +1252,9 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                 ),
               ),
 
-        const SliverToBoxAdapter(child: SizedBox(height: 100)), // Space for floating nav
-      ],
+          const SliverToBoxAdapter(child: SizedBox(height: 100)), // Space for floating nav
+        ],
+      ),
     );
   }
 
@@ -1374,7 +1511,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                             '$day',
                             style: TextStyle(
                               color: isToday
-                                  ? const Color(0xFF450A0A)
+                                  ? _studentDark(context)
                                   : Colors.white.withValues(alpha: 0.9),
                               fontWeight: isToday ? FontWeight.w900 : FontWeight.w600,
                               fontSize: dayFontSize,
@@ -1388,7 +1525,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 color: isToday
-                                    ? const Color(0xFF450A0A)
+                                    ? _studentDark(context)
                                     : Colors.white,
                               ),
                             ),
@@ -1410,7 +1547,10 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                                   mainAxisSize: MainAxisSize.min,
                                   children: eventsOnThisDay.map((e) => ListTile(
                                     contentPadding: EdgeInsets.zero,
-                                    leading: const Icon(Icons.event_rounded, color: Color(0xFF7F1D1D)),
+                                    leading: Icon(
+                                      Icons.event_rounded,
+                                      color: _studentChrome(context),
+                                    ),
                                     title: Text(e['title'] ?? 'Event', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1F2937))),
                                     subtitle: Text(
                                       e['start_at'] != null
@@ -1428,7 +1568,13 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                                   )).toList(),
                                 ),
                                 actions: [
-                                  TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close', style: TextStyle(color: Color(0xFF7F1D1D)))),
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(context),
+                                    child: Text(
+                                      'Close',
+                                      style: TextStyle(color: _studentChrome(context)),
+                                    ),
+                                  ),
                                 ],
                               );
                             }
@@ -1490,15 +1636,18 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                 width: 60,
                 padding: const EdgeInsets.symmetric(vertical: 12),
                 decoration: BoxDecoration(
-                  gradient: const LinearGradient(
+                  gradient: LinearGradient(
                     begin: Alignment.topLeft,
                     end: Alignment.bottomRight,
-                    colors: [Color(0xFFBE123C), Color(0xFF7F1D1D)],
+                    colors: [
+                      _studentChrome(context),
+                      CourseThemeUtils.studentDarkFromPrimary(_studentPrimary(context)),
+                    ],
                   ),
                   borderRadius: BorderRadius.circular(16),
                   boxShadow: [
                     BoxShadow(
-                      color: const Color(0xFF7F1D1D).withValues(alpha: 0.2),
+                      color: _studentChrome(context).withValues(alpha: 0.22),
                       blurRadius: 8,
                       offset: const Offset(0, 3),
                     ),

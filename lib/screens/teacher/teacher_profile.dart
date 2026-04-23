@@ -8,6 +8,7 @@ import '../../services/auth_service.dart';
 import '../../widgets/custom_loader.dart';
 import '../welcome_screen.dart';
 import '../auth/change_password_screen.dart';
+import '../../utils/teacher_theme_utils.dart';
 
 class TeacherProfile extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -72,7 +73,7 @@ class _TeacherProfileState extends State<TeacherProfile> {
                     : 'Profile picture cloud-synced!',
               ),
               backgroundColor:
-                  (warning != null && warning.isNotEmpty) ? Colors.orange : Colors.green,
+                  (warning != null && warning.isNotEmpty) ? Colors.orange : TeacherThemeUtils.primary,
             ),
           );
         } else {
@@ -101,7 +102,7 @@ class _TeacherProfileState extends State<TeacherProfile> {
       uiSettings: [
         AndroidUiSettings(
           toolbarTitle: 'Edit Profle Picture',
-          toolbarColor: const Color(0xFF064E3B), // Teacher specific green
+          toolbarColor: TeacherThemeUtils.primary,
           toolbarWidgetColor: Colors.white,
           initAspectRatio: CropAspectRatioPreset.square,
           lockAspectRatio: true,
@@ -123,6 +124,13 @@ class _TeacherProfileState extends State<TeacherProfile> {
       setState(() {
         _user = user;
       });
+    }
+  }
+
+  Future<void> _refreshProfile() async {
+    await _loadUser();
+    if (widget.onUpdate != null) {
+      widget.onUpdate!();
     }
   }
 
@@ -154,7 +162,7 @@ class _TeacherProfileState extends State<TeacherProfile> {
           ElevatedButton(
             onPressed: () => Navigator.pop(context, true),
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF064E3B),
+              backgroundColor: TeacherThemeUtils.primary,
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
             ),
@@ -213,8 +221,12 @@ class _TeacherProfileState extends State<TeacherProfile> {
       backgroundColor: const Color(0xFFF9FAFB),
       body: Stack(
         children: [
-          SingleChildScrollView(
-            child: Column(
+          RefreshIndicator(
+            onRefresh: _refreshProfile,
+            color: TeacherThemeUtils.primary,
+            child: SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              child: Column(
               children: [
             // Curved Header with Profile Info
             Stack(
@@ -228,7 +240,7 @@ class _TeacherProfileState extends State<TeacherProfile> {
                     gradient: LinearGradient(
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
-                      colors: [Color(0xFF064E3B), Color(0xFF047857)],
+                      colors: TeacherThemeUtils.chromeGradient,
                     ),
                     borderRadius: BorderRadius.vertical(bottom: Radius.circular(40)),
                   ),
@@ -294,7 +306,7 @@ class _TeacherProfileState extends State<TeacherProfile> {
                                       ? Center(
                                           child: Text(
                                             firstName.isNotEmpty ? firstName[0].toUpperCase() : 'T',
-                                            style: const TextStyle(color: Color(0xFF064E3B), fontSize: 44, fontWeight: FontWeight.w900),
+                                            style: const TextStyle(color: TeacherThemeUtils.dark, fontSize: 44, fontWeight: FontWeight.w900),
                                           ),
                                         )
                                       : null,
@@ -339,8 +351,8 @@ class _TeacherProfileState extends State<TeacherProfile> {
                   const SizedBox(height: 4),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                    decoration: BoxDecoration(color: const Color(0xFF064E3B).withValues(alpha: 0.12), borderRadius: BorderRadius.circular(100)),
-                    child: Text(email, style: const TextStyle(color: Color(0xFF064E3B), fontSize: 13, fontWeight: FontWeight.w700)),
+                    decoration: BoxDecoration(color: TeacherThemeUtils.primary.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(100)),
+                    child: Text(email, style: const TextStyle(color: TeacherThemeUtils.dark, fontSize: 13, fontWeight: FontWeight.w700)),
                   ),
                   
                   const SizedBox(height: 32),
@@ -388,13 +400,19 @@ class _TeacherProfileState extends State<TeacherProfile> {
                   _buildActionCard(
                     icon: Icons.lock_person_rounded,
                     title: 'Change Password',
-                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ChangePasswordScreen())),
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const ChangePasswordScreen(role: 'Teacher'),
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 120), // Extra space for bottom nav
                 ],
               ),
             ),
           ],
+              ),
             ),
           ),
           if (_isLoggingOut)
@@ -445,8 +463,8 @@ class _TeacherProfileState extends State<TeacherProfile> {
           children: [
             Container(
               padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(color: const Color(0xFF064E3B).withValues(alpha: 0.1), shape: BoxShape.circle),
-              child: Icon(icon, color: const Color(0xFF064E3B), size: 20),
+              decoration: BoxDecoration(color: TeacherThemeUtils.primary.withValues(alpha: 0.1), shape: BoxShape.circle),
+              child: Icon(icon, color: TeacherThemeUtils.mid, size: 20),
             ),
             const SizedBox(width: 16),
             Expanded(child: Text(title, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: Color(0xFF111827)))),

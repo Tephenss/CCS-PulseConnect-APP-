@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
+import '../../utils/teacher_theme_utils.dart';
 
 class TeacherScanScreen extends StatefulWidget {
   const TeacherScanScreen({super.key});
@@ -347,7 +348,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
                 _scanStatus = participantName.isNotEmpty
                     ? 'Success time in: $participantName'
                     : (res['message']?.toString() ?? 'Check-in successful!');
-                _statusColor = const Color(0xFF064E3B);
+                _statusColor = TeacherThemeUtils.primary;
               } else if ((res['status']?.toString() ?? '').toLowerCase() == 'already_checked_in' ||
                   (res['status']?.toString() ?? '').toLowerCase() == 'used') {
                 _scanStatus = _normalizeScannerMessage(
@@ -401,12 +402,12 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFF064E3B), Color(0xFF047857)],
+          colors: TeacherThemeUtils.chromeGradient,
         ),
         borderRadius: const BorderRadius.vertical(bottom: Radius.circular(32)),
         boxShadow: [
           BoxShadow(
-            color: const Color(0xFF064E3B).withValues(alpha: 0.3),
+            color: TeacherThemeUtils.dark.withValues(alpha: 0.3),
             blurRadius: 20,
             offset: const Offset(0, 8),
           ),
@@ -454,7 +455,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
   Color _contextColor(String status) {
     switch (status) {
       case 'open':
-        return const Color(0xFF064E3B);
+        return TeacherThemeUtils.primary;
       case 'waiting':
         return const Color(0xFFD97706);
       case 'closed':
@@ -602,6 +603,98 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
     return text;
   }
 
+  Widget _buildCameraSurface() {
+    return (_isScanning && _scannerEnabled)
+        ? MobileScanner(
+            fit: BoxFit.cover,
+            onDetect: _handleDetect,
+            errorBuilder: (context, error, child) {
+              return Container(
+                color: Colors.black,
+                alignment: Alignment.center,
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.error_outline_rounded, color: Colors.white, size: 30),
+                      const SizedBox(height: 10),
+                      const Text(
+                        'Camera unavailable',
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Allow camera permission in app settings, then try again.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.grey.shade300, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          )
+        : Container(
+            color: Colors.black,
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.camera_alt_rounded, size: 64, color: Colors.grey.shade300),
+                  const SizedBox(height: 16),
+                  Text(
+                    _scannerEnabled ? 'Camera Paused' : 'Scanner Closed',
+                    style: TextStyle(color: Colors.grey.shade500, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+          );
+  }
+
+  Widget _buildFramedScannerWindow() {
+    return AspectRatio(
+      // Trimmed frames keep full body visible without edge cutting.
+      aspectRatio: 0.74,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth;
+          final height = constraints.maxHeight;
+          final cameraPadding = EdgeInsets.fromLTRB(
+            width * 0.13,
+            height * 0.148,
+            width * 0.13,
+            height * 0.162,
+          );
+
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              Positioned.fill(
+                child: Padding(
+                  padding: cameraPadding,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: _buildCameraSurface(),
+                  ),
+                ),
+              ),
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Image.asset(
+                    'assets/teacher_scanner_trimmed.png',
+                    fit: BoxFit.contain,
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   Widget _buildScannerView() {
     final media = MediaQuery.of(context);
     final bottomNavClearance = media.padding.bottom + 98;
@@ -626,68 +719,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
             padding: EdgeInsets.fromLTRB(24, 14, 24, bottomNavClearance),
             child: Column(
               children: [
-                Container(
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(32),
-                    border: Border.all(color: const Color(0xFFD4A843).withValues(alpha: 0.8), width: 3),
-                    boxShadow: [
-                      BoxShadow(
-                        color: const Color(0xFF064E3B).withValues(alpha: 0.15),
-                        blurRadius: 24,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
-                  ),
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(28),
-                    child: AspectRatio(
-                      aspectRatio: 1,
-                      child: (_isScanning && _scannerEnabled)
-                          ? MobileScanner(
-                              onDetect: _handleDetect,
-                              errorBuilder: (context, error, child) {
-                                return Container(
-                                  color: Colors.black,
-                                  alignment: Alignment.center,
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(20),
-                                    child: Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
-                                      children: [
-                                        const Icon(Icons.error_outline_rounded, color: Colors.white, size: 30),
-                                        const SizedBox(height: 10),
-                                        const Text(
-                                          'Camera unavailable',
-                                          style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700),
-                                        ),
-                                        const SizedBox(height: 6),
-                                        Text(
-                                          'Allow camera permission in app settings, then try again.',
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(color: Colors.grey.shade300, fontSize: 12),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                );
-                              },
-                            )
-                          : Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(Icons.camera_alt_rounded, size: 64, color: Colors.grey.shade300),
-                                  const SizedBox(height: 16),
-                                  Text(
-                                    _scannerEnabled ? 'Camera Paused' : 'Scanner Closed',
-                                    style: TextStyle(color: Colors.grey.shade500, fontWeight: FontWeight.w600),
-                                  ),
-                                ],
-                              ),
-                            ),
-                    ),
-                  ),
-                ),
+                _buildFramedScannerWindow(),
                 const SizedBox(height: 20),
                 AnimatedContainer(
                   duration: const Duration(milliseconds: 300),
@@ -758,10 +790,10 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
                     style: ElevatedButton.styleFrom(
                       backgroundColor: !_scannerEnabled
                           ? Colors.grey.shade400
-                          : (_isScanning ? Colors.red.shade600 : const Color(0xFF064E3B)),
+                          : (_isScanning ? Colors.red.shade600 : TeacherThemeUtils.primary),
                       foregroundColor: Colors.white,
                       elevation: _isScanning ? 0 : 8,
-                      shadowColor: const Color(0xFF064E3B).withValues(alpha: 0.4),
+                      shadowColor: TeacherThemeUtils.dark.withValues(alpha: 0.4),
                       padding: const EdgeInsets.symmetric(vertical: 16),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                     ),
@@ -837,7 +869,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
               child: const Icon(
                 Icons.admin_panel_settings_rounded,
                 size: 64,
-                color: Color(0xFF064E3B),
+                color: TeacherThemeUtils.primary,
               ),
             ),
             const SizedBox(height: 24),
@@ -865,4 +897,3 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
     );
   }
 }
-

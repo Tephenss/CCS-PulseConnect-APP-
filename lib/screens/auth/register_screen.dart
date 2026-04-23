@@ -22,8 +22,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
   final _passwordCtrl = TextEditingController();
   final _confirmPasswordCtrl = TextEditingController();
 
-  String? _selectedSectionId; // Deprecated: Section selected post-login
-  List<Map<String, dynamic>> _sections = [];
+  String? _selectedCourse;
   bool _isLoading = false;
   bool _obscurePassword = true;
   bool _obscureConfirm = true;
@@ -98,6 +97,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
       lastName: _lastNameCtrl.text,
       suffix: _suffixCtrl.text,
       idNumber: _idNumberCtrl.text,
+      course: _selectedCourse ?? '',
       email: _emailCtrl.text,
       password: _passwordCtrl.text,
     );
@@ -500,6 +500,64 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                       cursorColor: const Color(0xFF9F1239),
                                       decoration: _inputDeco(hint: 'e.g. 231-*****', icon: Icons.badge_outlined),
                                       validator: (v) => v == null || v.trim().isEmpty ? 'ID Number is required' : null,
+                                    ),
+
+                                    const SizedBox(height: 20),
+
+                                    _buildLabel('Course'),
+                                    const SizedBox(height: 8),
+                                    DropdownButtonFormField<String>(
+                                      initialValue: _selectedCourse,
+                                      dropdownColor: const Color(0xFF1C1C22),
+                                      iconEnabledColor: const Color(0xFFA1A1AA),
+                                      hint: const Text(
+                                        'Select Course',
+                                        style: TextStyle(
+                                          fontSize: 14,
+                                          color: Color(0xFF71717A),
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                      style: const TextStyle(
+                                        fontSize: 14,
+                                        color: Color(0xFFF4F4F5),
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                      decoration: _inputDeco(
+                                        hint: '',
+                                        icon: Icons.school_outlined,
+                                      ),
+                                      items: const [
+                                        DropdownMenuItem(
+                                          value: 'IT',
+                                          child: Text(
+                                            'BSIT (IT)',
+                                            style: TextStyle(
+                                              color: Color(0xFFF4F4F5),
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                        DropdownMenuItem(
+                                          value: 'CS',
+                                          child: Text(
+                                            'BSCS (CS)',
+                                            style: TextStyle(
+                                              color: Color(0xFFF4F4F5),
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                      onChanged: (value) {
+                                        setState(() => _selectedCourse = value);
+                                      },
+                                      validator: (value) {
+                                        if (value == null || value.isEmpty) {
+                                          return 'Course is required';
+                                        }
+                                        return null;
+                                      },
                                     ),
 
                                     const SizedBox(height: 20),

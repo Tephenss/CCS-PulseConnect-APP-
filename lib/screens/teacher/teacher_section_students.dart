@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:intl/intl.dart';
 import '../../widgets/custom_loader.dart';
+import '../../utils/teacher_theme_utils.dart';
 
 class TeacherSectionStudents extends StatefulWidget {
   final String sectionId;
@@ -78,7 +78,7 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
       backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
         title: Text(widget.sectionName, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: Colors.white)),
-        backgroundColor: const Color(0xFF064E3B),
+        backgroundColor: TeacherThemeUtils.primary,
         centerTitle: true,
         iconTheme: const IconThemeData(color: Colors.white),
         elevation: 0,
@@ -89,7 +89,7 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
             decoration: BoxDecoration(
-              color: const Color(0xFF064E3B),
+              color: TeacherThemeUtils.dark,
               borderRadius: const BorderRadius.vertical(bottom: Radius.circular(28)),
               boxShadow: [
                 BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 10, offset: const Offset(0, 4)),
@@ -130,137 +130,160 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
             ),
           ),
           Expanded(
-            child: _isLoading
-                ? const Center(child: PulseConnectLoader())
-                : Builder(
-                    builder: (context) {
-                      final filteredStudents = _students.where((s) {
-                        final name = (s['name'] as String).toLowerCase();
-                        return name.contains(_searchQuery.toLowerCase());
-                      }).toList();
+            child: RefreshIndicator(
+              onRefresh: _fetchStudents,
+              color: TeacherThemeUtils.primary,
+              child: Builder(
+                builder: (context) {
+                  final filteredStudents = _students.where((s) {
+                    final name = (s['name'] as String).toLowerCase();
+                    return name.contains(_searchQuery.toLowerCase());
+                  }).toList();
 
-                      if (filteredStudents.isEmpty) {
-                        return Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.person_search_rounded, size: 64, color: Colors.grey.shade300),
-                              const SizedBox(height: 16),
-                              const Text(
-                                'No students found',
-                                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F2937)),
-                              ),
-                              const SizedBox(height: 8),
-                              Text(
-                                _students.isEmpty 
-                                  ? 'No students have registered for this section.' 
-                                  : 'No student matches your search.',
-                                style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
-                                textAlign: TextAlign.center,
-                              ),
-                            ],
-                          ),
-                        );
-                      }
+                  if (_isLoading) {
+                    return ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: const [
+                        SizedBox(
+                          height: 320,
+                          child: Center(child: PulseConnectLoader()),
+                        ),
+                      ],
+                    );
+                  }
 
-                      return ListView.builder(
-                        padding: const EdgeInsets.all(24),
-                        itemCount: filteredStudents.length,
-                        itemBuilder: (context, index) {
-                          final student = filteredStudents[index];
-                          final photoUrl = student['photo_url'] as String?;
-
-                          return Container(
-                            margin: const EdgeInsets.only(bottom: 16),
-                            padding: const EdgeInsets.all(16),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(color: Colors.grey.shade200),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.04),
-                                  blurRadius: 10, offset: const Offset(0, 4),
+                  if (filteredStudents.isEmpty) {
+                    return ListView(
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      children: [
+                        SizedBox(
+                          height: 320,
+                          child: Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.person_search_rounded, size: 64, color: Colors.grey.shade300),
+                                const SizedBox(height: 16),
+                                const Text(
+                                  'No students found',
+                                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F2937)),
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  _students.isEmpty
+                                      ? 'No students have registered for this section.'
+                                      : 'No student matches your search.',
+                                  style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+                                  textAlign: TextAlign.center,
                                 ),
                               ],
                             ),
-                            child: Row(
-                              children: [
-                                Container(
-                                  width: 52,
-                                  height: 52,
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF064E3B).withValues(alpha: 0.1),
-                                    shape: BoxShape.circle,
-                                    image: photoUrl != null && photoUrl.isNotEmpty
-                                        ? DecorationImage(
-                                            image: NetworkImage(photoUrl),
-                                            fit: BoxFit.cover,
-                                          )
-                                        : null,
-                                  ),
-                                  child: photoUrl == null || photoUrl.isEmpty
-                                      ? Center(
-                                          child: Text(
-                                            student['name'][0].toUpperCase(),
-                                            style: const TextStyle(
-                                              color: Color(0xFF064E3B),
-                                              fontWeight: FontWeight.w800,
-                                              fontSize: 22,
-                                            ),
-                                          ),
-                                        )
-                                      : null,
-                                ),
-                                const SizedBox(width: 16),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        student['name'],
+                          ),
+                        ),
+                      ],
+                    );
+                  }
+
+                  return ListView.builder(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.all(24),
+                    itemCount: filteredStudents.length,
+                    itemBuilder: (context, index) {
+                      final student = filteredStudents[index];
+                      final photoUrl = student['photo_url'] as String?;
+
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 16),
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.grey.shade200),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.04),
+                              blurRadius: 10, offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 52,
+                              height: 52,
+                              decoration: BoxDecoration(
+                                color: TeacherThemeUtils.primary.withValues(alpha: 0.1),
+                                shape: BoxShape.circle,
+                                image: photoUrl != null && photoUrl.isNotEmpty
+                                    ? DecorationImage(
+                                        image: NetworkImage(photoUrl),
+                                        fit: BoxFit.cover,
+                                      )
+                                    : null,
+                              ),
+                              child: photoUrl == null || photoUrl.isEmpty
+                                  ? Center(
+                                      child: Text(
+                                        student['name'][0].toUpperCase(),
                                         style: const TextStyle(
+                                          color: TeacherThemeUtils.primary,
                                           fontWeight: FontWeight.w800,
-                                          fontSize: 16,
-                                          color: Color(0xFF1F2937),
+                                          fontSize: 22,
                                         ),
                                       ),
-                                      const SizedBox(height: 4),
-                                      Row(
-                                        children: [
-                                          const Icon(Icons.badge_rounded, size: 14, color: Colors.grey),
-                                          const SizedBox(width: 4),
-                                          Text(
-                                            student['student_id'] ?? 'No ID',
-                                            style: TextStyle(
-                                              fontWeight: FontWeight.w700,
-                                              fontSize: 12,
-                                              color: Colors.grey.shade600,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 2),
+                                    )
+                                  : null,
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    student['name'],
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 16,
+                                      color: Color(0xFF1F2937),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Row(
+                                    children: [
+                                      const Icon(Icons.badge_rounded, size: 14, color: Colors.grey),
+                                      const SizedBox(width: 4),
                                       Text(
-                                        student['email'],
+                                        student['student_id'] ?? 'No ID',
                                         style: TextStyle(
-                                          fontWeight: FontWeight.w500,
+                                          fontWeight: FontWeight.w700,
                                           fontSize: 12,
-                                          color: Colors.grey.shade500,
+                                          color: Colors.grey.shade600,
                                         ),
-                                        maxLines: 1,
-                                        overflow: TextOverflow.ellipsis,
                                       ),
                                     ],
                                   ),
-                                ),
-                              ],
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    student['email'],
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w500,
+                                      fontSize: 12,
+                                      color: Colors.grey.shade500,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
                             ),
-                          );
-                        },
+                          ],
+                        ),
                       );
-                    }
-                  ),
+                    },
+                  );
+                },
+              ),
+            ),
           ),
         ],
       ),

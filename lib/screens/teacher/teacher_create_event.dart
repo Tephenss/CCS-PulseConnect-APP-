@@ -5,6 +5,7 @@ import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
 import '../../services/ai_service.dart';
 import '../../widgets/custom_loader.dart';
+import '../../utils/teacher_theme_utils.dart';
 
 class TeacherCreateEvent extends StatefulWidget {
   const TeacherCreateEvent({super.key});
@@ -21,15 +22,21 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   // Form Field Controllers
   final _titleCtrl = TextEditingController();
   final _locationCtrl = TextEditingController();
-  bool _splitBatches = false;
   final _descCtrl = TextEditingController();
   final _startDateCtrl = TextEditingController();
   final _endDateCtrl = TextEditingController();
-  final _startDateCtrl2 = TextEditingController();
-  final _endDateCtrl2 = TextEditingController();
+  final _seminar1TitleCtrl = TextEditingController();
+  final _seminar1StartCtrl = TextEditingController();
+  final _seminar1EndCtrl = TextEditingController();
+  final _seminar2TitleCtrl = TextEditingController();
+  final _seminar2StartCtrl = TextEditingController();
+  final _seminar2EndCtrl = TextEditingController();
   
   String _eventType = 'Event';
-  String _eventFor = 'All';
+  String _targetCourse = 'ALL';
+  String _targetYear = 'ALL';
+  String _eventMode = 'simple';
+  int _seminarCount = 1;
   final _graceTimeCtrl = TextEditingController(text: '15');
 
   final _authService = AuthService();
@@ -91,28 +98,56 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         return false;
       }
     } else if (step == 3) {
-
-      DateTime? s1 = _parseDateTime(_startDateCtrl.text);
-      DateTime? e1 = _parseDateTime(_endDateCtrl.text);
-
-      if (s1 == null || e1 == null) {
-        setState(() => _validationError = 'Start and end dates are required.');
-        return false;
-      }
-      if (e1.isBefore(s1) || e1.isAtSameMomentAs(s1)) {
-        setState(() => _validationError = 'End time must be after start time.');
-        return false;
-      }
-
-      if (_splitBatches) {
-        DateTime? s2 = _parseDateTime(_startDateCtrl2.text);
-        DateTime? e2 = _parseDateTime(_endDateCtrl2.text);
-        if (s2 == null || e2 == null) {
-          setState(() => _validationError = 'Both batches require start and end dates.');
+      if (_eventMode == 'seminar_based') {
+        DateTime? s1 = _parseDateTime(_seminar1StartCtrl.text);
+        DateTime? e1 = _parseDateTime(_seminar1EndCtrl.text);
+        if (_seminar1TitleCtrl.text.trim().isEmpty || s1 == null || e1 == null) {
+          setState(
+            () => _validationError =
+                'Seminar 1 title, start, and end are required.',
+          );
           return false;
         }
-        if (e2.isBefore(s2) || e2.isAtSameMomentAs(s2)) {
-          setState(() => _validationError = 'Batch 2 end time must be after start time.');
+        if (e1.isBefore(s1) || e1.isAtSameMomentAs(s1)) {
+          setState(
+            () => _validationError = 'Seminar 1 end time must be after start time.',
+          );
+          return false;
+        }
+
+        if (_seminarCount >= 2) {
+          DateTime? s2 = _parseDateTime(_seminar2StartCtrl.text);
+          DateTime? e2 = _parseDateTime(_seminar2EndCtrl.text);
+          if (_seminar2TitleCtrl.text.trim().isEmpty || s2 == null || e2 == null) {
+            setState(
+              () => _validationError =
+                  'Seminar 2 title, start, and end are required.',
+            );
+            return false;
+          }
+          if (e2.isBefore(s2) || e2.isAtSameMomentAs(s2)) {
+            setState(
+              () =>
+                  _validationError = 'Seminar 2 end time must be after start time.',
+            );
+            return false;
+          }
+          if (s2.isBefore(e1) && e2.isAfter(s1)) {
+            setState(
+              () => _validationError = 'Seminar schedules must not overlap.',
+            );
+            return false;
+          }
+        }
+      } else {
+        DateTime? s1 = _parseDateTime(_startDateCtrl.text);
+        DateTime? e1 = _parseDateTime(_endDateCtrl.text);
+        if (s1 == null || e1 == null) {
+          setState(() => _validationError = 'Start and end dates are required.');
+          return false;
+        }
+        if (e1.isBefore(s1) || e1.isAtSameMomentAs(s1)) {
+          setState(() => _validationError = 'End time must be after start time.');
           return false;
         }
       }
@@ -146,8 +181,12 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     _descCtrl.dispose();
     _startDateCtrl.dispose();
     _endDateCtrl.dispose();
-    _startDateCtrl2.dispose();
-    _endDateCtrl2.dispose();
+    _seminar1TitleCtrl.dispose();
+    _seminar1StartCtrl.dispose();
+    _seminar1EndCtrl.dispose();
+    _seminar2TitleCtrl.dispose();
+    _seminar2StartCtrl.dispose();
+    _seminar2EndCtrl.dispose();
     _speechToText.stop();
     super.dispose();
   }
@@ -159,87 +198,113 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     final user = await _authService.getCurrentUser();
     final teacherId = user?['id'];
 
-    if (_splitBatches) {
-      DateTime s1 = _parseDateTime(_startDateCtrl.text)!;
-      DateTime e1 = _parseDateTime(_endDateCtrl.text)!;
-      DateTime s2 = _parseDateTime(_startDateCtrl2.text)!;
-      DateTime e2 = _parseDateTime(_endDateCtrl2.text)!;
+    final eventFor = _encodeTargetParticipant(_targetCourse, _targetYear);
+    final graceTime = int.tryParse(_graceTimeCtrl.text) ?? 15;
 
-      // Create Batch 1
-      final payload1 = {
-        'title': '${_titleCtrl.text.trim()} (Batch 1)',
-        'description': _descCtrl.text.trim(),
-        'location': _locationCtrl.text.trim(),
-        'start_at': _toUtcIsoFromManila(s1),
-        'end_at': _toUtcIsoFromManila(e1),
-        'event_type': _eventType,
-        'event_for': _eventFor,
-        'grace_time': int.tryParse(_graceTimeCtrl.text) ?? 15,
-        'created_by': teacherId,
-        'event_span': (s1.year == e1.year && s1.month == e1.month && s1.day == e1.day) ? 'single_day' : 'multi_day',
-      };
-
-      // Create Batch 2
-      final payload2 = {
-        'title': '${_titleCtrl.text.trim()} (Batch 2)',
-        'description': _descCtrl.text.trim(),
-        'location': _locationCtrl.text.trim(),
-        'start_at': _toUtcIsoFromManila(s2),
-        'end_at': _toUtcIsoFromManila(e2),
-        'event_type': _eventType,
-        'event_for': _eventFor,
-        'grace_time': int.tryParse(_graceTimeCtrl.text) ?? 15,
-        'created_by': teacherId,
-        'event_span': (s2.year == e2.year && s2.month == e2.month && s2.day == e2.day) ? 'single_day' : 'multi_day',
-      };
-
-      final res1 = await _eventService.createEvent(payload1);
-      final res2 = await _eventService.createEvent(payload2);
-
-      if (mounted) {
-        setState(() => _isSubmitting = false);
-        if (res1['ok'] && res2['ok']) {
-          _handleSuccess();
-        } else {
-          _handleError(res1['error'] ?? res2['error']);
-        }
+    Map<String, dynamic> payload;
+    if (_eventMode == 'seminar_based') {
+      final sessions = <Map<String, dynamic>>[
+        {
+          'title': _seminar1TitleCtrl.text.trim(),
+          'start_at': _toUtcIsoFromManila(_parseDateTime(_seminar1StartCtrl.text)!),
+          'end_at': _toUtcIsoFromManila(_parseDateTime(_seminar1EndCtrl.text)!),
+          'location': _locationCtrl.text.trim(),
+          'scan_window_minutes': graceTime,
+          'attendance_window_minutes': graceTime,
+        },
+      ];
+      if (_seminarCount >= 2) {
+        sessions.add({
+          'title': _seminar2TitleCtrl.text.trim(),
+          'start_at': _toUtcIsoFromManila(_parseDateTime(_seminar2StartCtrl.text)!),
+          'end_at': _toUtcIsoFromManila(_parseDateTime(_seminar2EndCtrl.text)!),
+          'location': _locationCtrl.text.trim(),
+          'scan_window_minutes': graceTime,
+          'attendance_window_minutes': graceTime,
+        });
       }
-    } else {
-      // Standard Single Event
-      DateTime s1 = _parseDateTime(_startDateCtrl.text)!;
-      DateTime e1 = _parseDateTime(_endDateCtrl.text)!;
 
-      final payload = {
+      final starts = sessions
+          .map((s) => DateTime.parse(s['start_at'] as String).toUtc())
+          .toList()
+        ..sort();
+      final ends = sessions
+          .map((s) => DateTime.parse(s['end_at'] as String).toUtc())
+          .toList()
+        ..sort();
+      final firstStart = starts.first;
+      final lastEnd = ends.last;
+
+      payload = {
+        'title': _titleCtrl.text.trim(),
+        'description': _descCtrl.text.trim(),
+        'location': _locationCtrl.text.trim(),
+        'start_at': firstStart.toIso8601String(),
+        'end_at': lastEnd.toIso8601String(),
+        'event_type': _eventType,
+        'event_for': eventFor,
+        'grace_time': graceTime,
+        'created_by': teacherId,
+        'event_mode': 'seminar_based',
+        'event_span': (firstStart.year == lastEnd.year &&
+                firstStart.month == lastEnd.month &&
+                firstStart.day == lastEnd.day)
+            ? 'single_day'
+            : 'multi_day',
+        'sessions': sessions,
+      };
+    } else {
+      final s1 = _parseDateTime(_startDateCtrl.text)!;
+      final e1 = _parseDateTime(_endDateCtrl.text)!;
+      payload = {
         'title': _titleCtrl.text.trim(),
         'description': _descCtrl.text.trim(),
         'location': _locationCtrl.text.trim(),
         'start_at': _toUtcIsoFromManila(s1),
         'end_at': _toUtcIsoFromManila(e1),
         'event_type': _eventType,
-        'event_for': _eventFor,
-        'grace_time': int.tryParse(_graceTimeCtrl.text) ?? 15,
+        'event_for': eventFor,
+        'grace_time': graceTime,
         'created_by': teacherId,
-        'event_span': (s1.year == e1.year && s1.month == e1.month && s1.day == e1.day) ? 'single_day' : 'multi_day',
+        'event_mode': 'simple',
+        'event_span': (s1.year == e1.year && s1.month == e1.month && s1.day == e1.day)
+            ? 'single_day'
+            : 'multi_day',
+        'sessions': const [],
       };
+    }
 
-
-      final result = await _eventService.createEvent(payload);
-      
-      if (mounted) {
-        setState(() => _isSubmitting = false);
-        if (result['ok']) {
-          _handleSuccess();
-        } else {
-          _handleError(result['error']);
-        }
+    final result = await _eventService.createEvent(payload);
+    if (mounted) {
+      setState(() => _isSubmitting = false);
+      if (result['ok']) {
+        _handleSuccess();
+      } else {
+        _handleError(result['error']);
       }
     }
+  }
+
+  String _encodeTargetParticipant(String courseValue, String yearValue) {
+    final course = courseValue.trim().toUpperCase();
+    final year = yearValue.trim().toUpperCase();
+    final normalizedCourse = ['ALL', 'BSIT', 'BSCS'].contains(course)
+        ? course
+        : 'ALL';
+    final normalizedYear = ['ALL', '1', '2', '3', '4'].contains(year)
+        ? year
+        : 'ALL';
+
+    if (normalizedCourse == 'ALL' && normalizedYear == 'ALL') return 'All';
+    if (normalizedCourse == 'ALL') return normalizedYear;
+    if (normalizedYear == 'ALL') return normalizedCourse;
+    return '$normalizedCourse-$normalizedYear';
   }
 
 
   void _handleSuccess() {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Event(s) saved successfully!'), backgroundColor: Color(0xFF10B981)),
+      const SnackBar(content: Text('Event(s) saved successfully!'), backgroundColor: Color(0xFF60A5FA)),
     );
     Navigator.pop(context, true);
   }
@@ -439,10 +504,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             width: 44,
             height: 44,
             decoration: BoxDecoration(
-              color: const Color(0xFF064E3B).withValues(alpha: 0.1),
+              color: TeacherThemeUtils.primary.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(12),
             ),
-            child: const Icon(Icons.event_available_rounded, color: Color(0xFF064E3B), size: 22),
+            child: const Icon(Icons.event_available_rounded, color: TeacherThemeUtils.primary, size: 22),
           ),
           const SizedBox(width: 16),
           Expanded(
@@ -482,8 +547,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     bool isActiveOrPassed = _currentStep >= stepNum;
     bool isActive = _currentStep == stepNum;
 
-    Color color = isActiveOrPassed ? const Color(0xFF064E3B) : const Color(0xFFD1D5DB);
-    Color textColor = isActiveOrPassed ? const Color(0xFF064E3B) : const Color(0xFF9CA3AF);
+    Color color = isActiveOrPassed ? TeacherThemeUtils.primary : const Color(0xFFD1D5DB);
+    Color textColor = isActiveOrPassed ? TeacherThemeUtils.primary : const Color(0xFF9CA3AF);
 
     return Row(
       children: [
@@ -601,25 +666,37 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildLabel('Target Participant'),
+                  _buildLabel('Target Course'),
                   _buildDropdown(
-                    value: _eventFor,
-                    items: ['All', '1', '2', '3', '4', 'None'],
+                    value: _targetCourse,
+                    items: ['ALL', 'BSIT', 'BSCS'],
                     itemLabels: {
-                      'All': 'All Levels',
-                      '1': '1st Year',
-                      '2': '2nd Year',
-                      '3': '3rd Year',
-                      '4': '4th Year',
-                      'None': 'None',
+                      'ALL': 'All Courses',
+                      'BSIT': 'BSIT / IT',
+                      'BSCS': 'BSCS / CS',
                     },
-                    onChanged: (v) => setState(() => _eventFor = v!),
+                    onChanged: (v) => setState(() => _targetCourse = v!),
                     prefixIcon: Icons.groups_outlined,
                   ),
                 ],
               ),
             ),
           ],
+        ),
+        const SizedBox(height: 16),
+        _buildLabel('Target Year'),
+        _buildDropdown(
+          value: _targetYear,
+          items: ['ALL', '1', '2', '3', '4'],
+          itemLabels: {
+            'ALL': 'All Years',
+            '1': '1st Year',
+            '2': '2nd Year',
+            '3': '3rd Year',
+            '4': '4th Year',
+          },
+          onChanged: (v) => setState(() => _targetYear = v!),
+          prefixIcon: Icons.school_outlined,
         ),
         const SizedBox(height: 32),
 
@@ -629,15 +706,78 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             border: Border.all(color: const Color(0xFFF3F4F6)), 
             borderRadius: BorderRadius.circular(16)
           ),
-          child: CheckboxListTile(
-            value: _splitBatches,
-            onChanged: (v) => setState(() => _splitBatches = v ?? false),
-            title: const Text('Split Event into 2 Batches', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF111827))),
-            subtitle: const Text('Setup two completely separate schedules.', style: TextStyle(fontSize: 12, color: Color(0xFF6B7280))),
-            controlAffinity: ListTileControlAffinity.leading,
-            activeColor: const Color(0xFF064E3B),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Column(
+            children: [
+              RadioListTile<String>(
+                value: 'simple',
+                groupValue: _eventMode,
+                onChanged: (v) => setState(() {
+                  _eventMode = v ?? 'simple';
+                  _seminarCount = 1;
+                }),
+                title: const Text(
+                  'Simple Event',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                    color: Color(0xFF111827),
+                  ),
+                ),
+                subtitle: const Text(
+                  'Single schedule window.',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                ),
+                activeColor: TeacherThemeUtils.primary,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+              ),
+              RadioListTile<String>(
+                value: 'seminar_based',
+                groupValue: _eventMode,
+                onChanged: (v) => setState(() => _eventMode = v ?? 'seminar_based'),
+                title: const Text(
+                  'Seminar Based',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 14,
+                    color: Color(0xFF111827),
+                  ),
+                ),
+                subtitle: const Text(
+                  'One or two seminar sessions under one event.',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                ),
+                activeColor: TeacherThemeUtils.primary,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+              ),
+              if (_eventMode == 'seminar_based')
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                  child: Row(
+                    children: [
+                      const Text(
+                        'Seminar Count',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w700,
+                          fontSize: 12,
+                          color: Color(0xFF4B5563),
+                        ),
+                      ),
+                      const Spacer(),
+                      ChoiceChip(
+                        label: const Text('1'),
+                        selected: _seminarCount == 1,
+                        onSelected: (_) => setState(() => _seminarCount = 1),
+                      ),
+                      const SizedBox(width: 8),
+                      ChoiceChip(
+                        label: const Text('2'),
+                        selected: _seminarCount == 2,
+                        onSelected: (_) => setState(() => _seminarCount = 2),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
           ),
         ),
       ],
@@ -820,7 +960,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       ],
     );
 
-    if (!_splitBatches) {
+    if (_eventMode != 'seminar_based') {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -837,44 +977,67 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           commonFields,
-          _buildBatchBadge('BATCH 1 SCHEDULE'),
+          _buildBatchBadge('SEMINAR 1 SCHEDULE'),
           const SizedBox(height: 20),
+          _buildLabel('Seminar 1 Title'),
+          _buildTextField(
+            controller: _seminar1TitleCtrl,
+            hint: 'e.g. Seminar Proper',
+            prefixIcon: Icons.menu_book_rounded,
+          ),
+          const SizedBox(height: 24),
           _buildLabel('Start Date & Time'),
-          _buildDateTimeInput(_startDateCtrl, Icons.calendar_today_rounded),
+          _buildDateTimeInput(_seminar1StartCtrl, Icons.calendar_today_rounded),
           const SizedBox(height: 24),
           _buildLabel('End Date & Time'),
-          _buildDateTimeInput(_endDateCtrl, Icons.access_time_rounded, isEnabled: _startDateCtrl.text.isNotEmpty),
-          
-          const SizedBox(height: 32),
-          Row(
-            children: [
-              Container(width: 48, height: 2, color: const Color(0xFFD4A843)),
-              Expanded(
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    return Flex(
-                      direction: Axis.horizontal,
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      mainAxisSize: MainAxisSize.max,
-                      children: List.generate(
-                        (constraints.constrainWidth() / 8).floor(),
-                        (index) => SizedBox(width: 4, height: 1, child: DecoratedBox(decoration: BoxDecoration(color: Colors.grey.shade300))),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ],
+          _buildDateTimeInput(
+            _seminar1EndCtrl,
+            Icons.access_time_rounded,
+            isEnabled: _seminar1StartCtrl.text.isNotEmpty,
           ),
-          const SizedBox(height: 32),
-
-          _buildBatchBadge('BATCH 2 SCHEDULE'),
-          const SizedBox(height: 20),
-          _buildLabel('Batch 2 - Start Date & Time'),
-          _buildDateTimeInput(_startDateCtrl2, Icons.calendar_today_rounded),
-          const SizedBox(height: 24),
-          _buildLabel('Batch 2 - End Date & Time'),
-          _buildDateTimeInput(_endDateCtrl2, Icons.access_time_rounded, isEnabled: _startDateCtrl2.text.isNotEmpty),
+          
+          if (_seminarCount >= 2) ...[
+            const SizedBox(height: 32),
+            Row(
+              children: [
+                Container(width: 48, height: 2, color: const Color(0xFFD4A843)),
+                Expanded(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      return Flex(
+                        direction: Axis.horizontal,
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        mainAxisSize: MainAxisSize.max,
+                        children: List.generate(
+                          (constraints.constrainWidth() / 8).floor(),
+                          (index) => SizedBox(width: 4, height: 1, child: DecoratedBox(decoration: BoxDecoration(color: Colors.grey.shade300))),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 32),
+            _buildBatchBadge('SEMINAR 2 SCHEDULE'),
+            const SizedBox(height: 20),
+            _buildLabel('Seminar 2 Title'),
+            _buildTextField(
+              controller: _seminar2TitleCtrl,
+              hint: 'e.g. Workshop Session',
+              prefixIcon: Icons.menu_book_outlined,
+            ),
+            const SizedBox(height: 24),
+            _buildLabel('Start Date & Time'),
+            _buildDateTimeInput(_seminar2StartCtrl, Icons.calendar_today_rounded),
+            const SizedBox(height: 24),
+            _buildLabel('End Date & Time'),
+            _buildDateTimeInput(
+              _seminar2EndCtrl,
+              Icons.access_time_rounded,
+              isEnabled: _seminar2StartCtrl.text.isNotEmpty,
+            ),
+          ],
         ],
       );
     }
@@ -934,7 +1097,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         prefixIcon: Icon(prefixIcon, color: const Color(0xFF9CA3AF), size: 20),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
         enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Color(0xFF064E3B), width: 1.5)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: TeacherThemeUtils.primary, width: 1.5)),
         filled: true,
         fillColor: const Color(0xFFF3F4F6),
         contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
@@ -946,10 +1109,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
-        color: const Color(0xFF064E3B).withValues(alpha: 0.1),
+        color: TeacherThemeUtils.primary.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(8),
       ),
-      child: Text(text, style: const TextStyle(color: Color(0xFF064E3B), fontWeight: FontWeight.w800, fontSize: 11, letterSpacing: 0.8)),
+      child: Text(text, style: const TextStyle(color: TeacherThemeUtils.primary, fontWeight: FontWeight.w800, fontSize: 11, letterSpacing: 0.8)),
     );
   }
 
@@ -970,7 +1133,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         prefixIcon: Icon(prefixIcon, color: const Color(0xFF9CA3AF), size: 20),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
         enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Color(0xFF064E3B), width: 1.5)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: TeacherThemeUtils.primary, width: 1.5)),
         filled: true,
         fillColor: const Color(0xFFF3F4F6),
         contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
@@ -995,7 +1158,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             suffixIcon: const Icon(Icons.calendar_month_rounded, color: Color(0xFF6B7280), size: 20),
             border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
             enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Color(0xFF064E3B), width: 1.5)),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: TeacherThemeUtils.primary, width: 1.5)),
             filled: true,
             fillColor: isEnabled ? const Color(0xFFF3F4F6) : const Color(0xFFE5E7EB),
             contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
@@ -1026,7 +1189,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         return Theme(
           data: Theme.of(context).copyWith(
             colorScheme: const ColorScheme.light(
-              primary: Color(0xFF064E3B), 
+              primary: TeacherThemeUtils.primary, 
               onPrimary: Colors.white,
               onSurface: Color(0xFF111827),
             ),
@@ -1045,7 +1208,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           return Theme(
             data: Theme.of(context).copyWith(
               colorScheme: const ColorScheme.light(
-                primary: Color(0xFF064E3B), 
+                primary: TeacherThemeUtils.primary, 
                 onPrimary: Colors.white,
                 onSurface: Color(0xFF111827),
               ),
@@ -1112,12 +1275,12 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           ElevatedButton(
             onPressed: _isSubmitting ? null : (isLast ? _submit : _next),
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF064E3B),
+              backgroundColor: TeacherThemeUtils.primary,
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               elevation: 4,
-              shadowColor: const Color(0xFF064E3B).withValues(alpha: 0.4),
+              shadowColor: TeacherThemeUtils.dark.withValues(alpha: 0.4),
             ),
             child: _isSubmitting
                 ? const PulseConnectLoader(size: 20, color: Colors.white)

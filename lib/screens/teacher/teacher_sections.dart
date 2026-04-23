@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../widgets/custom_loader.dart';
 import 'teacher_section_students.dart';
+import '../../utils/teacher_theme_utils.dart';
 
 class TeacherSections extends StatefulWidget {
   const TeacherSections({super.key});
@@ -78,8 +79,12 @@ class _TeacherSectionsState extends State<TeacherSections> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFF9FAFB), // Very light gray background
-      body: CustomScrollView(
-        slivers: [
+      body: RefreshIndicator(
+        onRefresh: _fetchSections,
+        color: TeacherThemeUtils.primary,
+        child: CustomScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          slivers: [
           // App Bar Header
           SliverToBoxAdapter(
             child: Container(
@@ -87,7 +92,7 @@ class _TeacherSectionsState extends State<TeacherSections> {
                 gradient: LinearGradient(
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
-                  colors: [Color(0xFF064E3B), Color(0xFF047857)],
+                  colors: TeacherThemeUtils.chromeGradient,
                 ),
                 borderRadius: BorderRadius.vertical(
                   bottom: Radius.circular(28),
@@ -232,8 +237,9 @@ class _TeacherSectionsState extends State<TeacherSections> {
               ),
             ),
           
-          const SliverToBoxAdapter(child: SizedBox(height: 24)),
-        ],
+            const SliverToBoxAdapter(child: SizedBox(height: 24)),
+          ],
+        ),
       ),
     );
   }
@@ -316,13 +322,13 @@ class _TeacherSectionsState extends State<TeacherSections> {
                   width: 34,
                   height: 34,
                   decoration: BoxDecoration(
-                    color: const Color(0xFF064E3B).withValues(alpha: 0.09),
+                    color: TeacherThemeUtils.primary.withValues(alpha: 0.09),
                     shape: BoxShape.circle,
                   ),
                   child: const Icon(
                     Icons.groups_rounded,
                     size: 16,
-                    color: Color(0xFF064E3B),
+                    color: TeacherThemeUtils.primary,
                   ),
                 ),
                 const Spacer(),

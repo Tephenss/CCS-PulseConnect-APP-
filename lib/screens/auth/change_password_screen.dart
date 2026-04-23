@@ -5,6 +5,7 @@ import '../../services/notification_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:bcrypt/bcrypt.dart';
+import '../../utils/teacher_theme_utils.dart';
 
 class ChangePasswordScreen extends StatefulWidget {
   final String role;
@@ -29,8 +30,8 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> with Ticker
   bool _obscureConfirm = true;
 
   bool get _isTeacher => widget.role.toLowerCase() == 'teacher';
-  Color get _primaryColor => _isTeacher ? const Color(0xFF064E3B) : const Color(0xFF9F1239);
-  Color get _accentColor => _isTeacher ? const Color(0xFF059669) : const Color(0xFFBE123C);
+  Color get _primaryColor => _isTeacher ? TeacherThemeUtils.primary : const Color(0xFF9F1239);
+  Color get _accentColor => _isTeacher ? TeacherThemeUtils.mid : const Color(0xFFBE123C);
 
   @override
   void initState() {
@@ -173,8 +174,8 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> with Ticker
                             center: Alignment(-0.9 + 1.8 * t, -0.6 + 1.2 * t),
                             radius: 1.4 + 0.4 * t,
                             colors: [
-                              (_isTeacher ? const Color(0xFF064E3B) : const Color(0xFF6F1D2D)).withValues(alpha: 0.85 + 0.1 * t),
-                              (_isTeacher ? const Color(0xFF15803D) : const Color(0xFF7F1D1D)).withValues(alpha: 0.5 + 0.2 * t),
+                              (_isTeacher ? TeacherThemeUtils.dark : const Color(0xFF6F1D2D)).withValues(alpha: 0.85 + 0.1 * t),
+                              (_isTeacher ? const Color(0xFF1D4ED8) : const Color(0xFF7F1D1D)).withValues(alpha: 0.5 + 0.2 * t),
                               Colors.transparent,
                             ],
                             stops: [0.0, 0.45 + 0.2 * t, 1.0],

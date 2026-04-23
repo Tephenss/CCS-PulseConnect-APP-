@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../utils/event_time_utils.dart';
 import '../../services/event_service.dart';
+import '../../utils/course_theme_utils.dart';
 
 class StudentTicketView extends StatefulWidget {
   final Map<String, dynamic> ticket;
@@ -22,6 +23,9 @@ class _StudentTicketViewState extends State<StudentTicketView> {
   bool _isAlreadyDownloaded = false;
   bool _isLoadingSeminarAttendance = false;
   List<Map<String, dynamic>> _seminarAttendance = [];
+
+  Color _studentPrimary(BuildContext context) =>
+      Theme.of(context).colorScheme.primary;
 
   @override
   void initState() {
@@ -154,6 +158,7 @@ class _StudentTicketViewState extends State<StudentTicketView> {
       final currentTicket = Map<String, dynamic>.from(widget.ticket);
       currentTicket['local_cached'] = true;
       currentTicket['downloaded_at_local'] = DateTime.now().toIso8601String();
+      currentTicket['downloaded_explicit'] = true;
       final currentKey = _ticketUniqueKey(currentTicket);
 
       final existingRows = prefs.getStringList(storageKey) ?? <String>[];
@@ -309,6 +314,11 @@ class _StudentTicketViewState extends State<StudentTicketView> {
       }
     }
 
+    final themePrimary = _studentPrimary(context);
+    final chromeColor = CourseThemeUtils.studentChromeFromPrimary(themePrimary);
+    final ticketGradient =
+        CourseThemeUtils.studentTicketGradientFromPrimary(themePrimary);
+
     return Scaffold(
       backgroundColor: const Color(0xFFF8F9FA),
       appBar: AppBar(
@@ -346,17 +356,12 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                           // Shiny Background Layer (Full Height)
                           Positioned.fill(
                             child: Container(
-                              decoration: const BoxDecoration(
+                              decoration: BoxDecoration(
                                 gradient: LinearGradient(
                                   begin: Alignment.topLeft,
                                   end: Alignment.bottomRight,
-                                  colors: [
-                                    Color(0xFF7F1D1D),
-                                    Color(0xFFA52A2A),
-                                    Color(0xFF8B0000),
-                                    Color(0xFF7F1D1D),
-                                  ],
-                                  stops: [0.0, 0.4, 0.6, 1.0],
+                                  colors: ticketGradient,
+                                  stops: const [0.0, 0.4, 0.6, 1.0],
                                 ),
                               ),
                             ),
@@ -513,8 +518,14 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                                         data: 'PULSE-$ticketId',
                                         version: QrVersions.auto,
                                         size: 140,
-                                        eyeStyle: const QrEyeStyle(eyeShape: QrEyeShape.square, color: Color(0xFF7F1D1D)),
-                                        dataModuleStyle: const QrDataModuleStyle(dataModuleShape: QrDataModuleShape.square, color: Color(0xFF7F1D1D)),
+                                        eyeStyle: QrEyeStyle(
+                                          eyeShape: QrEyeShape.square,
+                                          color: chromeColor,
+                                        ),
+                                        dataModuleStyle: QrDataModuleStyle(
+                                          dataModuleShape: QrDataModuleShape.square,
+                                          color: chromeColor,
+                                        ),
                                       ),
                                     ),
                                     const SizedBox(height: 24),
@@ -676,8 +687,8 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                       child: _buildDownloadActionLabel(),
                     ),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF7F1D1D),
-                      disabledBackgroundColor: const Color(0xFF7F1D1D),
+                      backgroundColor: chromeColor,
+                      disabledBackgroundColor: chromeColor,
                       foregroundColor: Colors.white,
                       disabledForegroundColor: _isAlreadyDownloaded
                           ? const Color(0xFFD4A843)
@@ -802,6 +813,7 @@ class _StudentTicketViewState extends State<StudentTicketView> {
       case 'late': return const Color(0xFFD97706);
       case 'early': return const Color(0xFF2563EB);
       case 'scanned': return const Color(0xFF059669);
+      case 'absent': return const Color(0xFFDC2626);
       case 'unscanned': return const Color(0xFF6B7280);
       default: return const Color(0xFF6B7280);
     }
@@ -813,6 +825,7 @@ class _StudentTicketViewState extends State<StudentTicketView> {
       case 'late': return Icons.watch_later_rounded;
       case 'early': return Icons.bolt_rounded;
       case 'scanned': return Icons.check_circle_rounded;
+      case 'absent': return Icons.cancel_rounded;
       case 'unscanned': return Icons.radio_button_unchecked_rounded;
       default: return Icons.help_outline_rounded;
     }
@@ -824,6 +837,7 @@ class _StudentTicketViewState extends State<StudentTicketView> {
       case 'late': return 'Checked In (Late)';
       case 'early': return 'Checked In (Early)';
       case 'scanned': return 'Checked In';
+      case 'absent': return 'Absent';
       case 'unscanned': return 'Not Yet Scanned';
       default: return status.toUpperCase();
     }

@@ -9,6 +9,7 @@ import '../../widgets/custom_loader.dart';
 import '../welcome_screen.dart';
 import '../auth/change_password_screen.dart';
 import 'student_certificates.dart';
+import '../../utils/course_theme_utils.dart';
 
 class StudentProfile extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -27,6 +28,11 @@ class _StudentProfileState extends State<StudentProfile> {
   bool _isUploading = false;
   bool _isLoggingOut = false;
   Map<String, dynamic>? _localUser;
+
+  Color _studentPrimary(BuildContext context) => CourseThemeUtils
+      .studentPrimaryForCourse(_localUser?['course']);
+  Color _studentLight(BuildContext context) =>
+      CourseThemeUtils.studentLightForCourse(_localUser?['course']);
 
   @override
   void initState() {
@@ -105,7 +111,7 @@ class _StudentProfileState extends State<StudentProfile> {
       uiSettings: [
         AndroidUiSettings(
           toolbarTitle: 'Edit Profle Picture',
-          toolbarColor: const Color(0xFF7F1D1D),
+          toolbarColor: _studentPrimary(context),
           toolbarWidgetColor: Colors.white,
           initAspectRatio: CropAspectRatioPreset.square,
           lockAspectRatio: true,
@@ -135,7 +141,10 @@ class _StudentProfileState extends State<StudentProfile> {
               const Text('Change Profile Picture', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F2937))),
               const SizedBox(height: 20),
               ListTile(
-                leading: const Icon(Icons.photo_library_rounded, color: Color(0xFF7F1D1D)),
+                leading: Icon(
+                  Icons.photo_library_rounded,
+                  color: _studentPrimary(context),
+                ),
                 title: const Text('Choose from Gallery', style: TextStyle(fontWeight: FontWeight.w600)),
                 onTap: () {
                   Navigator.pop(context);
@@ -143,7 +152,10 @@ class _StudentProfileState extends State<StudentProfile> {
                 },
               ),
               ListTile(
-                leading: const Icon(Icons.camera_alt_rounded, color: Color(0xFF7F1D1D)),
+                leading: Icon(
+                  Icons.camera_alt_rounded,
+                  color: _studentPrimary(context),
+                ),
                 title: const Text('Take a Photo', style: TextStyle(fontWeight: FontWeight.w600)),
                 onTap: () {
                   Navigator.pop(context);
@@ -169,6 +181,18 @@ class _StudentProfileState extends State<StudentProfile> {
       setState(() {
         _sectionName = match.isNotEmpty ? (match['name'] as String? ?? 'Not Set') : 'Not Set';
       });
+    }
+  }
+
+  Future<void> _refreshProfile() async {
+    final latestUser = await _authService.getCurrentUser();
+    if (!mounted) return;
+    setState(() {
+      _localUser = latestUser ?? _localUser;
+    });
+    await _fetchSectionName();
+    if (widget.onUpdate != null) {
+      widget.onUpdate!();
     }
   }
 
@@ -200,7 +224,7 @@ class _StudentProfileState extends State<StudentProfile> {
           ElevatedButton(
             onPressed: () => Navigator.pop(context, true),
             style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFF7F1D1D),
+              backgroundColor: _studentPrimary(context),
               foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
             ),
@@ -250,8 +274,12 @@ class _StudentProfileState extends State<StudentProfile> {
       backgroundColor: const Color(0xFFF9FAFB),
       body: Stack(
         children: [
-          SingleChildScrollView(
-            child: Column(
+          RefreshIndicator(
+            onRefresh: _refreshProfile,
+            color: _studentPrimary(context),
+            child: SingleChildScrollView(
+              physics: const AlwaysScrollableScrollPhysics(),
+              child: Column(
               children: [
             // Curved Header with Profile Info
             Stack(
@@ -261,11 +289,11 @@ class _StudentProfileState extends State<StudentProfile> {
                 Container(
                   height: 220,
                   width: double.infinity,
-                  decoration: const BoxDecoration(
+                  decoration: BoxDecoration(
                     gradient: LinearGradient(
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
-                      colors: [Color(0xFF991B1B), Color(0xFF7F1D1D)],
+                      colors: [_studentLight(context), _studentPrimary(context)],
                     ),
                     borderRadius: BorderRadius.vertical(bottom: Radius.circular(40)),
                   ),
@@ -331,7 +359,11 @@ class _StudentProfileState extends State<StudentProfile> {
                                       ? Center(
                                           child: Text(
                                             firstName.isNotEmpty ? firstName[0].toUpperCase() : 'S',
-                                            style: const TextStyle(color: Color(0xFF7F1D1D), fontSize: 44, fontWeight: FontWeight.w900),
+                                            style: TextStyle(
+                                              color: _studentPrimary(context),
+                                              fontSize: 44,
+                                              fontWeight: FontWeight.w900,
+                                            ),
                                           ),
                                         )
                                       : null,
@@ -376,8 +408,18 @@ class _StudentProfileState extends State<StudentProfile> {
                   const SizedBox(height: 4),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                    decoration: BoxDecoration(color: const Color(0xFF7F1D1D).withValues(alpha: 0.1), borderRadius: BorderRadius.circular(100)),
-                    child: Text(email, style: const TextStyle(color: Color(0xFF7F1D1D), fontSize: 13, fontWeight: FontWeight.w700)),
+                    decoration: BoxDecoration(
+                      color: _studentPrimary(context).withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(100),
+                    ),
+                    child: Text(
+                      email,
+                      style: TextStyle(
+                        color: _studentPrimary(context),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
                   ),
                   
                   const SizedBox(height: 32),
@@ -395,18 +437,22 @@ class _StudentProfileState extends State<StudentProfile> {
                         ),
                       ],
                     ),
-                    child: IntrinsicHeight(
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: _buildSimpleInfo('STUDENT ID', studentId),
+                    child: Column(
+                      children: [
+                        IntrinsicHeight(
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: _buildSimpleInfo('STUDENT ID', studentId),
+                              ),
+                              Container(width: 1, height: 40, color: Colors.grey.withValues(alpha: 0.1)),
+                              Expanded(
+                                child: _buildSimpleInfo('COURSE/SECTION', _sectionName),
+                              ),
+                            ],
                           ),
-                          Container(width: 1, height: 40, color: Colors.grey.withValues(alpha: 0.1)),
-                          Expanded(
-                            child: _buildSimpleInfo('SECTION', _sectionName),
-                          ),
-                        ],
-                      ),
+                        ),
+                      ],
                     ),
                   ),
                   
@@ -439,6 +485,7 @@ class _StudentProfileState extends State<StudentProfile> {
               ),
             ),
           ],
+              ),
             ),
           ),
           if (_isLoggingOut)
@@ -502,8 +549,11 @@ class _StudentProfileState extends State<StudentProfile> {
           children: [
             Container(
               padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(color: const Color(0xFF7F1D1D).withValues(alpha: 0.1), shape: BoxShape.circle),
-              child: Icon(icon, color: const Color(0xFF7F1D1D), size: 22),
+              decoration: BoxDecoration(
+                color: _studentPrimary(context).withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, color: _studentPrimary(context), size: 22),
             ),
             const SizedBox(width: 20),
             Expanded(

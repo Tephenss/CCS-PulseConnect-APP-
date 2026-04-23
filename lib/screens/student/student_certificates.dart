@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
+import '../../utils/course_theme_utils.dart';
 
 class StudentCertificates extends StatefulWidget {
   const StudentCertificates({super.key});
@@ -24,6 +25,11 @@ class _StudentCertificatesState extends State<StudentCertificates>
   List<Map<String, dynamic>> _certificates = [];
   bool _isLoading = true;
   String _searchQuery = '';
+
+  Color _studentPrimary(BuildContext context) =>
+      Theme.of(context).colorScheme.primary;
+  Color _studentDark(BuildContext context) =>
+      CourseThemeUtils.studentDarkFromPrimary(_studentPrimary(context));
 
   String _participantName(Map<String, dynamic> cert) {
     final raw = cert['participant_name']?.toString().trim() ?? '';
@@ -208,7 +214,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
       backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
         automaticallyImplyLeading: false,
-        backgroundColor: const Color(0xFF7F1D1D),
+        backgroundColor: _studentPrimary(context),
         centerTitle: true,
         title: const Text(
           'Certificates',
@@ -219,7 +225,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
           ? const Center(child: PulseConnectLoader())
           : RefreshIndicator(
               onRefresh: _loadCertificates,
-              color: const Color(0xFF7F1D1D),
+              color: _studentPrimary(context),
               child: _certificates.isEmpty
                   ? ListView(
                       physics: const AlwaysScrollableScrollPhysics(),
@@ -279,8 +285,8 @@ class _StudentCertificatesState extends State<StudentCertificates>
                               ),
                               focusedBorder: OutlineInputBorder(
                                 borderRadius: BorderRadius.circular(14),
-                                borderSide: const BorderSide(
-                                  color: Color(0xFF7F1D1D),
+                                borderSide: BorderSide(
+                                  color: _studentPrimary(context),
                                   width: 1.4,
                                 ),
                               ),
@@ -619,8 +625,8 @@ class _StudentCertificatesState extends State<StudentCertificates>
                   child: Container(
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(14),
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFF450A0A), Color(0xFF7F1D1D)],
+                      gradient: LinearGradient(
+                        colors: [_studentDark(context), _studentPrimary(context)],
                       ),
                     ),
                     child: ElevatedButton.icon(

@@ -7,6 +7,7 @@ import '../screens/student/student_certificates.dart';
 import '../screens/student/student_event_details.dart';
 import '../screens/teacher/teacher_event_manage.dart';
 import 'custom_loader.dart';
+import '../utils/teacher_theme_utils.dart';
 
 bool _isNotificationsModalOpen = false;
 
@@ -68,7 +69,7 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
   bool _showAll = false;
   StreamSubscription<int>? _unreadSubscription;
 
-  Color get _themeColor => _isTeacherTheme ? const Color(0xFF059669) : const Color(0xFFB45309);
+  Color get _themeColor => _isTeacherTheme ? TeacherThemeUtils.primary : const Color(0xFFB45309);
 
   @override
   void initState() {
@@ -81,7 +82,7 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
 
   Future<void> _loadData({bool force = false}) async {
     final user = await _auth.getCurrentUser();
-    final role = user?['role']?.toString() ?? 'student';
+    final role = user?['role']?.toString().toLowerCase() ?? 'student';
     final notifs = await _service.getNotifications(forceRefresh: force);
 
     if (!mounted) return;
@@ -259,15 +260,19 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
     switch (n.type) {
       case NotificationType.success:
         icon = Icons.check_circle_rounded;
-        iconColor = const Color(0xFF16A34A);
+        iconColor =
+            _isTeacherTheme ? TeacherThemeUtils.mid : const Color(0xFF16A34A);
         break;
       case NotificationType.warning:
         icon = Icons.warning_amber_rounded;
-        iconColor = const Color(0xFFD97706);
+        iconColor = _isTeacherTheme
+            ? TeacherThemeUtils.primary
+            : const Color(0xFFD97706);
         break;
       case NotificationType.error:
         icon = Icons.error_rounded;
-        iconColor = const Color(0xFFDC2626);
+        iconColor =
+            _isTeacherTheme ? TeacherThemeUtils.dark : const Color(0xFFDC2626);
         break;
       case NotificationType.event:
         icon = Icons.event_rounded;
@@ -275,7 +280,8 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
         break;
       case NotificationType.info:
         icon = Icons.info_rounded;
-        iconColor = const Color(0xFF2563EB);
+        iconColor =
+            _isTeacherTheme ? TeacherThemeUtils.primary : const Color(0xFF2563EB);
         break;
     }
 

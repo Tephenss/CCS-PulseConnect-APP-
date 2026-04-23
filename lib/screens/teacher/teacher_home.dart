@@ -38,6 +38,11 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   int _currentHeaderSlide = 0;
   StreamSubscription<int>? _unreadSubscription;
 
+  // Softer teacher palette (sky → deep) to reduce eye strain vs navy.
+  static const Color _teacherPrimary = Color(0xFF0EA5E9); // sky-500
+  static const Color _teacherDark = Color(0xFF0C4A6E); // sky-900
+  static const Color _teacherMid = Color(0xFF0369A1); // sky-700
+
   @override
   void initState() {
     super.initState();
@@ -191,11 +196,11 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                         width: 58,
                         height: 58,
                         decoration: BoxDecoration(
-                          color: const Color(0xFF064E3B), // Theme Color
+                          color: _teacherPrimary,
                           shape: BoxShape.circle,
                           boxShadow: [
                             BoxShadow(
-                              color: const Color(0xFF064E3B).withValues(alpha: 0.4),
+                              color: _teacherDark.withValues(alpha: 0.4),
                               blurRadius: 20,
                               spreadRadius: 1,
                               offset: const Offset(0, 8),
@@ -227,7 +232,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
           vertical: 8,
         ),
         decoration: BoxDecoration(
-          color: isActive ? const Color(0xFF064E3B).withValues(alpha: 0.08) : Colors.transparent,
+          color: isActive ? _teacherPrimary.withValues(alpha: 0.10) : Colors.transparent,
           borderRadius: BorderRadius.circular(20),
         ),
         child: Row(
@@ -235,7 +240,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
           children: [
             Icon(
               icon,
-              color: isActive ? const Color(0xFF064E3B) : Colors.grey.shade400,
+              color: isActive ? _teacherPrimary : Colors.grey.shade400,
               size: 20, // Reduced icon size
             ),
             if (isActive) ...[
@@ -243,7 +248,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
               Text(
                 label,
                 style: const TextStyle(
-                  color: Color(0xFF064E3B),
+                  color: _teacherPrimary,
                   fontWeight: FontWeight.w800,
                   fontSize: 11, // Reduced font size
                 ),
@@ -258,15 +263,19 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   Widget _buildHomeContent() {
     final firstName = _user?['first_name'] as String? ?? 'Teacher';
 
-    return CustomScrollView(
-      slivers: [
+    return RefreshIndicator(
+      onRefresh: _loadData,
+      color: _teacherPrimary,
+      child: CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
         SliverToBoxAdapter(
           child: Container(
             decoration: const BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
-                colors: [Color(0xFF064E3B), Color(0xFF047857)],
+                colors: [_teacherDark, _teacherPrimary],
               ),
               borderRadius: BorderRadius.vertical(bottom: Radius.circular(28)),
             ),
@@ -324,7 +333,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                                   fontWeight: FontWeight.w800,
                                 ),
                                 baseColor: Colors.white,
-                                scanColor: const Color(0xFF6EE7B7), // Soft emerald glow for Teacher
+                                scanColor: const Color(0xFF93C5FD), // Soft blue glow for Teacher
                               ),
                             ],
                           ),
@@ -369,7 +378,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                                     decoration: BoxDecoration(
                                       color: const Color(0xFFEF4444),
                                       borderRadius: BorderRadius.circular(999),
-                                      border: Border.all(color: const Color(0xFF047857), width: 1.5),
+                                      border: Border.all(color: _teacherMid, width: 1.5),
                                     ),
                                     constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
                                     child: Text(
@@ -407,7 +416,14 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                 const Spacer(),
                 GestureDetector(
                   onTap: () => setState(() => _currentIndex = 1),
-                  child: const Text('View All', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Color(0xFF064E3B))),
+                  child: const Text(
+                    'View All',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: _teacherMid,
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -444,8 +460,9 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                   childCount: _upcomingEvents.length,
                 ),
               ),
-        const SliverToBoxAdapter(child: SizedBox(height: 100)), // Space for floating nav
-      ],
+          const SliverToBoxAdapter(child: SizedBox(height: 100)), // Space for floating nav
+        ],
+      ),
     );
   }
 
@@ -637,9 +654,23 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Text('$day', style: TextStyle(color: isToday ? const Color(0xFF064E3B) : Colors.white.withValues(alpha: 0.8), fontWeight: isToday ? FontWeight.w800 : FontWeight.w500, fontSize: 12)),
+                          Text(
+                            '$day',
+                            style: TextStyle(
+                              color: isToday ? _teacherDark : Colors.white.withValues(alpha: 0.86),
+                              fontWeight: isToday ? FontWeight.w800 : FontWeight.w500,
+                              fontSize: 12,
+                            ),
+                          ),
                           if (hasEvent)
-                            Container(width: 4, height: 4, decoration: BoxDecoration(shape: BoxShape.circle, color: isToday ? const Color(0xFF064E3B) : const Color(0xFFD4A843))),
+                            Container(
+                              width: 4,
+                              height: 4,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: isToday ? _teacherDark : const Color(0xFFD4A843),
+                              ),
+                            ),
                         ],
                       ),
                     );
@@ -656,7 +687,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                                   mainAxisSize: MainAxisSize.min,
                                   children: eventsOnThisDay.map((e) => ListTile(
                                     contentPadding: EdgeInsets.zero,
-                                    leading: const Icon(Icons.event_rounded, color: Color(0xFF064E3B)),
+                                    leading: const Icon(Icons.event_rounded, color: _teacherMid),
                                     title: Text(e['title'] ?? 'Event', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
                                     subtitle: Text(
                                       e['start_at'] != null
@@ -678,7 +709,10 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                                   )).toList(),
                                 ),
                                 actions: [
-                                  TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close', style: TextStyle(color: Color(0xFF064E3B)))),
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(context),
+                                    child: const Text('Close', style: TextStyle(color: _teacherMid)),
+                                  ),
                                 ],
                               );
                             }
@@ -730,7 +764,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
             children: [
               Container(
                 width: 56, padding: const EdgeInsets.symmetric(vertical: 10),
-                decoration: BoxDecoration(color: const Color(0xFF064E3B), borderRadius: BorderRadius.circular(14)),
+                decoration: BoxDecoration(color: _teacherMid, borderRadius: BorderRadius.circular(14)),
                 child: Column(
                   children: [
                     Text(startDate != null ? DateFormat('dd').format(startDate) : '--', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 20)),

@@ -724,9 +724,9 @@ class NotificationService {
             notifications.add(
               AppNotification(
                 id: 'scan_assign_$eventId',
-                title: 'QR Scanner Access Granted',
+                title: 'Scanner Assignment',
                 message:
-                    'You were assigned as QR scanner assistant for "$eventTitle".',
+                    'You were assigned by the admin/teacher to help take attendance for "$eventTitle". Open the QR Scanner when instructed.',
                 timestamp: assignedAt,
                 type: NotificationType.info,
                 eventId: eventId,

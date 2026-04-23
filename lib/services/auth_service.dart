@@ -23,7 +23,9 @@ class AuthService {
     if (userData != null) {
       final parsed = jsonDecode(userData) as Map<String, dynamic>;
       final parsedId = parsed['id']?.toString() ?? '';
-      final userId = parsedId.isNotEmpty ? parsedId : (prefs.getString('user_id') ?? '');
+      final userId = parsedId.isNotEmpty
+          ? parsedId
+          : (prefs.getString('user_id') ?? '');
 
       if (userId.isNotEmpty) {
         _mergeAvatarCache(parsed, prefs, userId);
@@ -33,13 +35,17 @@ class AuthService {
       // - refresh signed URL when needed
       // - if public URL is blocked, fallback to signed URL
       final photoUrl = (parsed['photo_url'] as String?) ?? '';
-      final photoPath = (parsed['photo_path'] as String?) ?? _extractStoragePathFromUrl(photoUrl);
+      final photoPath =
+          (parsed['photo_path'] as String?) ??
+          _extractStoragePathFromUrl(photoUrl);
       final hasPath = photoPath != null && photoPath.isNotEmpty;
       final isSigned = _isSupabaseSignedAvatarUrl(photoUrl);
       final isPublic = _isSupabasePublicAvatarUrl(photoUrl);
       if (hasPath && (isSigned || isPublic)) {
         try {
-          final publicReachable = isPublic ? await _isUrlReachable(photoUrl) : false;
+          final publicReachable = isPublic
+              ? await _isUrlReachable(photoUrl)
+              : false;
           if (isSigned || !publicReachable) {
             final freshSigned = await _supabase.storage
                 .from('avatars')
@@ -96,7 +102,11 @@ class AuthService {
   }
 
   // Login with email and password, checking the expected role
-  Future<Map<String, dynamic>> login(String email, String password, String expectedRole) async {
+  Future<Map<String, dynamic>> login(
+    String email,
+    String password,
+    String expectedRole,
+  ) async {
     try {
       // Query user by email
       final response = await _supabase
@@ -125,15 +135,16 @@ class AuthService {
       if (role == 'admin') {
         return {
           'ok': false,
-          'error': 'Admin accounts must use the web dashboard.'
+          'error': 'Admin accounts must use the web dashboard.',
         };
       }
-      
+
       // Enforce Role
       if (role.toLowerCase() != expectedRole.toLowerCase()) {
         return {
           'ok': false,
-          'error': 'This account is registered as a ${role == 'teacher' ? 'Teacher' : 'Student'}, not a $expectedRole.'
+          'error':
+              'This account is registered as a ${role == 'teacher' ? 'Teacher' : 'Student'}, not a $expectedRole.',
         };
       }
 
@@ -168,7 +179,9 @@ class AuthService {
       await prefs.setString('user_data', jsonEncode(user));
       if (userId.isNotEmpty) {
         final cachedPhoto = (user['photo_url'] as String?) ?? '';
-        final cachedPath = (user['photo_path'] as String?) ?? _extractStoragePathFromUrl(cachedPhoto);
+        final cachedPath =
+            (user['photo_path'] as String?) ??
+            _extractStoragePathFromUrl(cachedPhoto);
         if (cachedPhoto.isNotEmpty) {
           await _saveAvatarCache(
             prefs,
@@ -192,6 +205,7 @@ class AuthService {
     required String lastName,
     required String suffix,
     required String idNumber,
+    required String course,
     required String email,
     required String password,
   }) async {
@@ -204,11 +218,22 @@ class AuthService {
           .limit(1);
 
       if (existing.isNotEmpty) {
-        return {'ok': false, 'error': 'An account with this email already exists.'};
+        return {
+          'ok': false,
+          'error': 'An account with this email already exists.',
+        };
       }
 
       // Hash password using native Bcrypt for web dashboard compatibility
       final passwordHash = BCrypt.hashpw(password, BCrypt.gensalt());
+
+      final normalizedCourse = course.trim().toUpperCase();
+      if (normalizedCourse != 'IT' && normalizedCourse != 'CS') {
+        return {
+          'ok': false,
+          'error': 'Please select a valid course (IT or CS).',
+        };
+      }
 
       final payload = {
         'first_name': firstName.trim(),
@@ -216,6 +241,7 @@ class AuthService {
         'last_name': lastName.trim(),
         'suffix': suffix.trim().isEmpty ? null : suffix.trim(),
         'student_id': idNumber.trim(),
+        'course': normalizedCourse,
         'email': email.toLowerCase().trim(),
         'password': passwordHash,
         'section_id': null, // Section is selected purely post-login
@@ -242,10 +268,7 @@ class AuthService {
 
       // Delete FCM token from Supabase so this device stops receiving notifications
       if (userId != null && userId.isNotEmpty) {
-        await _supabase
-            .from('fcm_tokens')
-            .delete()
-            .eq('user_id', userId);
+        await _supabase.from('fcm_tokens').delete().eq('user_id', userId);
       }
     } catch (e) {
       // Fail silently - still proceed with logout
@@ -263,7 +286,9 @@ class AuthService {
 
   // Proper password verification supporting both SHA-256 (old mobile) and Bcrypt (web)
   bool _verifyBcryptPassword(String password, String storedHash) {
-    if (storedHash.startsWith('\$2y\$') || storedHash.startsWith('\$2b\$') || storedHash.startsWith('\$2a\$')) {
+    if (storedHash.startsWith('\$2y\$') ||
+        storedHash.startsWith('\$2b\$') ||
+        storedHash.startsWith('\$2a\$')) {
       try {
         // Use native Dart bcrypt verification for PHP web hashes
         return BCrypt.checkpw(password, storedHash);
@@ -283,13 +308,48 @@ class AuthService {
       if (user == null || user['section_id'] == null) return null;
       final sections = await getSections();
       if (sections.isEmpty) return null;
-      final sec = sections.firstWhere((s) => s['id'] == user['section_id'], orElse: () => {});
+      final sec = sections.firstWhere(
+        (s) => s['id'] == user['section_id'],
+        orElse: () => {},
+      );
       if (sec.isEmpty) return null;
       final name = sec['name']?.toString().toLowerCase() ?? '';
       if (name.contains('1')) return '1';
       if (name.contains('2')) return '2';
       if (name.contains('3')) return '3';
       if (name.contains('4')) return '4';
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Resolve student course code with fallback to section name.
+  // Returns 'BSIT', 'BSCS', or null when unknown.
+  Future<String?> getStudentCourseCode() async {
+    try {
+      final user = await getCurrentUser();
+      if (user == null) return null;
+
+      final direct = (user['course']?.toString() ?? '').trim().toUpperCase();
+      if (direct == 'IT' || direct == 'BSIT') return 'BSIT';
+      if (direct == 'CS' || direct == 'BSCS') return 'BSCS';
+
+      final sectionId = user['section_id']?.toString();
+      if (sectionId == null || sectionId.isEmpty) return null;
+
+      final sections = await getSections();
+      if (sections.isEmpty) return null;
+      final sec = sections.firstWhere(
+        (s) => s['id']?.toString() == sectionId,
+        orElse: () => {},
+      );
+      if (sec.isEmpty) return null;
+
+      final name = (sec['name']?.toString() ?? '').trim().toUpperCase();
+      if (name.startsWith('BSIT') || name.startsWith('IT ')) return 'BSIT';
+      if (name.startsWith('BSCS') || name.startsWith('CS ')) return 'BSCS';
+
       return null;
     } catch (_) {
       return null;
@@ -329,12 +389,18 @@ class AuthService {
 
       return {'ok': true, 'user': response};
     } catch (e) {
-      return {'ok': false, 'error': 'Failed to update section: ${e.toString()}'};
+      return {
+        'ok': false,
+        'error': 'Failed to update section: ${e.toString()}',
+      };
     }
   }
 
   // Update User Photo URL
-  Future<Map<String, dynamic>> updatePhotoUrl(String photoUrl, {String? photoPath}) async {
+  Future<Map<String, dynamic>> updatePhotoUrl(
+    String photoUrl, {
+    String? photoPath,
+  }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id');
@@ -394,11 +460,16 @@ class AuthService {
       final filePath = 'profiles/$fileName';
 
       // 1. Upload to Supabase Storage (Bucket: avatars) with upsert: true
-      await _supabase.storage.from('avatars').upload(
-        filePath,
-        file,
-        fileOptions: const FileOptions(cacheControl: '0', upsert: true), // Set cacheControl to 0
-      );
+      await _supabase.storage
+          .from('avatars')
+          .upload(
+            filePath,
+            file,
+            fileOptions: const FileOptions(
+              cacheControl: '0',
+              upsert: true,
+            ), // Set cacheControl to 0
+          );
 
       // 2. Resolve a usable URL:
       //    - Prefer public URL if avatar bucket is public/readable.
@@ -444,7 +515,9 @@ class AuthService {
 
   Future<bool> _isUrlReachable(String url) async {
     try {
-      final res = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 3));
+      final res = await http
+          .get(Uri.parse(url))
+          .timeout(const Duration(seconds: 3));
       return res.statusCode >= 200 && res.statusCode < 400;
     } catch (_) {
       return false;
@@ -510,7 +583,8 @@ class AuthService {
     if (url.isEmpty) return null;
     try {
       final uri = Uri.parse(url);
-      final path = uri.path; // /storage/v1/object/(public|sign)/avatars/<filePath>
+      final path =
+          uri.path; // /storage/v1/object/(public|sign)/avatars/<filePath>
 
       final publicMarker = '/storage/v1/object/public/avatars/';
       final signMarker = '/storage/v1/object/sign/avatars/';
