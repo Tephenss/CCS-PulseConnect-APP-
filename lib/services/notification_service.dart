@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'auth_service.dart';
 import 'event_service.dart';
 import 'push_notification_service.dart';
+import '../config/env.dart';
 
 enum NotificationType { info, success, warning, error, event }
 
@@ -375,10 +376,23 @@ class NotificationService {
       final isEvalOpen = notification.id.startsWith('eval_open_');
       final isCertificateReady = notification.id.startsWith('cert_');
       final isScannerAssigned = notification.id.startsWith('scan_assign_');
-      if ((!isEvalOpen && !isCertificateReady && !isScannerAssigned) ||
+      if (!isEvalOpen && !isCertificateReady && !isScannerAssigned) {
+        continue;
+      }
+
+      // Scanner-assignment notifications are delivered by server FCM
+      // when mobile push API is configured. Avoid duplicate local popup.
+      if (isScannerAssigned && Env.mobilePushApiBaseUrl.trim().isNotEmpty) {
+        shownIds.add(notification.id);
+        didChange = true;
+        continue;
+      }
+
+      final shouldSkip =
           notification.isRead ||
           previousIds.contains(notification.id) ||
-          shownIds.contains(notification.id)) {
+          shownIds.contains(notification.id);
+      if (shouldSkip) {
         continue;
       }
 
@@ -448,8 +462,12 @@ class NotificationService {
       
       if (userData == null) return [];
 
-      final role = userData['role'] ?? 'student';
-      final currentUserId = userData['id']?.toString() ?? '';
+      final role =
+          userData['role']?.toString().trim().toLowerCase() ?? 'student';
+      final currentUserId =
+          (userData['id']?.toString().trim().isNotEmpty == true)
+              ? userData['id'].toString().trim()
+              : (_activeUserId ?? '');
       final registeredEventIds = <String>{};
       final teacherAssignedEventIds = <String, DateTime?>{};
       String? studentYearLevel;
@@ -497,109 +515,143 @@ class NotificationService {
         }
       }
 
-      final events = await _supabase
-          .from('events')
-          .select()
-          .order('start_at', ascending: true);
+      List<dynamic> events = const [];
+      try {
+        events = await _supabase
+            .from('events')
+            .select()
+            .order('start_at', ascending: true);
+      } catch (e) {
+        debugPrint('Notifications: failed to load events: $e');
+      }
 
-      for (var event in events) {
-        if (role == 'student' &&
-            !_eventService.isStudentAllowedForEvent(
-              Map<String, dynamic>.from(event),
-              yearLevel: studentYearLevel,
-              courseCode: studentCourseCode,
-            )) {
-          continue;
-        }
-
-        final startAt = DateTime.parse(event['start_at']).toLocal();
-        final endAt = DateTime.parse(event['end_at']).toLocal();
-        final effectiveEndAt = await _resolveEffectiveEventEnd(event, endAt);
-        final status = event['status'];
-        final title = event['title'];
-        final eventId = event['id'].toString();
-        final createdBy = event['created_by']?.toString() ?? '';
-
-        final hoursUntilStart = startAt.difference(now).inHours;
-        final minsUtilStart = startAt.difference(now).inMinutes;
-        final updatedAt = DateTime.parse(event['updated_at'] ?? event['created_at']).toLocal();
-        final description = event['description'] ?? '';
-
-        // Check if event has actually ended
-        final bool isFinished = !effectiveEndAt.isAfter(now);
-        final bool isTeacherCreator = role == 'teacher' && currentUserId.isNotEmpty && createdBy == currentUserId;
-        final bool isTeacherAssigned = role == 'teacher' && teacherAssignedEventIds.containsKey(eventId);
-        final DateTime? assignedAt = isTeacherAssigned ? teacherAssignedEventIds[eventId] : null;
-
-        // Teacher assignments - show as new entry in modal list
-        if (role == 'teacher' && isTeacherAssigned && assignedAt != null) {
-          if (now.difference(assignedAt).inDays <= 7) {
-            notifications.add(AppNotification(
-              id: 'assign_$eventId',
-              title: 'Assigned to Event',
-              message: 'You have been assigned to "$title".',
-              timestamp: assignedAt,
-              type: NotificationType.info,
-              eventId: eventId,
-            ));
-          }
-        }
-
-        // Teacher: show proposal notifications only for own proposals.
-        if (role == 'teacher') {
-          if (isTeacherCreator && status == 'approved' && now.difference(updatedAt).inDays <= 7) {
-            notifications.add(AppNotification(
-              id: 'approved_$eventId',
-              title: 'Event Approved',
-              message: '"$title" has been approved and is ready to be published.',
-              timestamp: updatedAt,
-              type: NotificationType.success,
-              eventId: eventId,
-            ));
-          } else if (isTeacherCreator && (status == 'draft' || status == 'archived') && now.difference(updatedAt).inDays <= 7) {
-            // Extract rejection reason if present
-            String reasonMsg = 'Your proposal requires changes.';
-            final regExp = RegExp(r'\[REJECT_REASON:\s*(.*?)\]');
-            final match = regExp.firstMatch(description);
-            if (match != null) {
-              reasonMsg = 'Reason: ${match.group(1)}';
-            }
-
-            notifications.add(AppNotification(
-              id: 'reject_$eventId',
-              title: 'Proposal Review Required',
-              message: '"$title" has been rejected. $reasonMsg',
-              timestamp: updatedAt,
-              type: NotificationType.error,
-              eventId: eventId,
-            ));
-          }
-
-          // Teacher should only receive event timeline updates for events they created or were assigned to.
-          if (!isTeacherCreator && !isTeacherAssigned) {
+      for (final rawEvent in events) {
+        try {
+          final event = Map<String, dynamic>.from(rawEvent as Map);
+          if (role == 'student' &&
+              !_eventService.isStudentAllowedForEvent(
+                event,
+                yearLevel: studentYearLevel,
+                courseCode: studentCourseCode,
+              )) {
             continue;
           }
-        }
 
-        // Registration updates are student-only.
-        // Admin toggles 'Allow Registration' OFF which sets status to 'draft'
-        if (role == 'student' && status == 'draft' && now.difference(updatedAt).inDays <= 7) {
-          // Double check it's not a REJECTED proposal (which teachers see above)
-          bool isRejected = description.contains('[REJECT_REASON:');
-          
-          if (!isRejected) {
-             notifications.add(AppNotification(
-              id: 'reg_closed_${eventId}_${updatedAt.millisecondsSinceEpoch}',
-              title: 'Registration Closed',
-              message: 'Registration for "$title" is now closed.',
-              timestamp: updatedAt,
-              type: NotificationType.warning,
-              eventId: eventId,
-            ));
+          final startAt = _tryParseLocalDate(event['start_at']);
+          final endAt = _tryParseLocalDate(event['end_at']);
+          if (startAt == null || endAt == null) {
+            // Skip malformed legacy rows instead of dropping all notifications.
+            continue;
           }
-        }
 
-        if (status == 'published') {
+          final effectiveEndAt = await _resolveEffectiveEventEnd(event, endAt);
+          final status = event['status'];
+          final title = event['title'];
+          final eventId = event['id'].toString();
+          final createdBy = event['created_by']?.toString() ?? '';
+
+          final hoursUntilStart = startAt.difference(now).inHours;
+          final minsUtilStart = startAt.difference(now).inMinutes;
+          final updatedAt =
+              _tryParseLocalDate(event['updated_at']) ??
+              _tryParseLocalDate(event['created_at']) ??
+              startAt;
+          final description = event['description'] ?? '';
+
+          // Check if event has actually ended
+          final bool isFinished = !effectiveEndAt.isAfter(now);
+          final bool isTeacherCreator =
+              role == 'teacher' &&
+              currentUserId.isNotEmpty &&
+              createdBy == currentUserId;
+          final bool isTeacherAssigned =
+              role == 'teacher' && teacherAssignedEventIds.containsKey(eventId);
+          final DateTime? assignedAt =
+              isTeacherAssigned ? teacherAssignedEventIds[eventId] : null;
+
+          // Teacher assignments - show as new entry in modal list
+          if (role == 'teacher' && isTeacherAssigned && assignedAt != null) {
+            if (now.difference(assignedAt).inDays <= 7) {
+              notifications.add(
+                AppNotification(
+                  id: 'assign_$eventId',
+                  title: 'Assigned to Event',
+                  message: 'You have been assigned to "$title".',
+                  timestamp: assignedAt,
+                  type: NotificationType.info,
+                  eventId: eventId,
+                ),
+              );
+            }
+          }
+
+          // Teacher: show proposal notifications only for own proposals.
+          if (role == 'teacher') {
+            if (isTeacherCreator &&
+                status == 'approved' &&
+                now.difference(updatedAt).inDays <= 7) {
+              notifications.add(
+                AppNotification(
+                  id: 'approved_$eventId',
+                  title: 'Event Approved',
+                  message: '"$title" has been approved and is ready to be published.',
+                  timestamp: updatedAt,
+                  type: NotificationType.success,
+                  eventId: eventId,
+                ),
+              );
+            } else if (isTeacherCreator &&
+                (status == 'draft' || status == 'archived') &&
+                now.difference(updatedAt).inDays <= 7) {
+              // Extract rejection reason if present
+              String reasonMsg = 'Your proposal requires changes.';
+              final regExp = RegExp(r'\[REJECT_REASON:\s*(.*?)\]');
+              final match = regExp.firstMatch(description);
+              if (match != null) {
+                reasonMsg = 'Reason: ${match.group(1)}';
+              }
+
+              notifications.add(
+                AppNotification(
+                  id: 'reject_$eventId',
+                  title: 'Proposal Review Required',
+                  message: '"$title" has been rejected. $reasonMsg',
+                  timestamp: updatedAt,
+                  type: NotificationType.error,
+                  eventId: eventId,
+                ),
+              );
+            }
+
+            // Teacher should only receive event timeline updates for events they created or were assigned to.
+            if (!isTeacherCreator && !isTeacherAssigned) {
+              continue;
+            }
+          }
+
+          // Registration updates are student-only.
+          // Admin toggles 'Allow Registration' OFF which sets status to 'draft'
+          if (role == 'student' &&
+              status == 'draft' &&
+              now.difference(updatedAt).inDays <= 7) {
+            // Double check it's not a REJECTED proposal (which teachers see above)
+            bool isRejected = description.contains('[REJECT_REASON:');
+
+            if (!isRejected) {
+              notifications.add(
+                AppNotification(
+                  id: 'reg_closed_${eventId}_${updatedAt.millisecondsSinceEpoch}',
+                  title: 'Registration Closed',
+                  message: 'Registration for "$title" is now closed.',
+                  timestamp: updatedAt,
+                  type: NotificationType.warning,
+                  eventId: eventId,
+                ),
+              );
+            }
+          }
+
+          if (status == 'published') {
           // New Published Event / Registration Open
           // Visible to Students and Assigned Teachers as long as the event hasn't finished yet
           bool shouldNotify = (role == 'student') || (role == 'teacher' && isTeacherAssigned);
@@ -666,10 +718,10 @@ class NotificationService {
               ));
             }
           }
-        }
+          }
 
         // Expired/Finished events
-        if (isFinished || status == 'expired' || status == 'finished') {
+          if (isFinished || status == 'expired' || status == 'finished') {
           // Only show recent completions (within last 3 days)
           // Use endAt as the actual time it happened
           if (now.difference(effectiveEndAt).inDays <= 3 &&
@@ -710,45 +762,126 @@ class NotificationService {
               ));
             }
           }
+          }
+        } catch (eventError) {
+          debugPrint('Notifications: skipped malformed event row: $eventError');
+          continue;
         }
       }
 
       if (role == 'student' && currentUserId.isNotEmpty) {
         try {
-          final rows = await _supabase
-              .from('event_assistants')
-              .select('event_id, assigned_by_teacher_id, allow_scan, created_at, events(title)')
-              .eq('student_id', currentUserId)
-              .eq('allow_scan', true)
-              .not('assigned_by_teacher_id', 'is', null)
-              .limit(60);
+          dynamic rows;
+          try {
+            rows = await _supabase
+                .from('event_assistants')
+                .select(
+                  'id, event_id, assigned_by_teacher_id, allow_scan, assigned_at, created_at, updated_at, events(title)',
+                )
+                .eq('student_id', currentUserId)
+                .eq('allow_scan', true)
+                .limit(60);
+          } catch (_) {
+            try {
+              rows = await _supabase
+                  .from('event_assistants')
+                  .select(
+                    'id, event_id, assigned_by_teacher_id, allow_scan, assigned_at, events(title)',
+                  )
+                  .eq('student_id', currentUserId)
+                  .eq('allow_scan', true)
+                  .limit(60);
+            } catch (_) {
+              // Compatibility fallback for old schemas where timestamp
+              // and/or assigning-teacher columns are unavailable.
+              rows = await _supabase
+                  .from('event_assistants')
+                  .select('id, event_id, allow_scan, assigned_at')
+                  .eq('student_id', currentUserId)
+                  .eq('allow_scan', true)
+                  .limit(60);
+            }
+          }
+
+          final candidateRows = <Map<String, dynamic>>[];
+          final teacherIds = <String>{};
+          final eventIds = <String>{};
 
           for (final raw in (rows as List)) {
             final row = _asStringMap(raw);
-            final eventId = row['event_id']?.toString() ?? '';
-            if (eventId.isEmpty) continue;
+            final eventId = row['event_id']?.toString().trim() ?? '';
+            final assignedBy =
+                row['assigned_by_teacher_id']?.toString().trim() ?? '';
+            if (eventId.isEmpty || assignedBy.isEmpty) continue;
 
-            final assignedAtRaw = row['created_at'];
-            final assignedAt = _tryParseLocalDate(assignedAtRaw);
-            if (assignedAt == null) continue;
-            if (now.difference(assignedAt).inDays > 14) continue;
+            candidateRows.add(row);
+            teacherIds.add(assignedBy);
+            eventIds.add(eventId);
+          }
 
-            final event = _extractRelatedMap(row['events']);
-            final eventTitle = event['title']?.toString().trim().isNotEmpty == true
-                ? event['title'].toString().trim()
-                : 'Event';
+          if (candidateRows.isNotEmpty &&
+              teacherIds.isNotEmpty &&
+              eventIds.isNotEmpty) {
+            final allowedTeacherEventPairs = <String>{};
+            try {
+              final teacherAssignmentRows = await _supabase
+                  .from('event_teacher_assignments')
+                  .select('event_id,teacher_id')
+                  .inFilter('event_id', eventIds.toList())
+                  .inFilter('teacher_id', teacherIds.toList())
+                  .eq('can_scan', true)
+                  .limit(500);
 
-            notifications.add(
-              AppNotification(
-                id: 'scan_assign_$eventId',
-                title: 'Scanner Assignment',
-                message:
-                    'You were assigned by the admin/teacher to help take attendance for "$eventTitle". Open the QR Scanner when instructed.',
-                timestamp: assignedAt,
-                type: NotificationType.info,
-                eventId: eventId,
-              ),
-            );
+              for (final raw
+                  in List<Map<String, dynamic>>.from(teacherAssignmentRows)) {
+                final eventId = raw['event_id']?.toString().trim() ?? '';
+                final teacherId = raw['teacher_id']?.toString().trim() ?? '';
+                if (eventId.isEmpty || teacherId.isEmpty) continue;
+                allowedTeacherEventPairs.add('$eventId|$teacherId');
+              }
+            } catch (_) {
+              // Fail closed for security: don't show scanner assignment
+              // notifications when assignment verification is unavailable.
+            }
+
+            for (final row in candidateRows) {
+              final eventId = row['event_id']?.toString().trim() ?? '';
+              final assignedBy =
+                  row['assigned_by_teacher_id']?.toString().trim() ?? '';
+              if (eventId.isEmpty || assignedBy.isEmpty) continue;
+              if (!allowedTeacherEventPairs.contains('$eventId|$assignedBy')) {
+                continue;
+              }
+
+              final assignedAtRaw =
+                  row['updated_at'] ?? row['assigned_at'] ?? row['created_at'];
+              final assignedAt = _tryParseLocalDate(assignedAtRaw) ?? now;
+              final revisionSource = (row['updated_at'] ??
+                      row['assigned_at'] ??
+                      row['created_at'] ??
+                      row['id'] ??
+                      '$eventId-$assignedBy')
+                  .toString();
+              final revisionHash = revisionSource.hashCode.abs();
+
+              final event = _extractRelatedMap(row['events']);
+              final eventTitle =
+                  event['title']?.toString().trim().isNotEmpty == true
+                      ? event['title'].toString().trim()
+                      : 'Event';
+
+              notifications.add(
+                AppNotification(
+                  id: 'scan_assign_${eventId}_$revisionHash',
+                  title: 'Scanner Assignment',
+                  message:
+                      'You were assigned by the admin/teacher to help take attendance for "$eventTitle". Open the QR Scanner when instructed.',
+                  timestamp: assignedAt,
+                  type: NotificationType.info,
+                  eventId: eventId,
+                ),
+              );
+            }
           }
         } catch (_) {
           // Keep notifications working if assistant assignment lookup fails.
@@ -804,7 +937,15 @@ class NotificationService {
       }
       
       for (var notif in notifications) {
-        if (readIds.contains(notif.id) || notif.timestamp.isBefore(lastReadDate) || notif.timestamp.isAtSameMomentAs(lastReadDate)) {
+        if (readIds.contains(notif.id)) {
+          notif.isRead = true;
+          continue;
+        }
+
+        final isScannerAssigned = notif.id.startsWith('scan_assign_');
+        if (!isScannerAssigned &&
+            (notif.timestamp.isBefore(lastReadDate) ||
+                notif.timestamp.isAtSameMomentAs(lastReadDate))) {
           notif.isRead = true;
         }
       }
@@ -831,6 +972,7 @@ class NotificationService {
 
       return notifications;
     } catch (e) {
+      debugPrint('Notifications: fatal fetch error: $e');
       return [];
     }
   }

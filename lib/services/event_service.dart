@@ -1,6 +1,9 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:math';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+import '../config/env.dart';
 
 class EventService {
   final _supabase = Supabase.instance.client;
@@ -191,36 +194,92 @@ class EventService {
     return null;
   }
 
-  Future<String> _resolveParticipantNameForRegistration(
+  String _extractAvatarStoragePath(String rawPhotoUrl) {
+    final raw = rawPhotoUrl.trim();
+    if (raw.isEmpty) return '';
+
+    if (!raw.toLowerCase().startsWith('http')) {
+      var normalized = raw.replaceAll('\\', '/').trim();
+      if (normalized.startsWith('/')) {
+        normalized = normalized.substring(1);
+      }
+      if (normalized.startsWith('avatars/')) {
+        normalized = normalized.substring('avatars/'.length);
+      }
+      return normalized;
+    }
+
+    final uri = Uri.tryParse(raw);
+    if (uri == null) return '';
+    final path = uri.path;
+    const publicMarker = '/storage/v1/object/public/avatars/';
+    const signMarker = '/storage/v1/object/sign/avatars/';
+    if (path.contains(publicMarker)) {
+      return path.split(publicMarker).last;
+    }
+    if (path.contains(signMarker)) {
+      return path.split(signMarker).last;
+    }
+    return '';
+  }
+
+  Future<String> _resolveAvatarDisplayUrl(String rawPhotoUrl) async {
+    final raw = rawPhotoUrl.trim();
+    if (raw.isEmpty) return '';
+
+    final avatarPath = _extractAvatarStoragePath(raw);
+    if (avatarPath.isEmpty) return raw;
+
+    try {
+      final signed = await _supabase.storage
+          .from('avatars')
+          .createSignedUrl(avatarPath, 60 * 60 * 24 * 7);
+      if (signed.trim().isNotEmpty) {
+        return signed.trim();
+      }
+    } catch (_) {}
+
+    try {
+      final publicUrl = _supabase.storage.from('avatars').getPublicUrl(
+        avatarPath,
+      );
+      if (publicUrl.trim().isNotEmpty) {
+        return publicUrl.trim();
+      }
+    } catch (_) {}
+
+    return raw;
+  }
+
+  Future<Map<String, String>> _resolveParticipantIdentityForRegistration(
     String registrationId,
   ) async {
-    if (registrationId.trim().isEmpty) return '';
+    final trimmedRegistrationId = registrationId.trim();
+    if (trimmedRegistrationId.isEmpty) {
+      return {'name': '', 'photo_url': '', 'student_id': ''};
+    }
 
     String studentId = '';
+    String participantName = '';
+    String participantPhotoUrl = '';
 
     try {
       final regRows = await _supabase
           .from('event_registrations')
-          .select('student_id, users(first_name,middle_name,last_name,suffix)')
-          .eq('id', registrationId)
+          .select(
+            'student_id, users(first_name,middle_name,last_name,suffix,photo_url)',
+          )
+          .eq('id', trimmedRegistrationId)
           .limit(1);
 
       if (regRows.isNotEmpty) {
         final row = Map<String, dynamic>.from(regRows.first);
-        studentId = row['student_id']?.toString() ?? '';
-        final rawUser = row['users'];
-        Map<String, dynamic>? user;
-        if (rawUser is Map<String, dynamic>) {
-          user = rawUser;
-        } else if (rawUser is Map) {
-          user = Map<String, dynamic>.from(rawUser);
-        } else if (rawUser is List &&
-            rawUser.isNotEmpty &&
-            rawUser.first is Map) {
-          user = Map<String, dynamic>.from(rawUser.first as Map);
-        }
-        final name = _composeDisplayName(user);
-        if (name.isNotEmpty) return name;
+        studentId = (row['student_id']?.toString() ?? '').trim();
+        final user = _extractEmbeddedMap(row['users']);
+        participantName = _composeDisplayName(user);
+        participantPhotoUrl = await _resolveAvatarDisplayUrl(
+          user?['photo_url']?.toString() ?? '',
+        );
       }
     } catch (_) {
       // Fallback query below.
@@ -231,28 +290,41 @@ class EventService {
         final regRows = await _supabase
             .from('event_registrations')
             .select('student_id')
-            .eq('id', registrationId)
+            .eq('id', trimmedRegistrationId)
             .limit(1);
         if (regRows.isNotEmpty) {
-          studentId = regRows.first['student_id']?.toString() ?? '';
+          studentId = (regRows.first['student_id']?.toString() ?? '').trim();
         }
       } catch (_) {}
     }
 
-    if (studentId.isEmpty) return '';
+    if (studentId.isNotEmpty &&
+        (participantName.isEmpty || participantPhotoUrl.isEmpty)) {
+      try {
+        final userRows = await _supabase
+            .from('users')
+            .select('first_name,middle_name,last_name,suffix,photo_url')
+            .eq('id', studentId)
+            .limit(1);
+        if (userRows.isNotEmpty) {
+          final user = Map<String, dynamic>.from(userRows.first);
+          if (participantName.isEmpty) {
+            participantName = _composeDisplayName(user);
+          }
+          if (participantPhotoUrl.isEmpty) {
+            participantPhotoUrl = await _resolveAvatarDisplayUrl(
+              user['photo_url']?.toString() ?? '',
+            );
+          }
+        }
+      } catch (_) {}
+    }
 
-    try {
-      final userRows = await _supabase
-          .from('users')
-          .select('first_name,middle_name,last_name,suffix')
-          .eq('id', studentId)
-          .limit(1);
-      if (userRows.isNotEmpty) {
-        return _composeDisplayName(Map<String, dynamic>.from(userRows.first));
-      }
-    } catch (_) {}
-
-    return '';
+    return {
+      'name': participantName.trim(),
+      'photo_url': participantPhotoUrl.trim(),
+      'student_id': studentId.trim(),
+    };
   }
 
   Future<String> _resolveParticipantNameForUser(String userId) async {
@@ -506,6 +578,9 @@ class EventService {
     required String nowIso,
     required Map<String, dynamic> session,
     required String participantName,
+    required String participantPhotoUrl,
+    required String participantStudentId,
+    required bool dryRun,
   }) async {
     final displayName = session['display_name']?.toString().trim();
     final sessionName = (displayName?.isNotEmpty ?? false)
@@ -513,12 +588,18 @@ class EventService {
         : _sessionDisplayName(session);
 
     Map<String, dynamic> successResponse() {
+      final responseStatus = dryRun ? 'ready_for_confirmation' : 'present';
+      final responseMessage = dryRun
+          ? 'Review participant, then confirm check-in for $sessionName.'
+          : 'Checked in for $sessionName.';
       return {
         'ok': true,
         'ticket_id': ticketId,
-        'status': 'present',
+        'status': responseStatus,
         'participant_name': participantName,
-        'message': 'Checked in for $sessionName.',
+        'participant_photo_url': participantPhotoUrl,
+        'participant_student_id': participantStudentId,
+        'message': responseMessage,
       };
     }
 
@@ -527,6 +608,9 @@ class EventService {
         'ok': false,
         'error': 'This ticket is already recorded for the active seminar.',
         'status': 'already_checked_in',
+        'participant_name': participantName,
+        'participant_photo_url': participantPhotoUrl,
+        'participant_student_id': participantStudentId,
       };
     }
 
@@ -540,6 +624,10 @@ class EventService {
             .limit(1);
         if (existing.isNotEmpty) {
           return alreadyRecordedResponse();
+        }
+
+        if (dryRun) {
+          return successResponse();
         }
 
         await _supabase.from('event_session_attendance').insert({
@@ -589,6 +677,10 @@ class EventService {
             return alreadyRecordedResponse();
           }
 
+          if (dryRun) {
+            return successResponse();
+          }
+
           final payload = <String, dynamic>{
             'status': 'present',
             'check_in_at': nowIso,
@@ -613,6 +705,10 @@ class EventService {
         };
         if (supportsLastScannedAt) {
           insertPayload['last_scanned_at'] = nowIso;
+        }
+
+        if (dryRun) {
+          return successResponse();
         }
 
         await _supabase.from('attendance').insert(insertPayload);
@@ -1288,19 +1384,27 @@ class EventService {
   String _normalizeTargetCourse(String? rawCourse) {
     final normalized = (rawCourse ?? '').trim().toUpperCase();
     if (normalized.isEmpty) return 'ALL';
-    if (normalized == 'BSIT' ||
-        normalized == 'IT' ||
-        normalized.contains('BSIT') ||
-        normalized.contains(' IT')) {
+
+    final compact = normalized.replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    if (compact.isEmpty) return 'ALL';
+    if (compact == 'ALL' ||
+        compact == 'NONE' ||
+        compact == 'ALLLEVELS' ||
+        compact == 'ALLYEARLEVEL' ||
+        compact == 'ALLYEARLEVELS' ||
+        compact == 'ALLCOURSES') {
+      return 'ALL';
+    }
+
+    if (compact == 'BSIT' || compact == 'IT' || compact.contains('BSIT')) {
       return 'BSIT';
     }
-    if (normalized == 'BSCS' ||
-        normalized == 'CS' ||
-        normalized.contains('BSCS') ||
-        normalized.contains(' CS')) {
+    if (compact == 'BSCS' || compact == 'CS' || compact.contains('BSCS')) {
       return 'BSCS';
     }
-    return 'ALL';
+
+    // Preserve non-IT/CS course codes (e.g., BECC) for strict matching.
+    return compact;
   }
 
   String _normalizeTargetYear(String? rawYear) {
@@ -1315,32 +1419,25 @@ class EventService {
         raw == 'ALL' ||
         raw == 'NONE' ||
         raw == 'ALL LEVELS' ||
+        raw == 'ALL YEAR LEVEL' ||
+        raw == 'ALL YEAR LEVELS' ||
         raw == 'ALL COURSES') {
       return {'course': 'ALL', 'year': 'ALL'};
     }
 
-    final pair = RegExp(r'^(BSIT|BSCS)\s*[-_|]\s*([1-4])$').firstMatch(raw);
+    final pair = RegExp(r'^([A-Z0-9]+)\s*[-_|]\s*([1-4])$').firstMatch(raw);
     if (pair != null) {
       return {
-        'course': pair.group(1) ?? 'ALL',
+        'course': _normalizeTargetCourse(pair.group(1)),
         'year': pair.group(2) ?? 'ALL',
       };
-    }
-
-    if (raw == 'BSIT' ||
-        raw == 'BSCS' ||
-        raw == 'IT' ||
-        raw == 'CS' ||
-        raw == 'BSIT STUDENTS' ||
-        raw == 'BSCS STUDENTS') {
-      return {'course': _normalizeTargetCourse(raw), 'year': 'ALL'};
     }
 
     if (['1', '2', '3', '4'].contains(raw)) {
       return {'course': 'ALL', 'year': raw};
     }
 
-    return {'course': 'ALL', 'year': 'ALL'};
+    return {'course': _normalizeTargetCourse(raw), 'year': 'ALL'};
   }
 
   bool _matchesEventTarget(
@@ -3153,6 +3250,100 @@ class EventService {
     }
   }
 
+  Future<void> _dispatchAssistantAssignmentPush({
+    required String eventId,
+    required String studentId,
+    required String teacherId,
+    required bool allowScan,
+  }) async {
+    final baseUrl = Env.mobilePushApiBaseUrl.trim();
+    final eId = eventId.trim();
+    final sId = studentId.trim();
+    final tId = teacherId.trim();
+    if (eId.isEmpty || sId.isEmpty || tId.isEmpty) return;
+    final payload = {
+      'action': 'assistant_assignment',
+      'event_id': eId,
+      'student_id': sId,
+      'teacher_id': tId,
+      'allow_scan': allowScan,
+    };
+    final pushKey = Env.mobilePushApiKey.trim();
+
+    // Preferred path when PHP backend is hosted.
+    if (baseUrl.isNotEmpty) {
+      final normalizedBase = baseUrl.endsWith('/')
+          ? baseUrl.substring(0, baseUrl.length - 1)
+          : baseUrl;
+      final uri = Uri.tryParse(
+        '$normalizedBase/api/mobile_push_dispatch.php',
+      );
+      if (uri != null) {
+        final headers = <String, String>{'Content-Type': 'application/json'};
+        if (pushKey.isNotEmpty) {
+          headers['X-Mobile-Push-Key'] = pushKey;
+        }
+
+        try {
+          final res = await http
+              .post(uri, headers: headers, body: jsonEncode(payload))
+              .timeout(const Duration(seconds: 10));
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            return;
+          }
+          debugPrint(
+            '[push] php dispatch failed (${res.statusCode}): ${res.body}',
+          );
+        } catch (e) {
+          debugPrint('[push] php dispatch error: $e');
+        }
+      }
+    }
+
+  }
+
+  Future<void> _touchAssistantAssignmentTimestamp({
+    required String eventId,
+    required String studentId,
+  }) async {
+    final eId = eventId.trim();
+    final sId = studentId.trim();
+    if (eId.isEmpty || sId.isEmpty) return;
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+
+    try {
+      await _supabase
+          .from('event_assistants')
+          .update({'assigned_at': nowIso, 'updated_at': nowIso})
+          .eq('event_id', eId)
+          .eq('student_id', sId);
+      return;
+    } catch (_) {
+      // Keep fallback attempts below.
+    }
+
+    try {
+      await _supabase
+          .from('event_assistants')
+          .update({'assigned_at': nowIso})
+          .eq('event_id', eId)
+          .eq('student_id', sId);
+      return;
+    } catch (_) {
+      // Keep fallback attempts below.
+    }
+
+    try {
+      await _supabase
+          .from('event_assistants')
+          .update({'updated_at': nowIso})
+          .eq('event_id', eId)
+          .eq('student_id', sId);
+    } catch (_) {
+      // Ignore when assignment timestamp columns do not exist.
+    }
+  }
+
   // Assign or re-assign assistant access for an event.
   Future<Map<String, dynamic>> assignEventAssistant({
     required String eventId,
@@ -3204,6 +3395,16 @@ class EventService {
           );
 
       final list = List<Map<String, dynamic>>.from(res);
+      await _touchAssistantAssignmentTimestamp(
+        eventId: eventId,
+        studentId: studentId,
+      );
+      await _dispatchAssistantAssignmentPush(
+        eventId: eventId,
+        studentId: studentId,
+        teacherId: teacherId,
+        allowScan: allowScan,
+      );
       return {'ok': true, 'assistant': list.isNotEmpty ? list.first : payload};
     } catch (e) {
       if (_isMissingAssistantsTableError(e)) {
@@ -3233,6 +3434,16 @@ class EventService {
               })
               .eq('event_id', eventId)
               .eq('student_id', studentId);
+          await _touchAssistantAssignmentTimestamp(
+            eventId: eventId,
+            studentId: studentId,
+          );
+          await _dispatchAssistantAssignmentPush(
+            eventId: eventId,
+            studentId: studentId,
+            teacherId: teacherId,
+            allowScan: allowScan,
+          );
           final item = Map<String, dynamic>.from(existing.first);
           item['allow_scan'] = allowScan;
           item['assigned_by_teacher_id'] = teacherId;
@@ -3245,6 +3456,16 @@ class EventService {
             .select(
               'id, event_id, student_id, allow_scan, assigned_by_teacher_id',
             );
+        await _touchAssistantAssignmentTimestamp(
+          eventId: eventId,
+          studentId: studentId,
+        );
+        await _dispatchAssistantAssignmentPush(
+          eventId: eventId,
+          studentId: studentId,
+          teacherId: teacherId,
+          allowScan: allowScan,
+        );
         final list = List<Map<String, dynamic>>.from(inserted);
         return {
           'ok': true,
@@ -3292,6 +3513,20 @@ class EventService {
     try {
       final normalizedId = assistantId?.toString() ?? '';
       if (normalizedId.isNotEmpty) {
+        var resolvedStudentId = studentId?.toString().trim() ?? '';
+        if (resolvedStudentId.isEmpty) {
+          try {
+            final row = await _supabase
+                .from('event_assistants')
+                .select('student_id')
+                .eq('id', normalizedId)
+                .maybeSingle();
+            resolvedStudentId = row?['student_id']?.toString().trim() ?? '';
+          } catch (_) {
+            // Best-effort lookup only.
+          }
+        }
+
         await _supabase
             .from('event_assistants')
             .update({
@@ -3299,6 +3534,18 @@ class EventService {
               'assigned_by_teacher_id': teacherId,
             })
             .eq('id', normalizedId);
+        if (resolvedStudentId.isNotEmpty) {
+          await _touchAssistantAssignmentTimestamp(
+            eventId: eId,
+            studentId: resolvedStudentId,
+          );
+          await _dispatchAssistantAssignmentPush(
+            eventId: eId,
+            studentId: resolvedStudentId,
+            teacherId: teacherId,
+            allowScan: allowScan,
+          );
+        }
         return {'ok': true};
       }
 
@@ -3315,6 +3562,13 @@ class EventService {
           })
           .eq('event_id', eId)
           .eq('student_id', sId);
+      await _touchAssistantAssignmentTimestamp(eventId: eId, studentId: sId);
+      await _dispatchAssistantAssignmentPush(
+        eventId: eId,
+        studentId: sId,
+        teacherId: teacherId,
+        allowScan: allowScan,
+      );
 
       return {'ok': true};
     } catch (e) {
@@ -3335,6 +3589,7 @@ class EventService {
   Future<Map<String, dynamic>> checkInParticipantAsTeacher(
     String ticketPayload,
     String teacherId,
+    {bool dryRun = false}
   ) async {
     if (!ticketPayload.startsWith('PULSE-')) {
       return {
@@ -3459,9 +3714,15 @@ class EventService {
       }
 
       final nowIso = DateTime.now().toUtc().toIso8601String();
-      final participantName = await _resolveParticipantNameForRegistration(
+      final participantIdentity = await _resolveParticipantIdentityForRegistration(
         registrationId,
       );
+      final participantName =
+          (participantIdentity['name'] ?? '').trim();
+      final participantPhotoUrl =
+          (participantIdentity['photo_url'] ?? '').trim();
+      final participantStudentId =
+          (participantIdentity['student_id'] ?? '').trim();
       final source = contextMap?['source']?.toString().toLowerCase() ?? 'event';
 
       if (source == 'session') {
@@ -3488,6 +3749,9 @@ class EventService {
           nowIso: nowIso,
           session: session,
           participantName: participantName,
+          participantPhotoUrl: participantPhotoUrl,
+          participantStudentId: participantStudentId,
+          dryRun: dryRun,
         );
       }
 
@@ -3513,6 +3777,21 @@ class EventService {
           'ok': false,
           'error': 'Ticket already checked in.',
           'status': 'already_checked_in',
+          'participant_name': participantName,
+          'participant_photo_url': participantPhotoUrl,
+          'participant_student_id': participantStudentId,
+        };
+      }
+
+      if (dryRun) {
+        return {
+          'ok': true,
+          'ticket_id': ticketId,
+          'status': 'ready_for_confirmation',
+          'participant_name': participantName,
+          'participant_photo_url': participantPhotoUrl,
+          'participant_student_id': participantStudentId,
+          'message': 'Review participant, then confirm check-in.',
         };
       }
 
@@ -3530,6 +3809,8 @@ class EventService {
         'ticket_id': ticketId,
         'status': 'present',
         'participant_name': participantName,
+        'participant_photo_url': participantPhotoUrl,
+        'participant_student_id': participantStudentId,
         'message': 'Check-in successful!',
       };
     } catch (e) {
@@ -3575,6 +3856,7 @@ class EventService {
   Future<Map<String, dynamic>> checkInParticipantAsAssistant(
     String ticketPayload,
     String studentId,
+    {bool dryRun = false}
   ) async {
     if (!ticketPayload.startsWith('PULSE-')) {
       return {
@@ -3699,9 +3981,15 @@ class EventService {
       }
 
       final nowIso = DateTime.now().toUtc().toIso8601String();
-      final participantName = await _resolveParticipantNameForRegistration(
+      final participantIdentity = await _resolveParticipantIdentityForRegistration(
         registrationId,
       );
+      final participantName =
+          (participantIdentity['name'] ?? '').trim();
+      final participantPhotoUrl =
+          (participantIdentity['photo_url'] ?? '').trim();
+      final participantStudentId =
+          (participantIdentity['student_id'] ?? '').trim();
       final source = contextMap?['source']?.toString().toLowerCase() ?? 'event';
 
       if (source == 'session') {
@@ -3728,6 +4016,9 @@ class EventService {
           nowIso: nowIso,
           session: session,
           participantName: participantName,
+          participantPhotoUrl: participantPhotoUrl,
+          participantStudentId: participantStudentId,
+          dryRun: dryRun,
         );
       }
 
@@ -3753,6 +4044,21 @@ class EventService {
           'ok': false,
           'error': 'Ticket already checked in.',
           'status': 'already_checked_in',
+          'participant_name': participantName,
+          'participant_photo_url': participantPhotoUrl,
+          'participant_student_id': participantStudentId,
+        };
+      }
+
+      if (dryRun) {
+        return {
+          'ok': true,
+          'ticket_id': ticketId,
+          'status': 'ready_for_confirmation',
+          'participant_name': participantName,
+          'participant_photo_url': participantPhotoUrl,
+          'participant_student_id': participantStudentId,
+          'message': 'Review participant, then confirm check-in.',
         };
       }
 
@@ -3770,6 +4076,8 @@ class EventService {
         'ticket_id': ticketId,
         'status': 'present',
         'participant_name': participantName,
+        'participant_photo_url': participantPhotoUrl,
+        'participant_student_id': participantStudentId,
         'message': 'Check-in successful!',
       };
     } catch (e) {

@@ -154,6 +154,11 @@ class PushNotificationService {
           payload: payload,
         );
       });
+
+      // Keep token row fresh when Firebase rotates it.
+      _firebaseMessaging.onTokenRefresh.listen((_) {
+        updateToken();
+      });
     }
   }
 
@@ -320,4 +325,3 @@ class PushNotificationService {
     }
   }
 }
-

@@ -60,6 +60,16 @@ class AuthService {
       final userId = parsedId.isNotEmpty
           ? parsedId
           : (prefs.getString('user_id') ?? '');
+      if (parsedId.isEmpty && userId.isNotEmpty) {
+        parsed['id'] = userId;
+      }
+
+      final cachedRole =
+          (parsed['role']?.toString() ?? prefs.getString('user_role') ?? 'student')
+              .trim();
+      if (cachedRole.isNotEmpty) {
+        parsed['role'] = cachedRole;
+      }
 
       if (userId.isNotEmpty) {
         _mergeAvatarCache(parsed, prefs, userId);
@@ -467,12 +477,21 @@ class AuthService {
   // Get sections list for section selection
   Future<List<Map<String, dynamic>>> getSections() async {
     try {
-      final response = await _supabase
-          .from('sections')
-          .select('id, name')
-          .eq('status', 'active')
-          .order('name');
-      return List<Map<String, dynamic>>.from(response);
+      try {
+        final response = await _supabase
+            .from('sections')
+            .select('id, name')
+            .eq('status', 'active')
+            .order('name');
+        return List<Map<String, dynamic>>.from(response);
+      } catch (_) {
+        // Compatibility fallback for schemas without `status` column.
+        final response = await _supabase
+            .from('sections')
+            .select('id, name')
+            .order('name');
+        return List<Map<String, dynamic>>.from(response);
+      }
     } catch (e) {
       return [];
     }

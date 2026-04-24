@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -39,6 +40,15 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
   bool _manualPause = false;
   String _lastScannedCode = '';
   DateTime? _lastScannedAt;
+  bool _isReviewPhase = false;
+  bool _isSubmittingReview = false;
+  String _pendingTicketPayload = '';
+  String _pendingParticipantName = '';
+  String _pendingParticipantPhotoUrl = '';
+  DateTime? _pendingDetectedAt;
+  String _lastVerifiedParticipantName = '';
+  String _lastVerifiedParticipantPhotoUrl = '';
+  DateTime? _lastVerifiedAt;
   static const Duration _sameCodeCooldown = Duration(seconds: 10);
   static const Duration _scanSoundCooldown = Duration(milliseconds: 120);
   static const String _scannerClosedLabel = 'Scanning Closed';
@@ -77,9 +87,25 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
     } catch (_) {}
   }
 
-  Future<void> _playScanSound(String assetPath, {required bool isSuccess}) async {
+  Future<bool> _tryPlayAssetSound(String assetPath, {PlayerMode? mode}) async {
+    try {
+      await _scanSoundPlayer.play(AssetSource(assetPath), mode: mode);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _playScanSound(
+    String assetPath, {
+    required bool isSuccess,
+    bool bypassCooldown = false,
+    String? backupAssetPath,
+    bool alwaysPlaySystemFallback = false,
+  }) async {
     final now = DateTime.now();
-    if (_lastScanSoundAt != null &&
+    if (!bypassCooldown &&
+        _lastScanSoundAt != null &&
         now.difference(_lastScanSoundAt!) < _scanSoundCooldown) {
       return;
     }
@@ -91,20 +117,27 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
       await _scanSoundPlayer.stop();
     } catch (_) {}
 
-    try {
-      await _scanSoundPlayer.play(
-        AssetSource(assetPath),
-        mode: PlayerMode.lowLatency,
-      );
-      playedAsset = true;
-    } catch (_) {
-      try {
-        await _scanSoundPlayer.play(AssetSource(assetPath));
-        playedAsset = true;
-      } catch (_) {}
+    playedAsset = await _tryPlayAssetSound(
+      assetPath,
+      mode: PlayerMode.lowLatency,
+    );
+    if (!playedAsset) {
+      playedAsset = await _tryPlayAssetSound(assetPath);
     }
 
-    if (!playedAsset) {
+    if (!playedAsset &&
+        backupAssetPath != null &&
+        backupAssetPath.trim().isNotEmpty) {
+      playedAsset = await _tryPlayAssetSound(
+        backupAssetPath.trim(),
+        mode: PlayerMode.lowLatency,
+      );
+      if (!playedAsset) {
+        playedAsset = await _tryPlayAssetSound(backupAssetPath.trim());
+      }
+    }
+
+    if (!playedAsset || alwaysPlaySystemFallback) {
       await _playFallbackFeedback(isSuccess: isSuccess);
     }
   }
@@ -115,6 +148,18 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
 
   void _playFailedScanSound() {
     unawaited(_playScanSound('sounds/scan_error.wav', isSuccess: false));
+  }
+
+  void _playReviewScanSound() {
+    unawaited(
+      _playScanSound(
+        'sounds/scan_review.wav',
+        isSuccess: true,
+        bypassCooldown: true,
+        backupAssetPath: 'sounds/scan_success.wav',
+        alwaysPlaySystemFallback: true,
+      ),
+    );
   }
 
   late Connectivity _connectivity;
@@ -175,6 +220,15 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
           _statusColor = Colors.grey.shade700;
           _hasScanResult = false;
           _scanContext = null;
+          _isReviewPhase = false;
+          _isSubmittingReview = false;
+          _pendingTicketPayload = '';
+          _pendingParticipantName = '';
+          _pendingParticipantPhotoUrl = '';
+          _pendingDetectedAt = null;
+          _lastVerifiedParticipantName = '';
+          _lastVerifiedParticipantPhotoUrl = '';
+          _lastVerifiedAt = null;
           _isLoading = true;
         });
       }
@@ -197,6 +251,15 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
           _scanStatus = 'Unable to identify your teacher account.';
           _statusColor = Colors.red.shade700;
           _hasScanResult = false;
+          _isReviewPhase = false;
+          _isSubmittingReview = false;
+          _pendingTicketPayload = '';
+          _pendingParticipantName = '';
+          _pendingParticipantPhotoUrl = '';
+          _pendingDetectedAt = null;
+          _lastVerifiedParticipantName = '';
+          _lastVerifiedParticipantPhotoUrl = '';
+          _lastVerifiedAt = null;
         });
       }
     } catch (_) {
@@ -214,6 +277,15 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
           _scanStatus = _scannerClosedLabel;
           _statusColor = Colors.red.shade700;
           _hasScanResult = false;
+          _isReviewPhase = false;
+          _isSubmittingReview = false;
+          _pendingTicketPayload = '';
+          _pendingParticipantName = '';
+          _pendingParticipantPhotoUrl = '';
+          _pendingDetectedAt = null;
+          _lastVerifiedParticipantName = '';
+          _lastVerifiedParticipantPhotoUrl = '';
+          _lastVerifiedAt = null;
           _isLoading = false;
         });
       }
@@ -256,16 +328,30 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
                 ? ''
                 : eventTitle;
 
-        if (scannerEnabled && !_manualPause) {
+        if (scannerEnabled && !_manualPause && !_isReviewPhase) {
           _isScanning = true;
         } else {
           _isScanning = false;
-          if (!scannerEnabled) _manualPause = false;
+          if (!scannerEnabled) {
+            _manualPause = false;
+            _isReviewPhase = false;
+            _isSubmittingReview = false;
+            _pendingTicketPayload = '';
+            _pendingParticipantName = '';
+            _pendingParticipantPhotoUrl = '';
+            _pendingDetectedAt = null;
+          }
         }
 
         if (normalizedStatus == 'no_assignment' || normalizedStatus == 'error') {
           _isScanning = false;
           _manualPause = false;
+          _isReviewPhase = false;
+          _isSubmittingReview = false;
+          _pendingTicketPayload = '';
+          _pendingParticipantName = '';
+          _pendingParticipantPhotoUrl = '';
+          _pendingDetectedAt = null;
         }
 
         if (!_hasScanResult) {
@@ -294,6 +380,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
         }
         _isScanning = false;
         _manualPause = false;
+        _clearPendingReviewState();
       });
     } finally {
       _isRefreshingContext = false;
@@ -360,8 +447,9 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
     _scanResumeTimer = Timer(delay, () async {
       if (!mounted) return;
       if (_manualPause) return;
+      if (_isReviewPhase || _isSubmittingReview) return;
       await _refreshScanContext(silent: true);
-      if (!mounted || !_scannerEnabled || _manualPause) return;
+      if (!mounted || !_scannerEnabled || _manualPause || _isReviewPhase) return;
       setState(() {
         _isScanning = true;
         if (!_hasScanResult) {
@@ -370,6 +458,108 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
         }
       });
     });
+  }
+
+  void _clearPendingReviewState() {
+    _isReviewPhase = false;
+    _isSubmittingReview = false;
+    _pendingTicketPayload = '';
+    _pendingParticipantName = '';
+    _pendingParticipantPhotoUrl = '';
+    _pendingDetectedAt = null;
+  }
+
+  void _rememberPendingReviewCandidate(
+    String ticketPayload,
+    Map<String, dynamic> response,
+  ) {
+    _isReviewPhase = true;
+    _isSubmittingReview = false;
+    _manualPause = true;
+    _isScanning = false;
+    _pendingTicketPayload = ticketPayload;
+    final participantName =
+        (response['participant_name']?.toString() ?? '').trim();
+    _pendingParticipantName = participantName.isNotEmpty
+        ? participantName
+        : 'Student Candidate';
+    _pendingParticipantPhotoUrl =
+        (response['participant_photo_url']?.toString() ?? '').trim();
+    _pendingDetectedAt = DateTime.now();
+    _scanStatus = 'Review student identity, then tap Confirm or Reject.';
+    _statusColor = const Color(0xFFD4A843);
+    _hasScanResult = true;
+  }
+
+  Future<void> _confirmPendingReview() async {
+    if (!_isReviewPhase || _isSubmittingReview) return;
+    if (_pendingTicketPayload.trim().isEmpty || _teacherId.trim().isEmpty) return;
+
+    final ticketPayload = _pendingTicketPayload.trim();
+    setState(() {
+      _isSubmittingReview = true;
+      _scanStatus = 'Confirming check-in...';
+      _statusColor = const Color(0xFFD4A843);
+      _hasScanResult = false;
+    });
+
+    final res = await _eventService.checkInParticipantAsTeacher(
+      ticketPayload,
+      _teacherId,
+    );
+    if (!mounted) return;
+
+    setState(() {
+      final status = (res['status']?.toString() ?? '').toLowerCase();
+      if (res['ok'] == true) {
+        final participantName =
+            (res['participant_name']?.toString() ?? '').trim();
+        _scanStatus = participantName.isNotEmpty
+            ? 'Success time in: $participantName'
+            : (res['message']?.toString() ?? 'Check-in successful!');
+        _statusColor = TeacherThemeUtils.primary;
+        _rememberVerifiedParticipant(res);
+        _playSuccessScanSound();
+      } else if (status == 'already_checked_in' || status == 'used') {
+        _scanStatus = _normalizeScannerMessage(
+          res['error']?.toString(),
+          fallback: 'Already checked in.',
+        );
+        _statusColor = Colors.orange.shade700;
+        _rememberVerifiedParticipant(res);
+        _playFailedScanSound();
+      } else {
+        _scanStatus = _normalizeScannerMessage(
+          res['error']?.toString(),
+          fallback: 'Check-in failed.',
+        );
+        _statusColor = Colors.red.shade700;
+        _playFailedScanSound();
+      }
+      _hasScanResult = true;
+      _manualPause = false;
+      _clearPendingReviewState();
+    });
+
+    _scheduleScannerResume(
+      delay: (res['ok'] == true)
+          ? const Duration(milliseconds: 700)
+          : const Duration(milliseconds: 900),
+    );
+  }
+
+  void _rejectPendingReview() {
+    if (!_isReviewPhase || _isSubmittingReview) return;
+    _scanResumeTimer?.cancel();
+    setState(() {
+      _scanStatus = 'Scan rejected. No attendance recorded.';
+      _statusColor = Colors.orange.shade700;
+      _hasScanResult = true;
+      _manualPause = false;
+      _clearPendingReviewState();
+    });
+    _playFailedScanSound();
+    _scheduleScannerResume(delay: const Duration(milliseconds: 650));
   }
 
   void _handleDetect(BarcodeCapture capture) async {
@@ -417,25 +607,24 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
           final res = await _eventService.checkInParticipantAsTeacher(
             normalized,
             _teacherId,
+            dryRun: true,
           );
+          var shouldPlayReviewCue = false;
 
           if (mounted) {
             setState(() {
-              if (res['ok'] == true) {
-                final participantName =
-                    (res['participant_name']?.toString() ?? '').trim();
-                _scanStatus = participantName.isNotEmpty
-                    ? 'Success time in: $participantName'
-                    : (res['message']?.toString() ?? 'Check-in successful!');
-                _statusColor = TeacherThemeUtils.primary;
-                _playSuccessScanSound();
-              } else if ((res['status']?.toString() ?? '').toLowerCase() == 'already_checked_in' ||
-                  (res['status']?.toString() ?? '').toLowerCase() == 'used') {
+              final status = (res['status']?.toString() ?? '').toLowerCase();
+              if (res['ok'] == true && status == 'ready_for_confirmation') {
+                _rememberPendingReviewCandidate(normalized, res);
+                shouldPlayReviewCue = true;
+              } else if (status == 'already_checked_in' || status == 'used') {
                 _scanStatus = _normalizeScannerMessage(
                   res['error']?.toString(),
                   fallback: 'Already checked in.',
                 );
                 _statusColor = Colors.orange.shade700;
+                _rememberVerifiedParticipant(res);
+                _clearPendingReviewState();
                 _playFailedScanSound();
               } else {
                 _scanStatus = _normalizeScannerMessage(
@@ -443,16 +632,23 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
                   fallback: 'Check-in failed.',
                 );
                 _statusColor = Colors.red.shade700;
+                _clearPendingReviewState();
                 _playFailedScanSound();
               }
               _hasScanResult = true;
             });
           }
-          _scheduleScannerResume(
-            delay: (res['ok'] == true)
-                ? const Duration(milliseconds: 700)
-                : const Duration(milliseconds: 900),
-          );
+          if (shouldPlayReviewCue) {
+            _playReviewScanSound();
+          }
+          if ((res['status']?.toString() ?? '').toLowerCase() !=
+              'ready_for_confirmation') {
+            _scheduleScannerResume(
+              delay: (res['ok'] == true)
+                  ? const Duration(milliseconds: 700)
+                  : const Duration(milliseconds: 900),
+            );
+          }
         }
         break;
       }
@@ -685,6 +881,202 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
     return text;
   }
 
+  void _rememberVerifiedParticipant(Map<String, dynamic> response) {
+    final participantName =
+        (response['participant_name']?.toString() ?? '').trim();
+    final participantPhotoUrl =
+        (response['participant_photo_url']?.toString() ?? '').trim();
+
+    if (participantName.isEmpty && participantPhotoUrl.isEmpty) {
+      return;
+    }
+
+    _lastVerifiedParticipantName = participantName.isNotEmpty
+        ? participantName
+        : (_lastVerifiedParticipantName.isNotEmpty
+              ? _lastVerifiedParticipantName
+              : 'Verified Student');
+    if (participantPhotoUrl.isNotEmpty) {
+      _lastVerifiedParticipantPhotoUrl = participantPhotoUrl;
+    }
+    _lastVerifiedAt = DateTime.now();
+  }
+
+  String _displayNameInitials(String rawName) {
+    final name = rawName.trim();
+    if (name.isEmpty) return 'ST';
+    final parts = name.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+    if (parts.isEmpty) return 'ST';
+    if (parts.length == 1) {
+      return parts.first.substring(0, min(2, parts.first.length)).toUpperCase();
+    }
+    return (parts.first.substring(0, 1) + parts.last.substring(0, 1))
+        .toUpperCase();
+  }
+
+  Widget _buildVerifiedParticipantAvatar({
+    required String displayName,
+    required String photoUrl,
+  }) {
+    const avatarSize = 56.0;
+    final initials = _displayNameInitials(displayName);
+    final hasRemotePhoto =
+        photoUrl.trim().isNotEmpty && photoUrl.trim().toLowerCase().startsWith('http');
+
+    Widget initialsAvatar() {
+      return Container(
+        width: avatarSize,
+        height: avatarSize,
+        decoration: const BoxDecoration(
+          shape: BoxShape.circle,
+          gradient: LinearGradient(
+            colors: [Color(0xFF0EA5E9), Color(0xFF0284C7)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          initials,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w800,
+            fontSize: 16,
+            letterSpacing: 0.8,
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      width: avatarSize,
+      height: avatarSize,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.black.withValues(alpha: 0.22), width: 1.2),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: hasRemotePhoto
+          ? Image.network(
+              photoUrl.trim(),
+              width: avatarSize,
+              height: avatarSize,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => initialsAvatar(),
+            )
+          : initialsAvatar(),
+    );
+  }
+
+  Widget _buildLastVerifiedOverlay() {
+    final isReviewCandidate = _isReviewPhase;
+    final displayName = (isReviewCandidate
+            ? _pendingParticipantName
+            : _lastVerifiedParticipantName)
+        .trim();
+    final photoUrl = isReviewCandidate
+        ? _pendingParticipantPhotoUrl
+        : _lastVerifiedParticipantPhotoUrl;
+    final verifiedLabel = isReviewCandidate
+        ? (_pendingDetectedAt != null
+              ? 'Review ${_formatStartTime(_pendingDetectedAt!)}'
+              : 'Review Candidate')
+        : (_lastVerifiedAt != null
+              ? 'Verified ${_formatStartTime(_lastVerifiedAt!)}'
+              : 'Verified Student');
+
+    final hasData = displayName.isNotEmpty;
+    final overlayContent = !hasData
+        ? const SizedBox.shrink(key: ValueKey('verified-empty'))
+        : Container(
+            key: ValueKey(
+              '${displayName}_${_lastVerifiedAt?.millisecondsSinceEpoch ?? 0}',
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.72),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.26),
+                  blurRadius: 8,
+                  offset: const Offset(0, 3),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                _buildVerifiedParticipantAvatar(
+                  displayName: displayName,
+                  photoUrl: photoUrl,
+                ),
+                const SizedBox(width: 9),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        verifiedLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.74),
+                          fontSize: 9.5,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.3,
+                        ),
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        displayName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Icon(
+                  isReviewCandidate
+                      ? Icons.visibility_rounded
+                      : Icons.verified_rounded,
+                  color: isReviewCandidate
+                      ? const Color(0xFFFBBF24)
+                      : const Color(0xFF34D399),
+                  size: 18,
+                ),
+              ],
+            ),
+          );
+
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 280),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      transitionBuilder: (child, animation) {
+        final slide = Tween<Offset>(
+          begin: const Offset(0, -0.2),
+          end: Offset.zero,
+        ).animate(animation);
+        final scale = Tween<double>(begin: 0.97, end: 1).animate(animation);
+        return FadeTransition(
+          opacity: animation,
+          child: SlideTransition(
+            position: slide,
+            child: ScaleTransition(scale: scale, child: child),
+          ),
+        );
+      },
+      child: overlayContent,
+    );
+  }
+
   Widget _buildCameraSurface() {
     return (_isScanning && _scannerEnabled)
         ? MobileScanner(
@@ -758,7 +1150,20 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
                   padding: cameraPadding,
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(8),
-                    child: _buildCameraSurface(),
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        Positioned.fill(child: _buildCameraSurface()),
+                        Positioned(
+                          top: 8,
+                          left: 8,
+                          right: 8,
+                          child: IgnorePointer(
+                            child: _buildLastVerifiedOverlay(),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -843,11 +1248,86 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
                   ),
                 ),
                 const SizedBox(height: 16),
+                if (_isReviewPhase) ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: SizedBox(
+                          height: 50,
+                          child: OutlinedButton.icon(
+                            onPressed: _isSubmittingReview
+                                ? null
+                                : _rejectPendingReview,
+                            icon: const Icon(Icons.close_rounded, size: 18),
+                            label: const FittedBox(
+                              fit: BoxFit.scaleDown,
+                              child: Text(
+                                'REJECT',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 0.7,
+                                ),
+                              ),
+                            ),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.red.shade700,
+                              side: BorderSide(color: Colors.red.shade300),
+                              backgroundColor: Colors.white,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: SizedBox(
+                          height: 50,
+                          child: ElevatedButton.icon(
+                            onPressed: _isSubmittingReview
+                                ? null
+                                : _confirmPendingReview,
+                            icon: _isSubmittingReview
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                : const Icon(Icons.check_rounded, size: 18),
+                            label: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              child: Text(
+                                _isSubmittingReview ? 'CONFIRMING' : 'CONFIRM',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 0.7,
+                                ),
+                              ),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF059669),
+                              foregroundColor: Colors.white,
+                              elevation: 3,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 SizedBox(
                   width: double.infinity,
                   height: 56,
                   child: ElevatedButton(
-                    onPressed: !_scannerEnabled
+                    onPressed: (!_scannerEnabled || _isReviewPhase || _isSubmittingReview)
                         ? null
                         : () {
                       _scanResumeTimer?.cancel();
@@ -882,7 +1362,9 @@ class _TeacherScanScreenState extends State<TeacherScanScreen> {
                     child: Text(
                       !_scannerEnabled
                           ? 'WAIT FOR SCAN WINDOW'
-                          : (_isScanning ? 'PAUSE SCANNING' : 'RESUME SCANNING'),
+                          : (_isReviewPhase
+                              ? 'REVIEW IN PROGRESS'
+                              : (_isScanning ? 'PAUSE SCANNING' : 'RESUME SCANNING')),
                       style: const TextStyle(fontWeight: FontWeight.w800, letterSpacing: 1.2, fontSize: 15),
                     ),
                   ),

@@ -148,12 +148,28 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
       }
     }
 
-    final yearLevel = await _authService.getStudentYearLevel();
-    final courseCode = await _authService.getStudentCourseCode();
-    final events = await _eventService.getUpcomingEvents(
+    String? yearLevel;
+    String? courseCode;
+    if (userId.isNotEmpty) {
+      try {
+        final scope = await _eventService.getStudentTargetScope(userId);
+        final scopedYear = (scope['yearLevel']?.toString() ?? '').trim();
+        final scopedCourse = (scope['courseCode']?.toString() ?? '').trim();
+        yearLevel = scopedYear.isEmpty || scopedYear == 'ALL' ? null : scopedYear;
+        courseCode =
+            scopedCourse.isEmpty || scopedCourse == 'ALL' ? null : scopedCourse;
+      } catch (_) {
+        // Keep compatibility fallback below.
+      }
+    }
+
+    yearLevel ??= await _authService.getStudentYearLevel();
+    courseCode ??= await _authService.getStudentCourseCode();
+    final activeEvents = await _eventService.getActiveEvents(
       yearLevel: yearLevel,
       courseCode: courseCode,
     );
+    final events = activeEvents.take(5).toList();
     final unread = await _notifService.getUnreadCount(forceRefresh: true);
     final sections = await _authService.getSections();
     final filteredSections = _filterSectionsForDetectedCourse(sections, user);
@@ -1755,4 +1771,3 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     );
   }
 }
-
