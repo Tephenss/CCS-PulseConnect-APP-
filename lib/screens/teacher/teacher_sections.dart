@@ -166,7 +166,7 @@ class _TeacherSectionsState extends State<TeacherSections> {
           if (_isLoading)
             const SliverFillRemaining(
               child: Center(
-                child: const PulseConnectLoader(),
+                child: PulseConnectLoader(),
               ),
             )
           else if (_sections.isEmpty)

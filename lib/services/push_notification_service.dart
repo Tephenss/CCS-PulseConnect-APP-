@@ -251,12 +251,12 @@ class PushNotificationService {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id');
       if (userId == null || userId.isEmpty) {
-        print('[FCM] No user_id in SharedPreferences, skipping token save.');
+        debugPrint('[FCM] No user_id in SharedPreferences, skipping token save.');
         return;
       }
 
       String? token = await _firebaseMessaging.getToken();
-      print('[FCM] Device token: $token');
+      debugPrint('[FCM] Device token: $token');
 
       if (token != null) {
         // Step 1: Delete ALL existing rows for this token (any user_id)
@@ -274,10 +274,10 @@ class PushNotificationService {
               'token': token,
               'updated_at': DateTime.now().toUtc().toIso8601String(),
             });
-        print('[FCM] Token saved to Supabase successfully.');
+        debugPrint('[FCM] Token saved to Supabase successfully.');
       }
     } catch (e) {
-      print('[FCM] Error saving FCM Token: $e');
+      debugPrint('[FCM] Error saving FCM Token: $e');
     }
   }
   /// Navigate to a specific event if the notification contains an event_id.
@@ -291,7 +291,7 @@ class PushNotificationService {
 
     String? eventId = message.data['event_id'];
     if (eventId != null && eventId.isNotEmpty) {
-      print('[FCM] Tapped notification for event_id: $eventId');
+      debugPrint('[FCM] Tapped notification for event_id: $eventId');
 
       try {
         final user = await _authService.getCurrentUser();
@@ -309,7 +309,7 @@ class PushNotificationService {
           }
         }
       } catch (e) {
-        print('[FCM] Notification route fallback: $e');
+        debugPrint('[FCM] Notification route fallback: $e');
       }
 
       PulseConnectApp.navigatorKey.currentState?.push(
@@ -320,5 +320,4 @@ class PushNotificationService {
     }
   }
 }
-
 

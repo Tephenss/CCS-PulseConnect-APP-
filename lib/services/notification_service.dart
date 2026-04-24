@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'auth_service.dart';
@@ -451,6 +452,13 @@ class NotificationService {
       final currentUserId = userData['id']?.toString() ?? '';
       final registeredEventIds = <String>{};
       final teacherAssignedEventIds = <String, DateTime?>{};
+      String? studentYearLevel;
+      String? studentCourseCode;
+
+      if (role == 'student') {
+        studentYearLevel = await authService.getStudentYearLevel();
+        studentCourseCode = await authService.getStudentCourseCode();
+      }
 
       if (role == 'student' && currentUserId.isNotEmpty) {
         try {
@@ -495,6 +503,15 @@ class NotificationService {
           .order('start_at', ascending: true);
 
       for (var event in events) {
+        if (role == 'student' &&
+            !_eventService.isStudentAllowedForEvent(
+              Map<String, dynamic>.from(event),
+              yearLevel: studentYearLevel,
+              courseCode: studentCourseCode,
+            )) {
+          continue;
+        }
+
         final startAt = DateTime.parse(event['start_at']).toLocal();
         final endAt = DateTime.parse(event['end_at']).toLocal();
         final effectiveEndAt = await _resolveEffectiveEventEnd(event, endAt);
@@ -783,7 +800,7 @@ class NotificationService {
             
         readIds = (readsResponse as List).map((row) => row['notification_id'] as String).toList();
       } catch (e) {
-         print("Error fetching Supabase read statuses: $e");
+         debugPrint("Error fetching Supabase read statuses: $e");
       }
       
       for (var notif in notifications) {
@@ -860,7 +877,7 @@ class NotificationService {
       
       await refresh(force: true);
     } catch (e) {
-      print("Error in markAllAsRead: $e");
+      debugPrint("Error in markAllAsRead: $e");
     }
   }
 
@@ -887,7 +904,7 @@ class NotificationService {
 
       await refresh(force: true);
     } catch (e) {
-      print("Error in markAsRead: $e");
+      debugPrint("Error in markAsRead: $e");
     }
   }
 

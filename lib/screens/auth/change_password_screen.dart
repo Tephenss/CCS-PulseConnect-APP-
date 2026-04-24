@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
 import '../../services/notification_service.dart';
@@ -249,7 +248,7 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> with Ticker
                                 width: 105,
                                 height: 105,
                                 fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) => Image.asset(
+                                errorBuilder: (_, _, _) => Image.asset(
                                   'assets/CCS.png',
                                   width: 105,
                                   height: 105,

@@ -642,7 +642,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         const SizedBox(height: 24),
 
         _buildLabel('Location'),
-        _buildTextField(controller: _locationCtrl, hint: 'e.g. CCS Auditorium', prefixIcon: Icons.location_on_outlined),
+        _buildTextField(controller: _locationCtrl, hint: 'e.g. Laguna University', prefixIcon: Icons.location_on_outlined),
         const SizedBox(height: 24),
         
         Row(
@@ -672,8 +672,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                     items: ['ALL', 'BSIT', 'BSCS'],
                     itemLabels: {
                       'ALL': 'All Courses',
-                      'BSIT': 'BSIT / IT',
-                      'BSCS': 'BSCS / CS',
+                      'BSIT': 'BSIT',
+                      'BSCS': 'BSCS',
                     },
                     onChanged: (v) => setState(() => _targetCourse = v!),
                     prefixIcon: Icons.groups_outlined,

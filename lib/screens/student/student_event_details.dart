@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'student_ticket_view.dart';
@@ -28,6 +29,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
   bool _isRegistered = false;
   bool _isRegistrationResolved = false;
   bool _isRegistering = false;
+  bool _isAccessDenied = false;
   int _participantCount = 0;
   List<Map<String, dynamic>> _eventSessions = [];
 
@@ -61,6 +63,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     var isReg = results[1] as bool;
     final count = results[2] as int;
     final sessions = results[3] as List<Map<String, dynamic>>;
+    var accessDenied = false;
 
     if (!isReg) {
       // Fallback: if registration row check misses, verify by ticket existence.
@@ -70,10 +73,22 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
       }
     }
 
+    if (event != null && !isReg) {
+      final authService = AuthService();
+      final yearLevel = await authService.getStudentYearLevel();
+      final courseCode = await authService.getStudentCourseCode();
+      accessDenied = !_eventService.isStudentAllowedForEvent(
+        Map<String, dynamic>.from(event),
+        yearLevel: yearLevel,
+        courseCode: courseCode,
+      );
+    }
+
     if (mounted) {
       setState(() {
         _event = event ?? _event;
         _isRegistered = isReg;
+        _isAccessDenied = accessDenied;
         _participantCount = count;
         _eventSessions = sessions;
         _isRegistrationResolved = true;
@@ -83,6 +98,17 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
   }
 
   Future<void> _handleRegister() async {
+    if (_isAccessDenied) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('You are not allowed to register for this event.'),
+          ),
+        );
+      }
+      return;
+    }
+
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id') ?? '';
 
@@ -179,6 +205,42 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
       );
     }
 
+    if (_isAccessDenied) {
+      return Scaffold(
+        backgroundColor: Colors.white,
+        appBar: AppBar(
+          backgroundColor: _studentPrimary(context),
+          title: const Text('Event Details', style: TextStyle(color: Colors.white)),
+          iconTheme: const IconThemeData(color: Colors.white),
+        ),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.lock_outline_rounded,
+                  size: 44,
+                  color: _studentPrimary(context),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'This event is not available for your course/year level.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF374151),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
     final title = _event!['title'] as String? ?? 'Untitled';
     final description = _event!['description'] as String? ?? '';
     final location = _event!['location'] as String? ?? 'TBA';
@@ -196,6 +258,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     final usesSessions = usesEventSessions(_event!) || _eventSessions.isNotEmpty;
     final canTapAction =
         _isRegistrationResolved &&
+        !_isAccessDenied &&
         !_isRegistering &&
         !(!isRegistrationOpen && !_isRegistered);
 

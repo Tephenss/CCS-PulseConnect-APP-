@@ -1365,6 +1365,100 @@ class EventService {
     return courseMatches && yearMatches;
   }
 
+  String _normalizeStudentYearFromRaw(dynamic rawYear) {
+    final raw = (rawYear?.toString() ?? '').trim().toUpperCase();
+    if (raw.isEmpty) return 'ALL';
+
+    if (['1', '2', '3', '4'].contains(raw)) return raw;
+
+    final digitMatch = RegExp(r'([1-4])').firstMatch(raw);
+    if (digitMatch != null) {
+      return digitMatch.group(1) ?? 'ALL';
+    }
+
+    if (raw.startsWith('FIRST')) return '1';
+    if (raw.startsWith('SECOND')) return '2';
+    if (raw.startsWith('THIRD')) return '3';
+    if (raw.startsWith('FOURTH')) return '4';
+
+    return 'ALL';
+  }
+
+  Future<Map<String, String>> getStudentTargetScope(String userId) async {
+    final trimmedUserId = userId.trim();
+    if (trimmedUserId.isEmpty) {
+      return {'courseCode': 'ALL', 'yearLevel': 'ALL'};
+    }
+
+    String courseCode = 'ALL';
+    String yearLevel = 'ALL';
+    String sectionId = '';
+
+    try {
+      dynamic rows;
+      try {
+        rows = await _supabase
+            .from('users')
+            .select('course,year_level,section_id')
+            .eq('id', trimmedUserId)
+            .limit(1);
+      } catch (_) {
+        rows = await _supabase
+            .from('users')
+            .select('course,section_id')
+            .eq('id', trimmedUserId)
+            .limit(1);
+      }
+
+      if ((rows as List).isNotEmpty) {
+        final row = Map<String, dynamic>.from(rows.first as Map);
+        courseCode = _normalizeTargetCourse(row['course']?.toString());
+        yearLevel = _normalizeStudentYearFromRaw(row['year_level']);
+        sectionId = row['section_id']?.toString().trim() ?? '';
+      }
+    } catch (_) {
+      // Fall back to defaults.
+    }
+
+    if (sectionId.isNotEmpty && (courseCode == 'ALL' || yearLevel == 'ALL')) {
+      try {
+        final rows = await _supabase
+            .from('sections')
+            .select('name')
+            .eq('id', sectionId)
+            .limit(1);
+        if ((rows as List).isNotEmpty) {
+          final sectionName = rows.first['name']?.toString() ?? '';
+          if (courseCode == 'ALL') {
+            courseCode = _normalizeTargetCourse(sectionName);
+          }
+          if (yearLevel == 'ALL') {
+            yearLevel = _normalizeStudentYearFromRaw(sectionName);
+          }
+        }
+      } catch (_) {
+        // Keep best-effort values.
+      }
+    }
+
+    return {
+      'courseCode': courseCode,
+      'yearLevel': yearLevel,
+    };
+  }
+
+  bool isStudentAllowedForEvent(
+    Map<String, dynamic> event, {
+    String? yearLevel,
+    String? courseCode,
+  }) {
+    return _matchesEventTarget(
+      event,
+      yearLevel: yearLevel,
+      courseCode: courseCode,
+    );
+  }
+
   // Helper to filter events by target participant scope (course + year)
   List<Map<String, dynamic>> _filterByTargetParticipant(
     List<Map<String, dynamic>> events, {
@@ -1498,6 +1592,35 @@ class EventService {
 
       if (existing.isNotEmpty) {
         return {'ok': true, 'already_registered': true};
+      }
+
+      // 1.5 Validate event availability and student target eligibility.
+      final eventRes = await _supabase
+          .from('events')
+          .select('id,status,event_for')
+          .eq('id', eventId)
+          .maybeSingle();
+      if (eventRes == null) {
+        return {'ok': false, 'error': 'Event not found.'};
+      }
+
+      final event = Map<String, dynamic>.from(eventRes);
+      final status = (event['status']?.toString() ?? '').toLowerCase();
+      if (status != 'published') {
+        return {'ok': false, 'error': 'Registration is currently closed.'};
+      }
+
+      final studentScope = await getStudentTargetScope(userId);
+      final canAccess = isStudentAllowedForEvent(
+        event,
+        yearLevel: studentScope['yearLevel'],
+        courseCode: studentScope['courseCode'],
+      );
+      if (!canAccess) {
+        return {
+          'ok': false,
+          'error': 'This event is not available for your course/year level.',
+        };
       }
 
       // 2. Create registration
@@ -4531,7 +4654,8 @@ class EventService {
     return [];
   }
 
-  Future<Map<String, Map<String, dynamic>>> _loadStudentAbsenceReasonMap(
+  Future<({Map<String, Map<String, dynamic>> map, bool resolved})>
+  _loadStudentAbsenceReasonMap(
     String studentId,
   ) async {
     final mapped = <String, Map<String, dynamic>>{};
@@ -4553,12 +4677,14 @@ class EventService {
       }
     } catch (e) {
       if (_isAbsenceReasonsTableUnavailableError(e)) {
-        return mapped;
+        return (map: mapped, resolved: true);
       }
-      return mapped;
+      // On transient failures we mark unresolved so caller can avoid
+      // temporary false-locks while data is inconsistent.
+      return (map: mapped, resolved: false);
     }
 
-    return mapped;
+    return (map: mapped, resolved: true);
   }
 
   Future<List<Map<String, dynamic>>> getStudentPendingAbsenceScopes({
@@ -4569,7 +4695,12 @@ class EventService {
     final pending = <Map<String, dynamic>>[];
     final seenKeys = <String>{};
     final nowUtc = DateTime.now().toUtc();
-    final reasonMap = await _loadStudentAbsenceReasonMap(studentId);
+    final reasonResult = await _loadStudentAbsenceReasonMap(studentId);
+    final reasonMap = reasonResult.map;
+    if (!reasonResult.resolved) {
+      // Fail-open for lock gate when we cannot verify submitted reasons.
+      return [];
+    }
 
     final registrationRows = await _fetchStudentRegistrationRowsWithEvents(
       studentId,
@@ -4619,6 +4750,7 @@ class EventService {
         final presentBySession = <String, bool>{};
         final absentBySession = <String, bool>{};
         var loadedFromSnapshot = false;
+        var attendanceStateResolved = false;
 
         // Primary read path: server-side snapshot RPC (same source used by web-aligned fetch).
         try {
@@ -4647,6 +4779,7 @@ class EventService {
             }
           }
           loadedFromSnapshot = true;
+          attendanceStateResolved = true;
         } catch (_) {
           // Fallback to direct table reads for deployments without RPC.
         }
@@ -4682,6 +4815,7 @@ class EventService {
                 absentBySession[sid] = true;
               }
             }
+            attendanceStateResolved = true;
           } catch (_) {
             // Continue to fallback storage if available.
           }
@@ -4705,9 +4839,15 @@ class EventService {
                 absentBySession[sid] = true;
               }
             }
+            attendanceStateResolved = true;
           } catch (_) {
             // Ignore fallback read failure and continue.
           }
+        }
+
+        if (!attendanceStateResolved) {
+          // If all attendance sources failed, avoid generating a transient lock.
+          continue;
         }
 
         final sessionMeta = <Map<String, dynamic>>[];
@@ -5048,4 +5188,3 @@ class EventService {
     }
   }
 }
-

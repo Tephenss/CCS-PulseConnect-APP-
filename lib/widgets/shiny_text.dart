@@ -127,14 +127,3 @@ class _ShinyTextState extends State<ShinyText> with SingleTickerProviderStateMix
     );
   }
 }
-
-class _GradientRotation extends GradientTransform {
-  final double progress;
-  const _GradientRotation(this.progress);
-
-  @override
-  Matrix4? transform(Rect bounds, {TextDirection? textDirection}) {
-    final double center = bounds.width * progress;
-    return Matrix4.identity()..translate(-center, 0.0);
-  }
-}

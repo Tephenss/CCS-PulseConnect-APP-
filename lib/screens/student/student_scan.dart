@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../services/auth_service.dart';
@@ -19,6 +21,80 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
   static const String _scannerClosedLabel = 'Scanning Closed';
   static const Duration _manilaOffset = Duration(hours: 8);
   static const Duration _sameCodeCooldown = Duration(seconds: 10);
+  static const Duration _scanSoundCooldown = Duration(milliseconds: 120);
+  final AudioPlayer _scanSoundPlayer = AudioPlayer();
+  DateTime? _lastScanSoundAt;
+  bool _scanSoundConfigured = false;
+
+  Future<void> _configureScanSoundPlayer() async {
+    if (_scanSoundConfigured) return;
+    _scanSoundConfigured = true;
+    try {
+      await _scanSoundPlayer.setPlayerMode(PlayerMode.lowLatency);
+    } catch (_) {}
+    try {
+      await _scanSoundPlayer.setReleaseMode(ReleaseMode.stop);
+    } catch (_) {}
+    try {
+      await _scanSoundPlayer.setVolume(1.0);
+    } catch (_) {}
+  }
+
+  Future<void> _playFallbackFeedback({required bool isSuccess}) async {
+    try {
+      await SystemSound.play(
+        isSuccess ? SystemSoundType.click : SystemSoundType.alert,
+      );
+    } catch (_) {}
+
+    try {
+      if (isSuccess) {
+        await HapticFeedback.lightImpact();
+      } else {
+        await HapticFeedback.heavyImpact();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _playScanSound(String assetPath, {required bool isSuccess}) async {
+    final now = DateTime.now();
+    if (_lastScanSoundAt != null &&
+        now.difference(_lastScanSoundAt!) < _scanSoundCooldown) {
+      return;
+    }
+    _lastScanSoundAt = now;
+
+    await _configureScanSoundPlayer();
+    var playedAsset = false;
+    try {
+      await _scanSoundPlayer.stop();
+    } catch (_) {}
+
+    try {
+      await _scanSoundPlayer.play(
+        AssetSource(assetPath),
+        mode: PlayerMode.lowLatency,
+      );
+      playedAsset = true;
+    } catch (_) {
+      try {
+        await _scanSoundPlayer.play(AssetSource(assetPath));
+        playedAsset = true;
+      } catch (_) {}
+    }
+
+    if (!playedAsset) {
+      await _playFallbackFeedback(isSuccess: isSuccess);
+    }
+  }
+
+  void _playSuccessScanSound() {
+    unawaited(_playScanSound('sounds/scan_success.wav', isSuccess: true));
+  }
+
+  void _playFailedScanSound() {
+    unawaited(_playScanSound('sounds/scan_error.wav', isSuccess: false));
+  }
 
   final AuthService _authService = AuthService();
   final EventService _eventService = EventService();
@@ -55,6 +131,7 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
   @override
   void initState() {
     super.initState();
+    unawaited(_configureScanSoundPlayer());
     _initScannerAccess();
   }
 
@@ -62,6 +139,7 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
   void dispose() {
     _scanResumeTimer?.cancel();
     _contextRefreshTimer?.cancel();
+    _scanSoundPlayer.dispose();
     super.dispose();
   }
 
@@ -264,6 +342,7 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
                   ? 'Success time in: $participantName'
                   : (res['message']?.toString() ?? 'Check-in successful!');
               _statusColor = const Color(0xFF064E3B);
+              _playSuccessScanSound();
             } else {
               _scanStatus = _normalizeScannerMessage(
                 res['error']?.toString(),
@@ -272,6 +351,7 @@ class _StudentScanScreenState extends State<StudentScanScreen> {
               _statusColor = status == 'already_checked_in' || status == 'used'
                   ? Colors.orange.shade700
                   : Colors.red.shade700;
+              _playFailedScanSound();
             }
             _hasScanResult = true;
           });

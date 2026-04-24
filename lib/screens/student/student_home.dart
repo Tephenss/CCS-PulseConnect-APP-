@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -238,7 +238,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   String _formatScopeDateTime(dynamic rawIso) {
     final parsed = parseStoredEventDateTime(rawIso?.toString());
     if (parsed == null) return 'N/A';
-    return DateFormat('MMM dd, yyyy • h:mm a').format(parsed);
+    return DateFormat('MMM dd, yyyy - h:mm a').format(parsed);
   }
 
   String _scopeSummaryLabel(Map<String, dynamic> scope) {
@@ -247,7 +247,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     if (scopeType == 'session') {
       final sessionTitle =
           (scope['session_title']?.toString() ?? 'Seminar').trim();
-      return '$eventTitle • $sessionTitle';
+      return '$eventTitle - $sessionTitle';
     }
     return eventTitle;
   }
@@ -632,7 +632,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                 if (_pendingAbsenceScopes.length > 1) ...[
                   const SizedBox(height: 20),
                   DropdownButtonFormField<String>(
-                    value: _selectedAbsenceScopeKey ??
+                    initialValue: _selectedAbsenceScopeKey ??
                         (_pendingAbsenceScopes.first['scope_key']?.toString()),
                     dropdownColor: const Color(0xFF1C1C22),
                     iconEnabledColor: const Color(0xFFA1A1AA),
@@ -724,12 +724,12 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
       height: 88,
       width: 88,
       fit: BoxFit.contain,
-      errorBuilder: (_, __, ___) => Image.asset(
+      errorBuilder: (_, _, _) => Image.asset(
         'assets/BSIT.png',
         height: 88,
         width: 88,
         fit: BoxFit.contain,
-        errorBuilder: (_, __, ___) => Image.asset(
+        errorBuilder: (_, _, _) => Image.asset(
           'assets/CCS.png',
           height: 88,
           width: 88,
@@ -823,7 +823,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                               ),
                             ),
                           DropdownButtonFormField<String>(
-                            value: _selectedSectionId,
+                            initialValue: _selectedSectionId,
                             dropdownColor: const Color(0xFF1C1C22),
                             iconEnabledColor: const Color(0xFFA1A1AA),
                             style: const TextStyle(
@@ -1031,7 +1031,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
-        // App Bar Header — Solid Dark Maroon Design
+        // App Bar Header â€” Solid Dark Maroon Design
         SliverToBoxAdapter(
           child: Container(
             decoration: BoxDecoration(
@@ -1131,8 +1131,10 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                                 icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
                                 onPressed: () async {
                                   await _refreshUnreadCount();
+                                  if (!mounted) return;
                                   final result = await showNotificationsModal(context);
-                                  if (result != null && result is int) {
+                                  if (!mounted) return;
+                                  if (result is int) {
                                     setState(() => _currentIndex = result);
                                   }
                                   await _refreshUnreadCount();
@@ -1753,3 +1755,4 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     );
   }
 }
+

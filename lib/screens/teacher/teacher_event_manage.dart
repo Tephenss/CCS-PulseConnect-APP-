@@ -114,12 +114,12 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
 
   String _payloadSessionId(PostgresChangePayload payload) {
     final newRecord = payload.newRecord;
-    if (newRecord is Map && newRecord['session_id'] != null) {
+    if (newRecord['session_id'] != null) {
       final sid = newRecord['session_id'].toString().trim();
       if (sid.isNotEmpty) return sid;
     }
     final oldRecord = payload.oldRecord;
-    if (oldRecord is Map && oldRecord['session_id'] != null) {
+    if (oldRecord['session_id'] != null) {
       final sid = oldRecord['session_id'].toString().trim();
       if (sid.isNotEmpty) return sid;
     }
@@ -244,8 +244,11 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       if (u is Map) {
         final id = (u['id_number'] ?? '').toString().trim();
         final sc = (u['student_id'] ?? '').toString().trim();
-        if (id.isNotEmpty && id != 'null') idNum = id;
-        else if (sc.isNotEmpty && sc != 'null') idNum = sc;
+        if (id.isNotEmpty && id != 'null') {
+          idNum = id;
+        } else if (sc.isNotEmpty && sc != 'null') {
+          idNum = sc;
+        }
       }
 
       candidates.add({
@@ -698,7 +701,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                           )
                         : ListView.separated(
                             itemCount: filtered.length,
-                            separatorBuilder: (_, __) => const SizedBox(height: 8),
+                            separatorBuilder: (_, _) => const SizedBox(height: 8),
                             itemBuilder: (listContext, index) {
                               final c = filtered[index];
                               final name = c['name'] ?? 'Student';
@@ -1919,7 +1922,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                             scale: 0.85,
                             child: Switch(
                               value: a['allow_scan'] == true,
-                              activeColor: Colors.white,
+                              activeThumbColor: Colors.white,
                               activeTrackColor: TeacherThemeUtils.primary,
                               inactiveThumbColor: Colors.grey.shade400,
                               inactiveTrackColor: Colors.grey.shade200,
@@ -1938,7 +1941,5 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     );
   }
 }
-
-
 
 

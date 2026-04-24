@@ -47,8 +47,8 @@ class CourseThemeUtils {
   }
 
   static bool isGreenStudentPrimary(Color primary) {
-    return primary.value == const Color(0xFF047857).value ||
-        primary.value == const Color(0xFF16A34A).value;
+    return primary.toARGB32() == const Color(0xFF047857).toARGB32() ||
+        primary.toARGB32() == const Color(0xFF16A34A).toARGB32();
   }
 
   static Color studentDarkFromPrimary(Color primary) {

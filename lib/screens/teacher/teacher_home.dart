@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -38,7 +38,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   int _currentHeaderSlide = 0;
   StreamSubscription<int>? _unreadSubscription;
 
-  // Softer teacher palette (sky → deep) to reduce eye strain vs navy.
+  // Softer teacher palette (sky â†’ deep) to reduce eye strain vs navy.
   static const Color _teacherPrimary = Color(0xFF0EA5E9); // sky-500
   static const Color _teacherDark = Color(0xFF0C4A6E); // sky-900
   static const Color _teacherMid = Color(0xFF0369A1); // sky-700
@@ -357,9 +357,11 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                                   icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
                                   onPressed: () async {
                                     await _refreshUnreadCount();
+                                    if (!mounted) return;
                                     final result = await showNotificationsModal(context);
+                                    if (!mounted) return;
 
-                                    if (result != null && result is int) {
+                                    if (result is int) {
                                       setState(() {
                                         _currentIndex = result;
                                       });
@@ -802,5 +804,6 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     );
   }
 }
+
 
 

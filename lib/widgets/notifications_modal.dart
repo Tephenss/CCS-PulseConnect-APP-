@@ -357,9 +357,8 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
     final role = (await _auth.getCurrentUser())?['role']?.toString().toLowerCase() ?? 'student';
     if (!mounted) return;
 
-    Navigator.pop(context);
-
     if (n.id.startsWith('cert_')) {
+      Navigator.pop(context);
       await Future<void>.delayed(const Duration(milliseconds: 120));
       if (!mounted) return;
       Navigator.of(context).push(
@@ -371,26 +370,55 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
     final eventId = n.eventId?.trim() ?? '';
     if (eventId.isEmpty) return;
 
-    await Future<void>.delayed(const Duration(milliseconds: 120));
-    if (!mounted) return;
+    Map<String, dynamic>? event;
+    try {
+      event = await _eventService.getEventById(eventId);
+    } catch (_) {
+      event = null;
+    }
 
     if (role == 'teacher') {
-      try {
-        final event = await _eventService.getEventById(eventId);
-        if (event != null && mounted) {
-          Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => TeacherEventManage(event: event)),
-          );
-          return;
-        }
-      } catch (_) {
-        // Fall through to the student-style event details route if loading fails.
+      if (event != null && mounted) {
+        Navigator.pop(context);
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+        if (!mounted) return;
+        Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => TeacherEventManage(event: event!)),
+        );
+        return;
+      }
+    }
+
+    if (role == 'student' && event != null) {
+      final yearLevel = await _auth.getStudentYearLevel();
+      final courseCode = await _auth.getStudentCourseCode();
+      final allowed = _eventService.isStudentAllowedForEvent(
+        event,
+        yearLevel: yearLevel,
+        courseCode: courseCode,
+      );
+      if (!allowed) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('This event is not available for your course/year level.'),
+          ),
+        );
+        return;
       }
     }
 
     if (!mounted) return;
+    Navigator.pop(context);
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+    if (!mounted) return;
     Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => StudentEventDetails(eventId: eventId)),
+      MaterialPageRoute(
+        builder: (_) => StudentEventDetails(
+          eventId: eventId,
+          initialEvent: event,
+        ),
+      ),
     );
   }
 }

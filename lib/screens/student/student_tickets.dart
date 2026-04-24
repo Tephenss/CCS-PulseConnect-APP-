@@ -285,7 +285,7 @@ class _StudentTicketsState extends State<StudentTickets> {
         decoration: BoxDecoration(
           boxShadow: [
             BoxShadow(
-              color: chromeColor.withOpacity(0.35),
+              color: chromeColor.withValues(alpha: 0.35),
               blurRadius: 20,
               offset: const Offset(0, 10),
             ),
@@ -367,7 +367,7 @@ class _StudentTicketsState extends State<StudentTickets> {
                                       fontSize: 12,
                                       letterSpacing: 1.2,
                                       shadows: [
-                                        Shadow(color: accentColor.withOpacity(0.3), offset: const Offset(0, 1), blurRadius: 2),
+                                        Shadow(color: accentColor.withValues(alpha: 0.3), offset: const Offset(0, 1), blurRadius: 2),
                                       ],
                                     ),
                                     maxLines: 1,
@@ -408,9 +408,9 @@ class _StudentTicketsState extends State<StudentTickets> {
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                               decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.15),
+                                color: Colors.white.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: Colors.white.withOpacity(0.1)),
+                                border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
@@ -432,7 +432,7 @@ class _StudentTicketsState extends State<StudentTickets> {
                                         Text(
                                           '${DateFormat('hh:mm a').format(startDate)} - ${DateFormat('hh:mm a').format(endDate)}',
                                           style: TextStyle(
-                                            color: Colors.white.withOpacity(0.8),
+                                            color: Colors.white.withValues(alpha: 0.8),
                                             fontSize: 10,
                                             fontWeight: FontWeight.w600,
                                           ),
@@ -486,7 +486,7 @@ class _StudentTicketsState extends State<StudentTickets> {
                                   color: Colors.white,
                                   borderRadius: BorderRadius.circular(12),
                                   boxShadow: [
-                                    BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 8, offset: const Offset(0, 4)),
+                                    BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 8, offset: const Offset(0, 4)),
                                   ],
                                 ),
                                 child: QrImageView(
@@ -508,7 +508,7 @@ class _StudentTicketsState extends State<StudentTickets> {
                                 'TICKET ID',
                                 style: TextStyle(
                                   fontSize: 10, 
-                                  color: Colors.white.withOpacity(0.7),
+                                  color: Colors.white.withValues(alpha: 0.7),
                                   fontWeight: FontWeight.w800,
                                   letterSpacing: 0.5,
                                 ),
@@ -552,7 +552,7 @@ class _StudentTicketsState extends State<StudentTickets> {
           child: Container(
             width: 1.5,
             margin: const EdgeInsets.symmetric(vertical: 3),
-            color: index.isEven ? Colors.white.withOpacity(0.2) : Colors.transparent,
+            color: index.isEven ? Colors.white.withValues(alpha: 0.2) : Colors.transparent,
           ),
         ),
       ),

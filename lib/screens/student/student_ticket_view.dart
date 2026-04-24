@@ -396,7 +396,7 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                               Container(
                                 padding: const EdgeInsets.all(28),
                                 decoration: BoxDecoration(
-                                  border: Border(bottom: BorderSide(color: Colors.white.withOpacity(0.05))),
+                                  border: Border(bottom: BorderSide(color: Colors.white.withValues(alpha: 0.05))),
                                 ),
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -443,7 +443,7 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                                     Text(
                                       'CCS Exclusive Event'.toUpperCase(),
                                       style: TextStyle(
-                                        color: const Color(0xFFD4A843).withOpacity(0.8),
+                                        color: const Color(0xFFD4A843).withValues(alpha: 0.8),
                                         fontSize: 12,
                                         fontWeight: FontWeight.w800,
                                         letterSpacing: 1.0,
@@ -512,7 +512,7 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                                       decoration: BoxDecoration(
                                         color: Colors.white, 
                                         borderRadius: BorderRadius.circular(16),
-                                        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10, offset: const Offset(0, 5))],
+                                        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 10, offset: const Offset(0, 5))],
                                       ),
                                       child: QrImageView(
                                         data: 'PULSE-$ticketId',

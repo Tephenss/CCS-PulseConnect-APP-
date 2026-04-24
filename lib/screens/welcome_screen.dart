@@ -12,7 +12,8 @@ class WelcomeScreen extends StatefulWidget {
   State<WelcomeScreen> createState() => _WelcomeScreenState();
 }
 
-class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateMixin {
+class _WelcomeScreenState extends State<WelcomeScreen>
+    with TickerProviderStateMixin {
   String _selectedRole = 'Student';
 
   // Animation Controller - 9s cycle matching the CSS
@@ -174,7 +175,7 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                 errorBuilder: (context, error, stackTrace) => const SizedBox(),
               ),
             ),
-            
+
             // Interactive Flashlight Overlay
             AnimatedOpacity(
               duration: const Duration(milliseconds: 300),
@@ -215,8 +216,14 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                             center: Alignment(-0.3 + 0.6 * t, -0.5 + 0.3 * t),
                             radius: 1.1 + 0.15 * t,
                             colors: [
-                              (_selectedRole == 'Teacher' ? TeacherThemeUtils.dark : const Color(0xFF6F1D2D)).withValues(alpha: 0.82 + 0.08 * t),
-                              (_selectedRole == 'Teacher' ? TeacherThemeUtils.primary : const Color(0xFF4C0519)).withValues(alpha: 0.5 + 0.15 * t),
+                              (_selectedRole == 'Teacher'
+                                      ? TeacherThemeUtils.dark
+                                      : const Color(0xFF6F1D2D))
+                                  .withValues(alpha: 0.82 + 0.08 * t),
+                              (_selectedRole == 'Teacher'
+                                      ? TeacherThemeUtils.primary
+                                      : const Color(0xFF4C0519))
+                                  .withValues(alpha: 0.5 + 0.15 * t),
                               const Color(0xFF09090B),
                             ],
                             stops: [0.0, 0.35 + 0.1 * t, 0.8],
@@ -228,24 +235,27 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                 ),
               ),
             ),
-            
+
             // Content
             SafeArea(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 32),
-                child: Column(
-                  children: [
-                    const Spacer(flex: 3),
+                child: SingleChildScrollView(
+                  child: Column(
+                    children: [
+                      SizedBox(height: size.height * 0.06),
 
-                    // Collision Animation Header
-                    SizedBox(
-                      height: 200,
-                      width: double.infinity,
-                      child: AnimatedBuilder(
+                      // Collision Animation Header
+                      SizedBox(
+                        height: 200,
+                        width: double.infinity,
+                        child: AnimatedBuilder(
                           animation: _collisionController,
                           builder: (context, child) {
                             final t = _collisionController.value;
-                            final halfW = size.width * 0.6; // how far off-screen logos start
+                            final halfW =
+                                size.width *
+                                0.6; // how far off-screen logos start
 
                             // === BSIT Logo (collideLeft CSS) ===
                             double bsitX = -halfW;
@@ -364,15 +374,26 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                                           opacity: bsitOpacity.clamp(0.0, 1.0),
                                           child: Container(
                                             decoration: BoxDecoration(
-                                              boxShadow: [BoxShadow(color: const Color(0xFF9F1239).withValues(alpha: 0.5), blurRadius: 20)],
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: const Color(
+                                                    0xFF9F1239,
+                                                  ).withValues(alpha: 0.5),
+                                                  blurRadius: 20,
+                                                ),
+                                              ],
                                             ),
-                                            child: Image.asset('assets/BSIT.png', width: 80, height: 80),
+                                            child: Image.asset(
+                                              'assets/BSIT.png',
+                                              width: 80,
+                                              height: 80,
+                                            ),
                                           ),
                                         ),
                                       ),
                                     ),
                                   ),
-                                
+
                                 // CS Logo (Right)
                                 if (csOpacity > 0)
                                   Transform.translate(
@@ -385,9 +406,20 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                                           opacity: csOpacity.clamp(0.0, 1.0),
                                           child: Container(
                                             decoration: BoxDecoration(
-                                              boxShadow: [BoxShadow(color: const Color(0xFF1D4ED8).withValues(alpha: 0.5), blurRadius: 20)],
+                                              boxShadow: [
+                                                BoxShadow(
+                                                  color: const Color(
+                                                    0xFF1D4ED8,
+                                                  ).withValues(alpha: 0.5),
+                                                  blurRadius: 20,
+                                                ),
+                                              ],
                                             ),
-                                            child: Image.asset('assets/CS.png', width: 80, height: 80),
+                                            child: Image.asset(
+                                              'assets/CS.png',
+                                              width: 80,
+                                              height: 80,
+                                            ),
                                           ),
                                         ),
                                       ),
@@ -396,17 +428,33 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
 
                                 // Lightning bolt
                                 if (t >= 0.218 && t < 0.245)
-                                  Positioned(
-                                    top: 0,
-                                    child: _buildLightning(t),
-                                  ),
+                                  Positioned(top: 0, child: _buildLightning(t)),
 
                                 // Spark lines (4 diagonal directions)
-                                _buildSpark(t, 0.785, 60, -60),   // top-right 45deg
-                                _buildSpark(t, -0.785, -60, -60),  // top-left -45deg
-                                _buildSpark(t, 2.356, 60, 60),    // bottom-right 135deg
-                                _buildSpark(t, -2.356, -60, 60),   // bottom-left -135deg
-
+                                _buildSpark(
+                                  t,
+                                  0.785,
+                                  60,
+                                  -60,
+                                ), // top-right 45deg
+                                _buildSpark(
+                                  t,
+                                  -0.785,
+                                  -60,
+                                  -60,
+                                ), // top-left -45deg
+                                _buildSpark(
+                                  t,
+                                  2.356,
+                                  60,
+                                  60,
+                                ), // bottom-right 135deg
+                                _buildSpark(
+                                  t,
+                                  -2.356,
+                                  -60,
+                                  60,
+                                ), // bottom-left -135deg
                                 // Flash Burst
                                 if (flashOpacity > 0)
                                   Transform.scale(
@@ -420,9 +468,27 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                                           shape: BoxShape.circle,
                                           color: const Color(0xFFFEF3C7),
                                           boxShadow: [
-                                            BoxShadow(color: const Color(0xFFFDE68A).withValues(alpha: 0.9), blurRadius: 60, spreadRadius: 40),
-                                            BoxShadow(color: const Color(0xFFF59E0B).withValues(alpha: 0.7), blurRadius: 100, spreadRadius: 60),
-                                            BoxShadow(color: const Color(0xFFD97706).withValues(alpha: 0.5), blurRadius: 150, spreadRadius: 80),
+                                            BoxShadow(
+                                              color: const Color(
+                                                0xFFFDE68A,
+                                              ).withValues(alpha: 0.9),
+                                              blurRadius: 60,
+                                              spreadRadius: 40,
+                                            ),
+                                            BoxShadow(
+                                              color: const Color(
+                                                0xFFF59E0B,
+                                              ).withValues(alpha: 0.7),
+                                              blurRadius: 100,
+                                              spreadRadius: 60,
+                                            ),
+                                            BoxShadow(
+                                              color: const Color(
+                                                0xFFD97706,
+                                              ).withValues(alpha: 0.5),
+                                              blurRadius: 150,
+                                              spreadRadius: 80,
+                                            ),
                                           ],
                                         ),
                                       ),
@@ -439,9 +505,21 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                                         opacity: ccsOpacity.clamp(0.0, 1.0),
                                         child: Container(
                                           decoration: BoxDecoration(
-                                            boxShadow: [BoxShadow(color: const Color(0xFFF59E0B).withValues(alpha: 0.4), blurRadius: 30, spreadRadius: 5)],
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: const Color(
+                                                  0xFFF59E0B,
+                                                ).withValues(alpha: 0.4),
+                                                blurRadius: 30,
+                                                spreadRadius: 5,
+                                              ),
+                                            ],
                                           ),
-                                          child: Image.asset('assets/CCS.png', width: 150, height: 150),
+                                          child: Image.asset(
+                                            'assets/CCS.png',
+                                            width: 150,
+                                            height: 150,
+                                          ),
                                         ),
                                       ),
                                     ),
@@ -449,198 +527,262 @@ class _WelcomeScreenState extends State<WelcomeScreen> with TickerProviderStateM
                               ],
                             );
                           },
+                        ),
                       ),
-                    ),
 
-                    const SizedBox(height: 16),
-                    
-                    // Title
-                    Text(
-                      'CCS PULSECONNECT',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 10,
-                        letterSpacing: 4,
-                        color: const Color(0xFFA1A1AA),
-                        fontWeight: FontWeight.w700,
+                      const SizedBox(height: 16),
+
+                      // Title
+                      Text(
+                        'CCS PULSECONNECT',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 10,
+                          letterSpacing: 4,
+                          color: const Color(0xFFA1A1AA),
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 8),
-                    ShinyText(
-                      text: 'Event Management\nSystem',
-                      fontSize: 27,
-                      speed: 2.2,
-                      fontWeight: FontWeight.w900,
-                      textAlign: TextAlign.center,
-                    ),
-
-                    const Spacer(flex: 2),
-
-                    // Controls Header (Welcome Back)
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('WELCOME BACK', style: TextStyle(fontSize: 10, letterSpacing: 4, color: Color(0xFFA1A1AA), fontWeight: FontWeight.w700)),
-                          const SizedBox(height: 6),
-                          const Text('Log in', style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800, color: Colors.white)),
-                          const SizedBox(height: 4),
-                          Text('Choose your role to continue.', style: TextStyle(fontSize: 13, color: Colors.white.withValues(alpha: 0.6))),
-                        ],
+                      const SizedBox(height: 8),
+                      ShinyText(
+                        text: 'Event Management\nSystem',
+                        fontSize: 27,
+                        speed: 2.2,
+                        fontWeight: FontWeight.w900,
+                        textAlign: TextAlign.center,
                       ),
-                    ),
 
-                    const SizedBox(height: 24),
+                      SizedBox(height: size.height * 0.04),
 
-                    Container(
-                      padding: const EdgeInsets.all(4),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF18181B).withValues(alpha: 0.5),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: const Color(0xFF27272A)),
+                      // Controls Header (Welcome Back)
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'WELCOME BACK',
+                              style: TextStyle(
+                                fontSize: 10,
+                                letterSpacing: 4,
+                                color: Color(0xFFA1A1AA),
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            const Text(
+                              'Log in',
+                              style: TextStyle(
+                                fontSize: 28,
+                                fontWeight: FontWeight.w800,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Choose your role to continue.',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.white.withValues(alpha: 0.6),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                      child: Row(
-                        children: ['Student', 'Teacher'].map((role) {
-                          final isSelected = _selectedRole == role;
-                          // Dynamic role color: Maroon for Student, Green for Teacher
-                          final activeColor = role == 'Teacher' 
-                              ? TeacherThemeUtils.primary 
-                              : const Color(0xFF9F1239);
 
-                          return Expanded(
-                            child: GestureDetector(
-                              onTap: () {
-                                setState(() => _selectedRole = role);
-                                // Globally update the app theme to the selected role
-                                PulseConnectApp.of(context).updateTheme(role);
-                              },
-                              child: AnimatedContainer(
-                                duration: const Duration(milliseconds: 250),
-                                padding: const EdgeInsets.symmetric(vertical: 14),
-                                decoration: BoxDecoration(
-                                  color: isSelected
-                                      ? activeColor
-                                      : Colors.transparent,
-                                  borderRadius: BorderRadius.circular(12),
-                                  boxShadow: isSelected ? [
-                                    BoxShadow(
-                                      color: activeColor.withValues(alpha: 0.3),
-                                      blurRadius: 12,
-                                      offset: const Offset(0, 4),
-                                    )
-                                  ] : [],
-                                ),
-                                child: Text(
-                                  role,
-                                  textAlign: TextAlign.center,
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 15,
+                      const SizedBox(height: 24),
+
+                      Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF18181B).withValues(alpha: 0.5),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: const Color(0xFF27272A)),
+                        ),
+                        child: Row(
+                          children: ['Student', 'Teacher'].map((role) {
+                            final isSelected = _selectedRole == role;
+                            // Dynamic role color: Maroon for Student, Green for Teacher
+                            final activeColor = role == 'Teacher'
+                                ? TeacherThemeUtils.primary
+                                : const Color(0xFF9F1239);
+
+                            return Expanded(
+                              child: GestureDetector(
+                                onTap: () {
+                                  setState(() => _selectedRole = role);
+                                  // Globally update the app theme to the selected role
+                                  PulseConnectApp.of(context).updateTheme(role);
+                                },
+                                child: AnimatedContainer(
+                                  duration: const Duration(milliseconds: 250),
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 14,
+                                  ),
+                                  decoration: BoxDecoration(
                                     color: isSelected
-                                        ? Colors.white
-                                        : Colors.white.withValues(alpha: 0.5),
+                                        ? activeColor
+                                        : Colors.transparent,
+                                    borderRadius: BorderRadius.circular(12),
+                                    boxShadow: isSelected
+                                        ? [
+                                            BoxShadow(
+                                              color: activeColor.withValues(
+                                                alpha: 0.3,
+                                              ),
+                                              blurRadius: 12,
+                                              offset: const Offset(0, 4),
+                                            ),
+                                          ]
+                                        : [],
+                                  ),
+                                  child: Text(
+                                    role,
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w700,
+                                      fontSize: 15,
+                                      color: isSelected
+                                          ? Colors.white
+                                          : Colors.white.withValues(alpha: 0.5),
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                          );
-                        }).toList(),
-                      ),
-                    ),
-
-                    const SizedBox(height: 24),
-
-                    // Login Button Matching Web
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: () {
-                          // Keep theme in sync even when user doesn't retap the role toggle.
-                          PulseConnectApp.of(context).updateTheme(_selectedRole);
-                          Navigator.push(
-                            context,
-                            PageRouteBuilder(
-                              pageBuilder: (context, animation, secondaryAnimation) => LoginScreen(role: _selectedRole),
-                              transitionDuration: const Duration(milliseconds: 400),
-                              reverseTransitionDuration: const Duration(milliseconds: 400),
-                              opaque: true,
-                              barrierColor: const Color(0xFF09090B),
-                              transitionsBuilder: (context, animation, secondaryAnimation, child) {
-                                return FadeTransition(opacity: animation, child: child);
-                              },
-                            ),
-                          );
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.white,
-                          foregroundColor: const Color(0xFF18181B),
-                          padding: const EdgeInsets.symmetric(vertical: 18),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(16),
-                          ),
-                          elevation: 0,
-                        ),
-                        child: const Text(
-                          'Login',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                          ),
+                            );
+                          }).toList(),
                         ),
                       ),
-                    ),
-                    const SizedBox(height: 20),
 
-                    // Sign Up Link Mapping
-                    if (_selectedRole == 'Student') ...[
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          GestureDetector(
-                            onTap: () {
-                              Navigator.push(
-                                context,
-                                PageRouteBuilder(
-                                  pageBuilder: (context, animation, secondaryAnimation) => const RegisterScreen(),
-                                  transitionDuration: const Duration(milliseconds: 400),
-                                  reverseTransitionDuration: const Duration(milliseconds: 400),
-                                  opaque: true,
-                                  barrierColor: const Color(0xFF09090B),
-                                  transitionsBuilder: (context, animation, secondaryAnimation, child) {
-                                    return FadeTransition(opacity: animation, child: child);
-                                  },
+                      const SizedBox(height: 24),
+
+                      // Login Button Matching Web
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () {
+                            // Keep theme in sync even when user doesn't retap the role toggle.
+                            PulseConnectApp.of(
+                              context,
+                            ).updateTheme(_selectedRole);
+                            Navigator.push(
+                              context,
+                              PageRouteBuilder(
+                                pageBuilder:
+                                    (context, animation, secondaryAnimation) =>
+                                        LoginScreen(role: _selectedRole),
+                                transitionDuration: const Duration(
+                                  milliseconds: 400,
                                 ),
-                              );
-                            },
-                            child: const Text(
-                              'Create account',
-                              style: TextStyle(
-                                color: Color(0xFFE4E4E7),
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                decoration: TextDecoration.underline,
+                                reverseTransitionDuration: const Duration(
+                                  milliseconds: 400,
+                                ),
+                                opaque: true,
+                                barrierColor: const Color(0xFF09090B),
+                                transitionsBuilder:
+                                    (
+                                      context,
+                                      animation,
+                                      secondaryAnimation,
+                                      child,
+                                    ) {
+                                      return FadeTransition(
+                                        opacity: animation,
+                                        child: child,
+                                      );
+                                    },
+                              ),
+                            );
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.white,
+                            foregroundColor: const Color(0xFF18181B),
+                            padding: const EdgeInsets.symmetric(vertical: 18),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            elevation: 0,
+                          ),
+                          child: const Text(
+                            'Login',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+
+                      // Sign Up Link Mapping
+                      if (_selectedRole == 'Student') ...[
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            GestureDetector(
+                              onTap: () {
+                                Navigator.push(
+                                  context,
+                                  PageRouteBuilder(
+                                    pageBuilder:
+                                        (
+                                          context,
+                                          animation,
+                                          secondaryAnimation,
+                                        ) => const RegisterScreen(),
+                                    transitionDuration: const Duration(
+                                      milliseconds: 400,
+                                    ),
+                                    reverseTransitionDuration: const Duration(
+                                      milliseconds: 400,
+                                    ),
+                                    opaque: true,
+                                    barrierColor: const Color(0xFF09090B),
+                                    transitionsBuilder:
+                                        (
+                                          context,
+                                          animation,
+                                          secondaryAnimation,
+                                          child,
+                                        ) {
+                                          return FadeTransition(
+                                            opacity: animation,
+                                            child: child,
+                                          );
+                                        },
+                                  ),
+                                );
+                              },
+                              child: const Text(
+                                'Create account',
+                                style: TextStyle(
+                                  color: Color(0xFFE4E4E7),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                  decoration: TextDecoration.underline,
+                                ),
                               ),
                             ),
+                          ],
+                        ),
+                      ] else
+                        const SizedBox(height: 20),
+
+                      SizedBox(height: size.height * 0.04),
+
+                      // Footer
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 24),
+                        child: Text(
+                          '(c) ${DateTime.now().year} CCS PulseConnect',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFF71717A),
                           ),
-                        ],
-                      ),
-                    ] else const SizedBox(height: 20),
-
-                    const Spacer(),
-
-                    // Footer
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 24),
-                      child: Text(
-                        '© ${DateTime.now().year} CCS PulseConnect',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: Color(0xFF71717A),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),

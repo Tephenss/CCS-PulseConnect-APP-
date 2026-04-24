@@ -1,10 +1,14 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../../services/event_service.dart';
@@ -119,6 +123,50 @@ class _StudentCertificatesState extends State<StudentCertificates>
         color: const Color(0xFFD4A843),
       ),
     );
+  }
+
+  Future<void> _downloadCertificate(Map<String, dynamic> cert) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final raw = cert['thumbnail_url']?.toString().trim() ?? '';
+      Uint8List? bytes;
+
+      final decoded = _decodeThumbnailBytes(raw);
+      if (decoded != null) {
+        bytes = decoded;
+      } else if (raw.startsWith('http://') || raw.startsWith('https://')) {
+        final response = await http.get(Uri.parse(raw));
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          bytes = response.bodyBytes;
+        }
+      }
+
+      if (bytes == null || bytes.isEmpty) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('Certificate file is unavailable for download.'),
+          ),
+        );
+        return;
+      }
+
+      final dir = await getTemporaryDirectory();
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final fileName = 'certificate_$ts.png';
+      final file = File('${dir.path}/$fileName');
+      await file.writeAsBytes(bytes, flush: true);
+
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: 'image/png')],
+          text: 'Your CCS PulseConnect certificate',
+        ),
+      );
+    } catch (_) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Failed to download certificate.')),
+      );
+    }
   }
 
   @override
@@ -631,9 +679,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
                     ),
                     child: ElevatedButton.icon(
                       onPressed: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Use website certificate page for PDF download.')),
-                        );
+                        _downloadCertificate(cert);
                       },
                       icon: const Icon(Icons.download_rounded),
                       label: const Text('DOWNLOAD'),

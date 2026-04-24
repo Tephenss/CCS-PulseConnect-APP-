@@ -8,6 +8,40 @@ import 'package:bcrypt/bcrypt.dart';
 
 class AuthService {
   final _supabase = Supabase.instance.client;
+  static final RegExp _emailRegex = RegExp(
+    r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$",
+    caseSensitive: false,
+  );
+
+  static bool isValidEmail(String? value) {
+    final email = (value ?? '').trim();
+    if (email.isEmpty) return false;
+    return _emailRegex.hasMatch(email);
+  }
+
+  static bool requiresDailyEmailVerification(Map<String, dynamic>? user) {
+    if (user == null) return true;
+    final isVerified = user['email_verified'] == true;
+    if (!isVerified) return true;
+
+    final verifiedAtRaw = user['email_verified_at']?.toString() ?? '';
+    if (verifiedAtRaw.isEmpty) return true;
+
+    final verifiedAt = DateTime.tryParse(verifiedAtRaw)?.toUtc();
+    if (verifiedAt == null) return true;
+
+    // Calendar-day reset at 12:00 AM (UTC+8 / Asia-Manila) for all users.
+    const tzOffset = Duration(hours: 8);
+    final nowLocal = DateTime.now().toUtc().add(tzOffset);
+    final verifiedLocal = verifiedAt.add(tzOffset);
+    final nowDay = DateTime(nowLocal.year, nowLocal.month, nowLocal.day);
+    final verifiedDay = DateTime(
+      verifiedLocal.year,
+      verifiedLocal.month,
+      verifiedLocal.day,
+    );
+    return nowDay.isAfter(verifiedDay);
+  }
 
   // Check if user is logged in
   Future<bool> isLoggedIn() async {
@@ -49,15 +83,15 @@ class AuthService {
           if (isSigned || !publicReachable) {
             final freshSigned = await _supabase.storage
                 .from('avatars')
-                .createSignedUrl(photoPath!, 60 * 60 * 24 * 30);
+                .createSignedUrl(photoPath, 60 * 60 * 24 * 30);
             parsed['photo_url'] = _withCacheBuster(freshSigned);
-            parsed['photo_path'] = photoPath!;
+            parsed['photo_path'] = photoPath;
             if (userId.isNotEmpty) {
               await _saveAvatarCache(
                 prefs,
                 userId,
                 parsed['photo_url'].toString(),
-                photoPath: photoPath!,
+                photoPath: photoPath,
               );
             }
             await prefs.setString('user_data', jsonEncode(parsed));
@@ -101,6 +135,32 @@ class AuthService {
     return null;
   }
 
+  // Refresh current logged-in user from Supabase, then update local cache.
+  Future<Map<String, dynamic>?> refreshCurrentUserFromServer() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id') ?? '';
+      if (userId.isEmpty) return null;
+
+      final response = await _supabase
+          .from('users')
+          .select()
+          .eq('id', userId)
+          .limit(1);
+      if (response.isEmpty) return null;
+
+      final user = Map<String, dynamic>.from(response[0] as Map);
+      await prefs.setString('user_data', jsonEncode(user));
+      await prefs.setString(
+        'user_role',
+        (user['role']?.toString() ?? 'student'),
+      );
+      return user;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // Login with email and password, checking the expected role
   Future<Map<String, dynamic>> login(
     String email,
@@ -108,11 +168,16 @@ class AuthService {
     String expectedRole,
   ) async {
     try {
+      final normalizedEmail = email.toLowerCase().trim();
+      if (!isValidEmail(normalizedEmail)) {
+        return {'ok': false, 'error': 'Please enter a valid email address.'};
+      }
+
       // Query user by email
       final response = await _supabase
           .from('users')
           .select()
-          .eq('email', email.toLowerCase().trim())
+          .eq('email', normalizedEmail)
           .limit(1);
 
       if (response.isEmpty) {
@@ -146,6 +211,33 @@ class AuthService {
           'error':
               'This account is registered as a ${role == 'teacher' ? 'Teacher' : 'Student'}, not a $expectedRole.',
         };
+      }
+
+      // Student application review gate:
+      // - unverified => allow passing to verification screen first
+      // - pending (after verification) => blocked until admin approval
+      // - rejected => blocked with admin note
+      final accountStatus =
+          (user['account_status']?.toString().toLowerCase() ?? 'pending')
+              .trim();
+      final emailVerified = user['email_verified'] == true;
+      if (role.toLowerCase() == 'student') {
+        if (accountStatus == 'pending' && emailVerified) {
+          return {
+            'ok': false,
+            'error':
+                'Your account is under admin review. Please wait for approval email.',
+          };
+        }
+        if (accountStatus == 'rejected') {
+          final note = (user['approval_note']?.toString() ?? '').trim();
+          return {
+            'ok': false,
+            'error': note.isNotEmpty
+                ? 'Your application was not approved: $note'
+                : 'Your application was not approved. Please contact admin.',
+          };
+        }
       }
 
       // Save user data locally
@@ -210,11 +302,16 @@ class AuthService {
     required String password,
   }) async {
     try {
+      final normalizedEmail = email.toLowerCase().trim();
+      if (!isValidEmail(normalizedEmail)) {
+        return {'ok': false, 'error': 'Please enter a valid email address.'};
+      }
+
       // Check if email already exists
       final existing = await _supabase
           .from('users')
           .select('id')
-          .eq('email', email.toLowerCase().trim())
+          .eq('email', normalizedEmail)
           .limit(1);
 
       if (existing.isNotEmpty) {
@@ -242,8 +339,11 @@ class AuthService {
         'suffix': suffix.trim().isEmpty ? null : suffix.trim(),
         'student_id': idNumber.trim(),
         'course': normalizedCourse,
-        'email': email.toLowerCase().trim(),
+        'email': normalizedEmail,
         'password': passwordHash,
+        'email_verified': false,
+        'account_status': 'pending',
+        'registration_source': 'app',
         'section_id': null, // Section is selected purely post-login
         'role': 'student',
       };
@@ -275,6 +375,14 @@ class AuthService {
     }
     final prefs = await SharedPreferences.getInstance();
     await prefs.clear();
+  }
+
+  // Clear local login markers without touching remote tokens/state.
+  Future<void> clearLocalSessionMarkers() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('user_id');
+    await prefs.remove('user_role');
+    await prefs.remove('user_data');
   }
 
   // Simple password hashing (for MVP)
@@ -437,11 +545,14 @@ class AuthService {
         photoUrl,
         photoPath: photoPath ?? _extractStoragePathFromUrl(photoUrl),
       );
-      return {
+      final response = <String, dynamic>{
         'ok': true,
         'user': userData,
-        if (warning != null) 'warning': warning,
       };
+      if (warning != null) {
+        response['warning'] = warning;
+      }
+      return response;
     } catch (e) {
       return {'ok': false, 'error': 'Photo update failed: ${e.toString()}'};
     }

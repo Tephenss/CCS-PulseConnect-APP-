@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/custom_loader.dart';
+import 'email_verification_screen.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -105,10 +106,23 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
     setState(() => _isLoading = false);
 
     if (result['ok'] == true) {
-      setState(() => _successMessage = 'Account created! You can now sign in.');
-      Future.delayed(const Duration(seconds: 2), () {
-        if (mounted) Navigator.pop(context);
-      });
+      final user = result['user'];
+      if (user is Map<String, dynamic>) {
+        if (!mounted) return;
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => EmailVerificationScreen(
+              user: user,
+              postRegistrationReviewFlow: true,
+            ),
+          ),
+        );
+        return;
+      }
+      setState(
+        () => _errorMessage = 'Account created but verification data is missing.',
+      );
     } else {
       setState(() => _errorMessage = result['error'] as String?);
     }
@@ -573,7 +587,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                       decoration: _inputDeco(hint: 'you@gmail.com', icon: Icons.email_outlined),
                                       validator: (v) {
                                         if (v == null || v.isEmpty) return 'Required';
-                                        if (!v.contains('@')) return 'Invalid email';
+                                        if (!AuthService.isValidEmail(v)) return 'Invalid email';
                                         return null;
                                       },
                                     ),

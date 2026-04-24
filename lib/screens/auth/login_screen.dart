@@ -1,12 +1,14 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
 import '../student/student_home.dart';
 import '../teacher/teacher_home.dart';
 import 'forgot_password_screen.dart';
+import 'email_verification_screen.dart';
 import '../../services/push_notification_service.dart';
 import '../../widgets/custom_loader.dart';
 import '../../main.dart';
 import '../../utils/teacher_theme_utils.dart';
+import '../welcome_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   final String role;
@@ -28,8 +30,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   bool get _isTeacher => widget.role.toLowerCase() == 'teacher';
   Color get _primaryColor => _isTeacher ? TeacherThemeUtils.primary : const Color(0xFF9F1239);
   Color get _accentColor => _isTeacher ? TeacherThemeUtils.mid : const Color(0xFFBE123C);
-  Color get _glowColor => _isTeacher ? const Color(0xFF60A5FA) : const Color(0xFFBE123C);
-
   late AnimationController _gradientController;
   late AnimationController _floatController;
   Offset _pointerPosition = const Offset(0, 0);
@@ -89,6 +89,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
       if (mounted) {
         final userData = result['user'] as Map<String, dynamic>;
         final currentRole = userData['role'] as String? ?? 'student';
+        final needsVerification =
+            AuthService.requiresDailyEmailVerification(userData);
         PulseConnectApp.of(context).updateTheme(
           currentRole,
           course: userData['course']?.toString(),
@@ -96,12 +98,36 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         
         await PushNotificationService().updateToken();
         
+        if (needsVerification) {
+          // Do not keep a logged-in session until verification is completed.
+          await _authService.clearLocalSessionMarkers();
+        }
+
+        if (!mounted) return;
         Navigator.pushAndRemoveUntil(
           context,
-          MaterialPageRoute(
-            builder: (_) => currentRole.toLowerCase() == 'teacher'
-                ? const TeacherHome()
-                : const StudentHome(),
+          PageRouteBuilder(
+            transitionDuration: const Duration(milliseconds: 260),
+            reverseTransitionDuration: const Duration(milliseconds: 220),
+            transitionsBuilder: (context, animation, secondaryAnimation, child) {
+              final slide = Tween<Offset>(
+                begin: const Offset(0.08, 0),
+                end: Offset.zero,
+              ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic));
+              final fade = CurvedAnimation(parent: animation, curve: Curves.easeOut);
+              return FadeTransition(
+                opacity: fade,
+                child: SlideTransition(position: slide, child: child),
+              );
+            },
+            pageBuilder: (context, animation, secondaryAnimation) {
+              if (needsVerification) {
+                return EmailVerificationScreen(user: userData);
+              }
+              return currentRole.toLowerCase() == 'teacher'
+                  ? const TeacherHome()
+                  : const StudentHome();
+            },
           ),
           (route) => false,
         );
@@ -111,13 +137,43 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     }
   }
 
+  void _goToWelcome() {
+    Navigator.pushAndRemoveUntil(
+      context,
+      PageRouteBuilder(
+        transitionDuration: const Duration(milliseconds: 240),
+        reverseTransitionDuration: const Duration(milliseconds: 200),
+        transitionsBuilder: (context, animation, secondaryAnimation, child) {
+          final slide = Tween<Offset>(
+            begin: const Offset(-0.06, 0),
+            end: Offset.zero,
+          ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic));
+          final fade = CurvedAnimation(parent: animation, curve: Curves.easeOut);
+          return FadeTransition(
+            opacity: fade,
+            child: SlideTransition(position: slide, child: child),
+          );
+        },
+        pageBuilder: (context, animation, secondaryAnimation) =>
+            const WelcomeScreen(),
+      ),
+      (route) => false,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final mq = MediaQuery.of(context);
     final size = mq.size;
     final keyboardOpen = mq.viewInsets.bottom > 0;
 
-    return Scaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) return;
+        _goToWelcome();
+      },
+      child: Scaffold(
       backgroundColor: const Color(0xFF09090B),
       body: Listener(
         onPointerDown: _updatePointer,
@@ -126,7 +182,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         onPointerCancel: _hidePointer,
         child: Stack(
           children: [
-            // Background Image — full screen, gradient handles the fade
+            // Background Image â€” full screen, gradient handles the fade
             Positioned.fill(
               child: Image.asset(
                 'assets/bg.png',
@@ -135,7 +191,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
               ),
             ),
 
-            // Smooth dark fade overlay — gradual from top to bottom
+            // Smooth dark fade overlay â€” gradual from top to bottom
             Positioned.fill(
               child: Container(
                 decoration: const BoxDecoration(
@@ -184,7 +240,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                 ),
               ),
 
-            // Animated maroon/green gradient — top area only
+            // Animated maroon/green gradient â€” top area only
             Positioned(
               top: 0,
               left: 0,
@@ -227,7 +283,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                     child: Row(
                       children: [
                         GestureDetector(
-                          onTap: () => Navigator.pop(context),
+                          onTap: _goToWelcome,
                           child: Container(
                             width: 42,
                             height: 42,
@@ -368,7 +424,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
                             const SizedBox(height: 36),
 
-                            // Form Card — solid dark with subtle border
+                            // Form Card - solid dark with subtle border
                             Container(
                               padding: const EdgeInsets.fromLTRB(22, 28, 22, 22),
                               decoration: BoxDecoration(
@@ -465,7 +521,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                                       ),
                                       validator: (val) {
                                         if (val == null || val.isEmpty) return 'Email is required';
-                                        if (!val.contains('@')) return 'Enter a valid email';
+                                        if (!AuthService.isValidEmail(val)) return 'Enter a valid email';
                                         return null;
                                       },
                                     ),
@@ -488,7 +544,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                                       style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
                                       cursorColor: _primaryColor,
                                       decoration: InputDecoration(
-                                        hintText: '••••••••',
+                                        hintText: '********',
                                         hintStyle: const TextStyle(color: Color(0xFF52525B), fontSize: 14, letterSpacing: 2),
                                         prefixIcon: const Icon(Icons.lock_outline_rounded, color: Color(0xFF52525B), size: 20),
                                         suffixIcon: IconButton(
@@ -556,7 +612,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
                                     const SizedBox(height: 6),
 
-                                    // Sign In Button — gradient with glow
+                                    // Sign In Button â€” gradient with glow
                                     SizedBox(
                                       width: double.infinity,
                                       child: Container(
@@ -642,6 +698,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           ],
         ),
       ),
+    ),
     );
   }
 }
+

@@ -148,7 +148,9 @@ class _CardSwapWidgetState extends State<CardSwapWidget>
   @override
   void dispose() {
     _timer?.cancel();
-    for (final c in _ctls) c.dispose();
+    for (final c in _ctls) {
+      c.dispose();
+    }
     super.dispose();
   }
 
@@ -295,7 +297,7 @@ class _CardSwapWidgetState extends State<CardSwapWidget>
                 child: Transform(
                   transform: Matrix4.identity()
                     ..setEntry(3, 2, 1 / 900.0)    // perspective: 900px
-                    ..translate(0.0, 0.0, zVal)
+                    ..translateByDouble(0.0, 0.0, zVal, 1.0)
                     ..multiply(_skewYMatrix(skewVal)),
                   alignment: Alignment.center,
                   child: Opacity(
@@ -334,7 +336,7 @@ class _CardSwapWidgetState extends State<CardSwapWidget>
           Image.asset(
             item.imagePath,
             fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => Container(
+            errorBuilder: (_, _, _) => Container(
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
                   colors: [Color(0xFFea580c), Color(0xFF7c2d12)],
