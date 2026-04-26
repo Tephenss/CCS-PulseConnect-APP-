@@ -1,7 +1,9 @@
 ﻿import 'dart:async';
-import 'dart:io';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/app_cache_service.dart';
 import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
 import 'teacher_events_tab.dart';
@@ -9,10 +11,13 @@ import 'teacher_profile.dart';
 import 'teacher_scan.dart';
 import 'teacher_sections.dart';
 import '../../services/notification_service.dart';
+import '../../services/offline_backup_service.dart';
+import '../../services/offline_sync_service.dart';
 import '../../widgets/notifications_modal.dart';
 import '../../widgets/animated_greeting_text.dart';
 import '../../widgets/card_swap_widget.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/safe_circle_avatar.dart';
 import '../../widgets/shiny_text.dart';
 import '../../utils/event_time_utils.dart';
 import 'teacher_event_manage.dart';
@@ -25,18 +30,26 @@ class TeacherHome extends StatefulWidget {
 }
 
 class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
+  final _appCacheService = AppCacheService();
   final _authService = AuthService();
+  final Connectivity _connectivity = Connectivity();
   final _eventService = EventService();
+  final _offlineSyncService = OfflineSyncService();
+  final _offlineBackupService = OfflineBackupService();
+  final _supabase = Supabase.instance.client;
   Map<String, dynamic>? _user;
   List<Map<String, dynamic>> _upcomingEvents = [];
   int _currentIndex = 0;
   bool _isLoading = true;
+  bool _usingCachedUpcomingEvents = false;
   int _unreadCount = 0;
   DateTime _calendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
   final _notifService = NotificationService();
   final PageController _headerPageController = PageController();
   int _currentHeaderSlide = 0;
   StreamSubscription<int>? _unreadSubscription;
+  RealtimeChannel? _scannerAccessChannel;
+  Timer? _scannerAccessGuardTimer;
 
   // Softer teacher palette (sky â†’ deep) to reduce eye strain vs navy.
   static const Color _teacherPrimary = Color(0xFF0EA5E9); // sky-500
@@ -68,8 +81,61 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
+  Future<bool> _hasNoConnectivity() async {
+    final connectivity = await _connectivity.checkConnectivity();
+    return connectivity.isEmpty ||
+        connectivity.every((result) => result == ConnectivityResult.none);
+  }
+
+  Future<void> _refreshScannerAccessGuard(String teacherId) async {
+    final actorId = teacherId.trim();
+    if (actorId.isEmpty) return;
+    if (await _hasNoConnectivity()) return;
+
+    try {
+      await _offlineSyncService.refreshSnapshotForCurrentScanner(
+        actorId: actorId,
+        isTeacher: true,
+      );
+    } catch (_) {
+      // Keep the shell stable even if access refresh fails.
+    }
+  }
+
+  void _restartScannerAccessGuard(String teacherId) {
+    _scannerAccessGuardTimer?.cancel();
+    _scannerAccessChannel?.unsubscribe();
+    _scannerAccessChannel = null;
+
+    final actorId = teacherId.trim();
+    if (actorId.isEmpty) return;
+
+    _scannerAccessChannel =
+        _supabase.channel('public:teacher_home_scan_access:$actorId');
+    _scannerAccessChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'event_teacher_assignments',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'teacher_id',
+        value: actorId,
+      ),
+      callback: (_) {
+        unawaited(_refreshScannerAccessGuard(actorId));
+      },
+    );
+    _scannerAccessChannel!.subscribe();
+
+    _scannerAccessGuardTimer = Timer.periodic(
+      const Duration(seconds: 3),
+      (_) => unawaited(_refreshScannerAccessGuard(actorId)),
+    );
+  }
+
   Future<void> _loadData() async {
     final user = await _authService.getCurrentUser();
+    unawaited(_primeOfflineReadiness(user));
     
     // Initialize Realtime once user is known
     String teacherId = '';
@@ -80,17 +146,72 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
         teacherId = userId;
       }
     }
+    _restartScannerAccessGuard(teacherId);
 
-    final events = await _eventService.getTeacherUpcomingEvents(teacherId);
+    final connectivity = await _connectivity.checkConnectivity();
+    final isOffline =
+        connectivity.isEmpty ||
+        connectivity.every((result) => result == ConnectivityResult.none);
+    final cacheKey = 'teacher_home_upcoming_events_$teacherId';
+
+    List<Map<String, dynamic>> events = <Map<String, dynamic>>[];
+    var usingCachedData = false;
+    if (teacherId.isNotEmpty) {
+      if (isOffline) {
+        events = await _appCacheService.loadJsonList(cacheKey);
+        usingCachedData = true;
+      } else {
+        final fetched = await _eventService.getTeacherUpcomingEvents(teacherId);
+        if (fetched.isEmpty) {
+          final cached = await _appCacheService.loadJsonList(cacheKey);
+          final lastUpdated = await _appCacheService.lastUpdatedAt(cacheKey);
+          final cacheStillFresh =
+              cached.isNotEmpty &&
+              lastUpdated != null &&
+              DateTime.now().difference(lastUpdated) <=
+                  const Duration(hours: 24);
+          if (cacheStillFresh) {
+            events = cached;
+            usingCachedData = true;
+          } else {
+            events = fetched;
+            await _appCacheService.saveJsonList(cacheKey, events);
+          }
+        } else {
+          events = fetched;
+          await _appCacheService.saveJsonList(cacheKey, events);
+        }
+      }
+    }
+
     final unread = await _notifService.getUnreadCount(forceRefresh: true);
     if (mounted) {
       setState(() {
         _user = user;
         _upcomingEvents = events;
+        _usingCachedUpcomingEvents = usingCachedData;
         _unreadCount = unread;
         _isLoading = false;
       });
     }
+  }
+
+  Future<void> _primeOfflineReadiness(Map<String, dynamic>? user) async {
+    final actorId = (user?['id']?.toString() ?? '').trim();
+    if (actorId.isEmpty) {
+      await _offlineBackupService.autoBackupIfConfigured();
+      return;
+    }
+
+    try {
+      await _offlineSyncService.refreshSnapshotForCurrentScanner(
+        actorId: actorId,
+        isTeacher: true,
+      );
+    } catch (_) {
+      // Keep home refresh smooth even if background warmup fails.
+    }
+    await _offlineBackupService.autoBackupIfConfigured();
   }
 
   String _getGreeting() {
@@ -104,6 +225,10 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _refreshUnreadCount();
+      final teacherId = (_user?['id']?.toString() ?? '').trim();
+      if (teacherId.isNotEmpty) {
+        unawaited(_refreshScannerAccessGuard(teacherId));
+      }
     }
   }
 
@@ -111,6 +236,8 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _unreadSubscription?.cancel();
+    _scannerAccessGuardTimer?.cancel();
+    _scannerAccessChannel?.unsubscribe();
     _headerPageController.dispose();
     super.dispose();
   }
@@ -288,29 +415,21 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                   children: [
                     Row(
                       children: [
-                        Container(
-                          width: 50,
-                          height: 50,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(color: const Color(0xFFD4A843), width: 2),
-                            image: _user?['photo_url'] != null && (_user?['photo_url'] as String).isNotEmpty
-                                ? DecorationImage(
-                                    image: (_user?['photo_url'] as String).startsWith('http')
-                                        ? NetworkImage(_user?['photo_url'])
-                                        : FileImage(File(_user?['photo_url'])),
-                                    fit: BoxFit.cover,
-                                  )
-                                : null,
+                        SafeCircleAvatar(
+                          size: 50,
+                          imagePathOrUrl: _user?['photo_url']?.toString(),
+                          fallbackText: firstName.isNotEmpty
+                              ? firstName[0].toUpperCase()
+                              : 'T',
+                          backgroundColor: _teacherMid,
+                          textColor: Colors.white,
+                          borderColor: const Color(0xFFD4A843),
+                          borderWidth: 2,
+                          textStyle: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w800,
+                            fontSize: 20,
                           ),
-                          child: _user?['photo_url'] == null || (_user?['photo_url'] as String).isEmpty
-                            ? Center(
-                                child: Text(
-                                  firstName.isNotEmpty ? firstName[0].toUpperCase() : 'T',
-                                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 20),
-                                ),
-                              )
-                            : null,
                         ),
                         const SizedBox(width: 14),
                         Expanded(
@@ -447,7 +566,26 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                       children: [
                         Icon(Icons.event_busy_rounded, size: 48, color: Colors.grey.shade300),
                         const SizedBox(height: 12),
-                        Text('No upcoming events', style: TextStyle(fontWeight: FontWeight.w700, color: Colors.grey.shade600)),
+                        Text(
+                          _usingCachedUpcomingEvents
+                              ? 'No cached upcoming events'
+                              : 'No upcoming events',
+                          style: TextStyle(
+                            fontWeight: FontWeight.w700,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                        if (_usingCachedUpcomingEvents) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            'Reconnect once to refresh the latest event list.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.grey.shade500,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),

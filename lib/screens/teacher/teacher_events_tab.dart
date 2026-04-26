@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
+import '../../services/app_cache_service.dart';
 import '../../services/event_service.dart';
 import '../../services/auth_service.dart';
 import 'package:intl/intl.dart';
@@ -16,11 +18,14 @@ class TeacherEventsTab extends StatefulWidget {
 }
 
 class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerProviderStateMixin {
+  final _appCacheService = AppCacheService();
   final _eventService = EventService();
   final _authService = AuthService();
+  final Connectivity _connectivity = Connectivity();
   late TabController _tabController;
   List<Map<String, dynamic>> _events = [];
   bool _isLoading = true;
+  bool _usingCachedEvents = false;
 
   @override
   void initState() {
@@ -31,16 +36,53 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
 
   Future<void> _loadEvents() async {
     final user = await _authService.getCurrentUser();
-    if (user == null) return;
+    if (user == null) {
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+      return;
+    }
 
     final teacherId = user['id']?.toString() ?? '';
-    final events = teacherId.isEmpty
-        ? <Map<String, dynamic>>[]
-        : await _eventService.getTeacherAccessibleEvents(teacherId);
+    final connectivity = await _connectivity.checkConnectivity();
+    final isOffline =
+        connectivity.isEmpty ||
+        connectivity.every((result) => result == ConnectivityResult.none);
+    final cacheKey = 'teacher_accessible_events_$teacherId';
+
+    List<Map<String, dynamic>> events = <Map<String, dynamic>>[];
+    var usingCachedData = false;
+    if (teacherId.isNotEmpty) {
+      if (isOffline) {
+        events = await _appCacheService.loadJsonList(cacheKey);
+        usingCachedData = true;
+      } else {
+        final fetched = await _eventService.getTeacherAccessibleEvents(teacherId);
+        if (fetched.isEmpty) {
+          final cached = await _appCacheService.loadJsonList(cacheKey);
+          final lastUpdated = await _appCacheService.lastUpdatedAt(cacheKey);
+          final cacheStillFresh =
+              cached.isNotEmpty &&
+              lastUpdated != null &&
+              DateTime.now().difference(lastUpdated) <=
+                  const Duration(hours: 24);
+          if (cacheStillFresh) {
+            events = cached;
+            usingCachedData = true;
+          } else {
+            events = fetched;
+            await _appCacheService.saveJsonList(cacheKey, events);
+          }
+        } else {
+          events = fetched;
+          await _appCacheService.saveJsonList(cacheKey, events);
+        }
+      }
+    }
     
     if (mounted) {
       setState(() {
         _events = events;
+        _usingCachedEvents = usingCachedData;
         _isLoading = false;
       });
     }
@@ -193,7 +235,11 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
               children: [
                 SizedBox(
                   height: MediaQuery.of(context).size.height * 0.62,
-                  child: _buildEmptyState('No $statusFilter events found'),
+                  child: _buildEmptyState(
+                    _usingCachedEvents
+                        ? 'No cached $statusFilter events found'
+                        : 'No $statusFilter events found',
+                  ),
                 ),
               ],
             )
@@ -420,5 +466,3 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
     );
   }
 }
-
-

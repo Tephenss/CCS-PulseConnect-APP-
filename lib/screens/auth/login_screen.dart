@@ -1,4 +1,5 @@
-﻿import 'package:flutter/material.dart';
+import 'dart:async';
+import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
 import '../student/student_home.dart';
 import '../teacher/teacher_home.dart';
@@ -68,6 +69,50 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   void _hidePointer(PointerEvent details) {
     setState(() => _pointerActive = false);
   }
+  void _showOfflineRecoveryNotices({
+    required int restoredCount,
+    required int syncedCount,
+    required int reconciledCount,
+  }) {
+    final messenger = PulseConnectApp.scaffoldMessengerKey.currentState;
+    if (messenger == null) return;
+
+    final snackBars = <SnackBar>[
+      if (restoredCount > 0)
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFF0EA5E9),
+          content: Text(
+            'Restored $restoredCount offline scan${restoredCount == 1 ? '' : 's'} from backup.',
+          ),
+        ),
+      if (syncedCount > 0)
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFF047857),
+          content: Text(
+            '$syncedCount queued scan${syncedCount == 1 ? '' : 's'} synced successfully.',
+          ),
+        ),
+      if (reconciledCount > 0)
+        SnackBar(
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFFD97706),
+          content: Text(
+            '$reconciledCount restored scan${reconciledCount == 1 ? '' : 's'} already existed and were reconciled.',
+          ),
+        ),
+    ];
+
+    if (snackBars.isEmpty) return;
+
+    unawaited(() async {
+      for (final snackBar in snackBars) {
+        messenger.clearSnackBars();
+        await messenger.showSnackBar(snackBar).closed;
+      }
+    }());
+  }
 
   Future<void> _handleLogin() async {
     if (!_formKey.currentState!.validate()) return;
@@ -91,6 +136,27 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         final currentRole = userData['role'] as String? ?? 'student';
         final needsVerification =
             AuthService.requiresDailyEmailVerification(userData);
+        final restoredOfflineQueueCount =
+            (result['restored_offline_queue_count'] is num)
+                ? (result['restored_offline_queue_count'] as num).toInt()
+                : int.tryParse(
+                        result['restored_offline_queue_count']?.toString() ?? '',
+                      ) ??
+                    0;
+        final syncedOfflineQueueCount =
+            (result['synced_offline_queue_count'] is num)
+                ? (result['synced_offline_queue_count'] as num).toInt()
+                : int.tryParse(
+                        result['synced_offline_queue_count']?.toString() ?? '',
+                      ) ??
+                    0;
+        final reconciledOfflineQueueCount =
+            (result['reconciled_offline_queue_count'] is num)
+                ? (result['reconciled_offline_queue_count'] as num).toInt()
+                : int.tryParse(
+                        result['reconciled_offline_queue_count']?.toString() ?? '',
+                      ) ??
+                    0;
         PulseConnectApp.of(context).updateTheme(
           currentRole,
           course: userData['course']?.toString(),
@@ -104,6 +170,11 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         }
 
         if (!mounted) return;
+        _showOfflineRecoveryNotices(
+          restoredCount: restoredOfflineQueueCount,
+          syncedCount: syncedOfflineQueueCount,
+          reconciledCount: reconciledOfflineQueueCount,
+        );
         Navigator.pushAndRemoveUntil(
           context,
           PageRouteBuilder(
@@ -182,7 +253,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         onPointerCancel: _hidePointer,
         child: Stack(
           children: [
-            // Background Image â€” full screen, gradient handles the fade
+            // Background Image — full screen, gradient handles the fade
             Positioned.fill(
               child: Image.asset(
                 'assets/bg.png',
@@ -191,7 +262,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
               ),
             ),
 
-            // Smooth dark fade overlay â€” gradual from top to bottom
+            // Smooth dark fade overlay — gradual from top to bottom
             Positioned.fill(
               child: Container(
                 decoration: const BoxDecoration(
@@ -240,7 +311,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                 ),
               ),
 
-            // Animated maroon/green gradient â€” top area only
+            // Animated maroon/green gradient — top area only
             Positioned(
               top: 0,
               left: 0,
@@ -612,7 +683,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
                                     const SizedBox(height: 6),
 
-                                    // Sign In Button â€” gradient with glow
+                                    // Sign In Button — gradient with glow
                                     SizedBox(
                                       width: double.infinity,
                                       child: Container(
@@ -702,4 +773,5 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     );
   }
 }
+
 

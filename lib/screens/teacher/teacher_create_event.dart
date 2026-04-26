@@ -70,6 +70,17 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     }
   }
 
+  void _applySimpleEventEndDefaultFromStart() {
+    if (_eventMode == 'seminar_based') return;
+    final start = _parseDateTime(_startDateCtrl.text);
+    if (start == null) {
+      _endDateCtrl.text = '';
+      return;
+    }
+    final fixedEnd = DateTime(start.year, start.month, start.day, 17, 0);
+    _endDateCtrl.text = _dateTimeFormat.format(fixedEnd);
+  }
+
   String _toUtcIsoFromManila(DateTime manilaWallTime) {
     final utc = DateTime.utc(
       manilaWallTime.year,
@@ -144,6 +155,22 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         DateTime? e1 = _parseDateTime(_endDateCtrl.text);
         if (s1 == null || e1 == null) {
           setState(() => _validationError = 'Start and end dates are required.');
+          return false;
+        }
+        final sameDay =
+            s1.year == e1.year && s1.month == e1.month && s1.day == e1.day;
+        if (!sameDay) {
+          setState(
+            () => _validationError =
+                'For simple events, end date must be the same day as start date.',
+          );
+          return false;
+        }
+        if (e1.hour != 17 || e1.minute != 0) {
+          setState(
+            () => _validationError =
+                'For simple events, end time is fixed at 5:00 PM.',
+          );
           return false;
         }
         if (e1.isBefore(s1) || e1.isAtSameMomentAs(s1)) {
@@ -255,7 +282,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       };
     } else {
       final s1 = _parseDateTime(_startDateCtrl.text)!;
-      final e1 = _parseDateTime(_endDateCtrl.text)!;
+      final e1 = DateTime(s1.year, s1.month, s1.day, 17, 0);
       payload = {
         'title': _titleCtrl.text.trim(),
         'description': _descCtrl.text.trim(),
@@ -714,6 +741,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                 onChanged: (v) => setState(() {
                   _eventMode = v ?? 'simple';
                   _seminarCount = 1;
+                  _applySimpleEventEndDefaultFromStart();
                 }),
                 title: const Text(
                   'Simple Event',
@@ -969,7 +997,11 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           _buildDateTimeInput(_startDateCtrl, Icons.calendar_today_rounded),
           const SizedBox(height: 24),
           _buildLabel('End Date & Time'),
-          _buildDateTimeInput(_endDateCtrl, Icons.access_time_rounded, isEnabled: _startDateCtrl.text.isNotEmpty),
+          _buildDateTimeInput(
+            _endDateCtrl,
+            Icons.access_time_rounded,
+            isEnabled: _startDateCtrl.text.isNotEmpty,
+          ),
         ],
       );
     } else {
@@ -1169,7 +1201,16 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   }
 
   Future<void> _selectDateTime(TextEditingController controller) async {
+    final isSimpleEndPicker =
+        _eventMode != 'seminar_based' && identical(controller, _endDateCtrl);
+    final simpleStart = isSimpleEndPicker
+        ? _parseDateTime(_startDateCtrl.text)
+        : null;
+
     DateTime? initialDate = _parseDateTime(controller.text);
+    if (isSimpleEndPicker && simpleStart != null) {
+      initialDate = simpleStart;
+    }
     TimeOfDay initialTime = initialDate != null
         ? TimeOfDay(hour: initialDate.hour, minute: initialDate.minute)
         : const TimeOfDay(hour: 0, minute: 0);
@@ -1178,11 +1219,20 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     final DateTime now = DateTime.now();
     final DateTime tomorrow = DateTime(now.year, now.month, now.day).add(const Duration(days: 1));
     
+    final DateTime firstDate = isSimpleEndPicker && simpleStart != null
+        ? DateTime(simpleStart.year, simpleStart.month, simpleStart.day)
+        : tomorrow;
+    final DateTime lastDate = isSimpleEndPicker && simpleStart != null
+        ? DateTime(simpleStart.year, simpleStart.month, simpleStart.day)
+        : DateTime(2101);
+
     final DateTime? pickedDate = await showDatePicker(
       context: context,
-      initialDate: (initialDate != null && !initialDate.isBefore(tomorrow)) ? initialDate : tomorrow,
-      firstDate: tomorrow,
-      lastDate: DateTime(2101),
+      initialDate: (initialDate != null && !initialDate.isBefore(firstDate))
+          ? initialDate
+          : firstDate,
+      firstDate: firstDate,
+      lastDate: lastDate,
 
 
       builder: (context, child) {
@@ -1242,7 +1292,23 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
 
         if (mounted) {
           setState(() {
-            controller.text = _dateTimeFormat.format(fullDateTime);
+            if (_eventMode != 'seminar_based' &&
+                identical(controller, _endDateCtrl)) {
+              final start = _parseDateTime(_startDateCtrl.text);
+              if (start != null) {
+                final fixedEnd =
+                    DateTime(start.year, start.month, start.day, 17, 0);
+                controller.text = _dateTimeFormat.format(fixedEnd);
+              } else {
+                controller.text = _dateTimeFormat.format(fullDateTime);
+              }
+            } else {
+              controller.text = _dateTimeFormat.format(fullDateTime);
+            }
+            if (_eventMode != 'seminar_based' &&
+                identical(controller, _startDateCtrl)) {
+              _applySimpleEventEndDefaultFromStart();
+            }
           });
           // Removed manual auto-sync to match new Web Dashboard rules
         }

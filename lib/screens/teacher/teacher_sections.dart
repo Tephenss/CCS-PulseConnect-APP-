@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../services/app_cache_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'teacher_section_students.dart';
 import '../../utils/teacher_theme_utils.dart';
@@ -12,9 +14,12 @@ class TeacherSections extends StatefulWidget {
 }
 
 class _TeacherSectionsState extends State<TeacherSections> {
+  final _appCacheService = AppCacheService();
+  final Connectivity _connectivity = Connectivity();
   final _supabase = Supabase.instance.client;
   bool _isLoading = true;
   List<Map<String, dynamic>> _sections = [];
+  bool _usingCachedSections = false;
 
   @override
   void initState() {
@@ -40,14 +45,31 @@ class _TeacherSectionsState extends State<TeacherSections> {
   }
 
   Future<void> _fetchSections() async {
+    const cacheKey = 'teacher_sections_active';
     try {
+      final connectivity = await _connectivity.checkConnectivity();
+      final isOffline =
+          connectivity.isEmpty ||
+          connectivity.every((result) => result == ConnectivityResult.none);
+      if (isOffline) {
+        final cached = await _appCacheService.loadJsonList(cacheKey);
+        if (!mounted) return;
+        setState(() {
+          _sections = cached;
+          _usingCachedSections = true;
+          _isLoading = false;
+        });
+        return;
+      }
+
       final response = await _supabase
           .from('sections')
           .select('id, name')
           .eq('status', 'active');
+      final List<Map<String, dynamic>> fetched =
+          List<Map<String, dynamic>>.from(response);
       
       if (mounted) {
-        final List<Map<String, dynamic>> fetched = List<Map<String, dynamic>>.from(response);
         fetched.sort((a, b) {
           int yearA = _extractYearLevel(a['name']?.toString() ?? '');
           int yearB = _extractYearLevel(b['name']?.toString() ?? '');
@@ -57,20 +79,27 @@ class _TeacherSectionsState extends State<TeacherSections> {
 
         setState(() {
           _sections = fetched;
+          _usingCachedSections = false;
           _isLoading = false;
         });
       }
+      await _appCacheService.saveJsonList(cacheKey, fetched);
     } catch (e) {
+      final cached = await _appCacheService.loadJsonList(cacheKey);
       if (mounted) {
         setState(() {
+          _sections = cached;
+          _usingCachedSections = cached.isNotEmpty;
           _isLoading = false;
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Failed to load sections: $e'),
-            backgroundColor: Colors.red,
-          ),
-        );
+        if (cached.isEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Failed to load sections: $e'),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
       }
     }
   }
@@ -193,8 +222,10 @@ class _TeacherSectionsState extends State<TeacherSections> {
                       child: Icon(Icons.groups_rounded, size: 40, color: Colors.grey.shade300),
                     ),
                     const SizedBox(height: 16),
-                    const Text(
-                      'No sections exist',
+                    Text(
+                      _usingCachedSections
+                          ? 'No cached sections found'
+                          : 'No sections exist',
                       style: TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.w800,
@@ -203,7 +234,9 @@ class _TeacherSectionsState extends State<TeacherSections> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Sections added by the Admin will appear here.',
+                      _usingCachedSections
+                          ? 'Reconnect once to refresh the latest sections.'
+                          : 'Sections added by the Admin will appear here.',
                       style: TextStyle(
                         color: Colors.grey.shade500,
                         fontSize: 14,

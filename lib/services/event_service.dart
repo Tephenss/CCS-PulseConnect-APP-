@@ -112,6 +112,28 @@ class EventService {
     return _isCheckedInStatus(row['status']);
   }
 
+  String _normalizedScanTimestampIso(String? rawIso, {required String fallbackIso}) {
+    final parsed = _toUtcDate(rawIso);
+    if (parsed == null) return fallbackIso;
+    return parsed.toIso8601String();
+  }
+
+  bool _shouldApplyIncomingCheckIn({
+    required String incomingScanAtIso,
+    dynamic recordedCheckInAt,
+  }) {
+    final incoming = _toUtcDate(incomingScanAtIso);
+    if (incoming == null) return false;
+
+    final existingRaw = recordedCheckInAt?.toString().trim() ?? '';
+    if (existingRaw.isEmpty) return true;
+
+    final existing = _toUtcDate(existingRaw);
+    if (existing == null) return true;
+
+    return incoming.isBefore(existing);
+  }
+
   bool _eventUsesSessions(Map<String, dynamic> event) {
     final embeddedSessions = event['sessions'];
     if (embeddedSessions is List && embeddedSessions.isNotEmpty) {
@@ -350,7 +372,7 @@ class EventService {
       final rows = await _supabase
           .from('event_teacher_assignments')
           .select(
-            'event_id, can_scan, events(id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure)',
+            'event_id, can_scan, events(id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time)',
           )
           .eq('teacher_id', teacherId)
           .eq('can_scan', true)
@@ -361,7 +383,7 @@ class EventService {
         final rows = await _supabase
             .from('event_teacher_assignments')
             .select(
-              'event_id, can_scan, events(id,title,status,start_at,end_at,location,uses_sessions,event_structure)',
+              'event_id, can_scan, events(id,title,status,start_at,end_at,location,uses_sessions,event_structure,grace_time)',
             )
             .eq('teacher_id', teacherId)
             .eq('can_scan', true)
@@ -371,7 +393,7 @@ class EventService {
         final rows = await _supabase
             .from('event_teacher_assignments')
             .select(
-              'event_id, can_scan, events(id,title,status,start_at,end_at,location,uses_sessions)',
+              'event_id, can_scan, events(id,title,status,start_at,end_at,location,uses_sessions,grace_time)',
             )
             .eq('teacher_id', teacherId)
             .eq('can_scan', true)
@@ -486,6 +508,24 @@ class EventService {
     return 30;
   }
 
+  int _eventGraceMinutes(Map<String, dynamic> event) {
+    final parsed = int.tryParse(event['grace_time']?.toString() ?? '');
+    if (parsed != null && parsed > 0) return parsed;
+    return 30;
+  }
+
+  bool _isHostedMobilePushConfiguredBaseUrl(String rawBaseUrl) {
+    final raw = rawBaseUrl.trim();
+    if (raw.isEmpty) return false;
+    if (raw.contains('YOUR-WEB-DOMAIN')) return false;
+    final uri = Uri.tryParse(raw);
+    if (uri == null) return false;
+    if (!(uri.scheme == 'http' || uri.scheme == 'https')) return false;
+    final host = uri.host.trim().toLowerCase();
+    if (host.isEmpty || host == 'your-web-domain') return false;
+    return true;
+  }
+
   Future<bool> _supportsEventSessionsColumn(String column) async {
     final cached = _eventSessionColumnSupport[column];
     if (cached != null) return cached;
@@ -570,18 +610,449 @@ class EventService {
     }
   }
 
+  List<Map<String, dynamic>> _ticketRowsFromParticipant(
+    Map<String, dynamic> participant,
+  ) {
+    final ticketsRaw = participant['tickets'];
+    if (ticketsRaw is List) {
+      return ticketsRaw
+          .whereType<Map>()
+          .map(Map<String, dynamic>.from)
+          .toList();
+    }
+    if (ticketsRaw is Map) {
+      return <Map<String, dynamic>>[Map<String, dynamic>.from(ticketsRaw)];
+    }
+    return <Map<String, dynamic>>[];
+  }
+
+  Future<Map<String, dynamic>?> _loadEventForAttendanceMaterialization(
+    String eventId,
+  ) async {
+    final trimmedId = eventId.trim();
+    if (trimmedId.isEmpty) return null;
+
+    try {
+      final rows = await _supabase
+          .from('events')
+          .select(
+            'id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time',
+          )
+          .eq('id', trimmedId)
+          .limit(1);
+      if (rows.isNotEmpty) {
+        return Map<String, dynamic>.from(rows.first);
+      }
+    } catch (_) {
+      try {
+        final rows = await _supabase
+            .from('events')
+            .select(
+              'id,title,status,start_at,end_at,location,uses_sessions,grace_time',
+            )
+            .eq('id', trimmedId)
+            .limit(1);
+        if (rows.isNotEmpty) {
+          return Map<String, dynamic>.from(rows.first);
+        }
+      } catch (_) {
+        try {
+          final rows = await _supabase
+              .from('events')
+              .select('id,title,status,start_at,end_at,location,grace_time')
+              .eq('id', trimmedId)
+              .limit(1);
+          if (rows.isNotEmpty) {
+            return Map<String, dynamic>.from(rows.first);
+          }
+        } catch (_) {
+          return null;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  Future<Map<String, dynamic>?> _patchSimpleAttendanceAbsent({
+    required String ticketId,
+    required Map<String, dynamic>? existingRow,
+    required String nowIso,
+  }) async {
+    Map<String, dynamic>? updatedRow;
+    final existingId = (existingRow?['id']?.toString() ?? '').trim();
+
+    if (existingId.isNotEmpty) {
+      try {
+        final rows = await _supabase
+            .from('attendance')
+            .update({'status': 'absent', 'last_scanned_at': nowIso})
+            .eq('id', existingId)
+            .isFilter('check_in_at', null)
+            .select('id,ticket_id,session_id,status,check_in_at,last_scanned_at');
+        if (rows.isNotEmpty) {
+          updatedRow = Map<String, dynamic>.from(rows.first);
+        }
+      } catch (_) {}
+    }
+
+    if (updatedRow == null) {
+      try {
+        final rows = await _supabase
+            .from('attendance')
+            .update({'status': 'absent', 'last_scanned_at': nowIso})
+            .eq('ticket_id', ticketId)
+            .isFilter('session_id', null)
+            .isFilter('check_in_at', null)
+            .select('id,ticket_id,session_id,status,check_in_at,last_scanned_at');
+        if (rows.isNotEmpty) {
+          updatedRow = Map<String, dynamic>.from(rows.first);
+        }
+      } catch (_) {}
+    }
+
+    if (updatedRow == null) {
+      try {
+        final rows = await _supabase
+            .from('attendance')
+            .insert({
+              'ticket_id': ticketId,
+              'status': 'absent',
+              'last_scanned_at': nowIso,
+            })
+            .select('id,ticket_id,session_id,status,check_in_at,last_scanned_at');
+        if (rows.isNotEmpty) {
+          updatedRow = Map<String, dynamic>.from(rows.first);
+        }
+      } catch (_) {}
+    }
+
+    return updatedRow;
+  }
+
+  Future<Map<String, dynamic>?> _patchSessionAttendanceAbsent({
+    required String sessionId,
+    required String registrationId,
+    required String ticketId,
+    required Map<String, dynamic>? existingRow,
+    required String nowIso,
+  }) async {
+    final prefersSessionAttendance = await _supportsEventSessionAttendanceTable();
+    final table = prefersSessionAttendance
+        ? 'event_session_attendance'
+        : 'attendance';
+    final selectColumns =
+        prefersSessionAttendance
+            ? 'id,session_id,registration_id,ticket_id,status,check_in_at,last_scanned_at'
+            : 'id,session_id,ticket_id,status,check_in_at,last_scanned_at';
+    Map<String, dynamic>? updatedRow;
+    final existingId = (existingRow?['id']?.toString() ?? '').trim();
+
+    if (existingId.isNotEmpty) {
+      try {
+        final rows = await _supabase
+            .from(table)
+            .update({'status': 'absent', 'last_scanned_at': nowIso})
+            .eq('id', existingId)
+            .isFilter('check_in_at', null)
+            .select(selectColumns);
+        if (rows.isNotEmpty) {
+          updatedRow = Map<String, dynamic>.from(rows.first);
+        }
+      } catch (_) {}
+    }
+
+    if (updatedRow == null && prefersSessionAttendance) {
+      try {
+        final rows = await _supabase
+            .from(table)
+            .update({'status': 'absent', 'last_scanned_at': nowIso})
+            .eq('session_id', sessionId)
+            .eq('registration_id', registrationId)
+            .isFilter('check_in_at', null)
+            .select(selectColumns);
+        if (rows.isNotEmpty) {
+          updatedRow = Map<String, dynamic>.from(rows.first);
+        }
+      } catch (_) {}
+    }
+
+    if (updatedRow == null) {
+      try {
+        final rows = await _supabase
+            .from(table)
+            .update({'status': 'absent', 'last_scanned_at': nowIso})
+            .eq('session_id', sessionId)
+            .eq('ticket_id', ticketId)
+            .isFilter('check_in_at', null)
+            .select(selectColumns);
+        if (rows.isNotEmpty) {
+          updatedRow = Map<String, dynamic>.from(rows.first);
+        }
+      } catch (_) {}
+    }
+
+    if (updatedRow == null) {
+      try {
+        final payload =
+            prefersSessionAttendance
+                ? <String, dynamic>{
+                  'session_id': sessionId,
+                  'registration_id': registrationId,
+                  'ticket_id': ticketId,
+                  'status': 'absent',
+                  'last_scanned_at': nowIso,
+                }
+                : <String, dynamic>{
+                  'session_id': sessionId,
+                  'ticket_id': ticketId,
+                  'status': 'absent',
+                  'last_scanned_at': nowIso,
+                };
+        final rows = await _supabase
+            .from(table)
+            .insert(payload)
+            .select(selectColumns);
+        if (rows.isNotEmpty) {
+          updatedRow = Map<String, dynamic>.from(rows.first);
+        }
+      } catch (_) {}
+    }
+
+    return updatedRow;
+  }
+
+  Future<bool> _materializeSimpleEventAbsences({
+    required Map<String, dynamic> event,
+    required List<Map<String, dynamic>> participants,
+  }) async {
+    final startAt = _toUtcDate(event['start_at']);
+    if (startAt == null) return false;
+
+    final nowUtc = DateTime.now().toUtc();
+    var closesAt = startAt.add(Duration(minutes: _eventGraceMinutes(event)));
+    final endAt = _toUtcDate(event['end_at']);
+    if (endAt != null && endAt.isBefore(closesAt)) {
+      closesAt = endAt;
+    }
+    if (!nowUtc.isAfter(closesAt)) return false;
+
+    final ticketIds = <String>[];
+    final registrationByTicket = <String, String>{};
+    for (final participant in participants) {
+      final registrationId = (participant['id']?.toString() ?? '').trim();
+      if (registrationId.isEmpty) continue;
+      for (final ticket in _ticketRowsFromParticipant(participant)) {
+        final ticketId = (ticket['id']?.toString() ?? '').trim();
+        if (ticketId.isEmpty) continue;
+        ticketIds.add(ticketId);
+        registrationByTicket[ticketId] = registrationId;
+      }
+    }
+    if (ticketIds.isEmpty) return false;
+
+    final existingByTicket = <String, Map<String, dynamic>>{};
+    try {
+      final rows = await _supabase
+          .from('attendance')
+          .select('id,ticket_id,session_id,status,check_in_at,last_scanned_at')
+          .inFilter('ticket_id', ticketIds)
+          .limit(1000);
+      for (final raw in List<Map<String, dynamic>>.from(rows)) {
+        final sessionId = (raw['session_id']?.toString() ?? '').trim();
+        if (sessionId.isNotEmpty) continue;
+        final ticketId = (raw['ticket_id']?.toString() ?? '').trim();
+        if (ticketId.isEmpty) continue;
+        existingByTicket[ticketId] = raw;
+      }
+    } catch (_) {}
+
+    final nowIso = nowUtc.toIso8601String();
+    var changed = false;
+    for (final ticketId in ticketIds) {
+      final existing = existingByTicket[ticketId];
+      if (_attendanceRecordCountsAsPresent(existing)) continue;
+      final status = (existing?['status']?.toString() ?? '').trim().toLowerCase();
+      if (status == 'absent') continue;
+      final updated = await _patchSimpleAttendanceAbsent(
+        ticketId: ticketId,
+        existingRow: existing,
+        nowIso: nowIso,
+      );
+      if (updated != null) {
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
+  Future<bool> _materializeSessionAbsences({
+    required String eventId,
+    required List<Map<String, dynamic>> participants,
+  }) async {
+    final sessions = await _fetchSessionsForEvent(eventId);
+    if (sessions.isEmpty) return false;
+
+    final nowUtc = DateTime.now().toUtc();
+    final closedSessions = <Map<String, dynamic>>[];
+    for (final session in sessions) {
+      final sessionId = (session['id']?.toString() ?? '').trim();
+      final startAt = _toUtcDate(session['start_at']);
+      if (sessionId.isEmpty || startAt == null) continue;
+
+      var closesAt = startAt.add(
+        Duration(minutes: _sessionWindowMinutes(session)),
+      );
+      final sessionEndAt = _toUtcDate(session['end_at']);
+      if (sessionEndAt != null && sessionEndAt.isBefore(closesAt)) {
+        closesAt = sessionEndAt;
+      }
+      if (!nowUtc.isAfter(closesAt)) continue;
+      closedSessions.add(session);
+    }
+    if (closedSessions.isEmpty) return false;
+
+    final pairs = <Map<String, String>>[];
+    final ticketIds = <String>[];
+    for (final participant in participants) {
+      final registrationId = (participant['id']?.toString() ?? '').trim();
+      if (registrationId.isEmpty) continue;
+      for (final ticket in _ticketRowsFromParticipant(participant)) {
+        final ticketId = (ticket['id']?.toString() ?? '').trim();
+        if (ticketId.isEmpty) continue;
+        pairs.add({
+          'registration_id': registrationId,
+          'ticket_id': ticketId,
+        });
+        ticketIds.add(ticketId);
+      }
+    }
+    if (pairs.isEmpty) return false;
+
+    final existingByKey = <String, Map<String, dynamic>>{};
+    final closedSessionIds =
+        closedSessions
+            .map((session) => (session['id']?.toString() ?? '').trim())
+            .where((id) => id.isNotEmpty)
+            .toList();
+    if (closedSessionIds.isEmpty) return false;
+
+    if (await _supportsEventSessionAttendanceTable()) {
+      try {
+        final rows = await _supabase
+            .from('event_session_attendance')
+            .select(
+              'id,session_id,registration_id,ticket_id,status,check_in_at,last_scanned_at',
+            )
+            .inFilter('session_id', closedSessionIds)
+            .limit(2000);
+        for (final raw in List<Map<String, dynamic>>.from(rows)) {
+          final sessionId = (raw['session_id']?.toString() ?? '').trim();
+          final registrationId =
+              (raw['registration_id']?.toString() ?? '').trim();
+          final ticketId = (raw['ticket_id']?.toString() ?? '').trim();
+          if (sessionId.isEmpty) continue;
+          if (registrationId.isNotEmpty) {
+            existingByKey['$registrationId|$sessionId'] = raw;
+          } else if (ticketId.isNotEmpty) {
+            existingByKey['$ticketId|$sessionId'] = raw;
+          }
+        }
+      } catch (_) {}
+    } else {
+      try {
+        final rows = await _supabase
+            .from('attendance')
+            .select('id,session_id,ticket_id,status,check_in_at,last_scanned_at')
+            .inFilter('session_id', closedSessionIds)
+            .limit(2000);
+        for (final raw in List<Map<String, dynamic>>.from(rows)) {
+          final sessionId = (raw['session_id']?.toString() ?? '').trim();
+          final ticketId = (raw['ticket_id']?.toString() ?? '').trim();
+          if (sessionId.isEmpty || ticketId.isEmpty) continue;
+          existingByKey['$ticketId|$sessionId'] = raw;
+        }
+      } catch (_) {}
+    }
+
+    final nowIso = nowUtc.toIso8601String();
+    var changed = false;
+    for (final session in closedSessions) {
+      final sessionId = (session['id']?.toString() ?? '').trim();
+      if (sessionId.isEmpty) continue;
+      for (final pair in pairs) {
+        final registrationId = pair['registration_id'] ?? '';
+        final ticketId = pair['ticket_id'] ?? '';
+        if (registrationId.isEmpty || ticketId.isEmpty) continue;
+        final existing =
+            existingByKey['$registrationId|$sessionId'] ??
+            existingByKey['$ticketId|$sessionId'];
+        if (_attendanceRecordCountsAsPresent(existing)) continue;
+        final status = (existing?['status']?.toString() ?? '')
+            .trim()
+            .toLowerCase();
+        if (status == 'absent') continue;
+        final updated = await _patchSessionAttendanceAbsent(
+          sessionId: sessionId,
+          registrationId: registrationId,
+          ticketId: ticketId,
+          existingRow: existing,
+          nowIso: nowIso,
+        );
+        if (updated != null) {
+          changed = true;
+        }
+      }
+    }
+
+    return changed;
+  }
+
+  Future<bool> _materializeMissedAttendanceForEvent(
+    String eventId, {
+    List<Map<String, dynamic>> participants = const <Map<String, dynamic>>[],
+  }) async {
+    try {
+      final event = await _loadEventForAttendanceMaterialization(eventId);
+      if (event == null) return false;
+
+      final sourceParticipants =
+          participants.where((item) => item.isNotEmpty).toList();
+      if (sourceParticipants.isEmpty) return false;
+
+      if (_eventUsesSessions(event)) {
+        return _materializeSessionAbsences(
+          eventId: eventId,
+          participants: sourceParticipants,
+        );
+      }
+      return _materializeSimpleEventAbsences(
+        event: event,
+        participants: sourceParticipants,
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<Map<String, dynamic>> _recordSessionAttendance({
     required String ticketId,
     required String registrationId,
     required String sessionId,
     required String teacherId,
     required String nowIso,
+    String? scannedAtIso,
     required Map<String, dynamic> session,
     required String participantName,
     required String participantPhotoUrl,
     required String participantStudentId,
     required bool dryRun,
   }) async {
+    final effectiveScanAtIso = _normalizedScanTimestampIso(
+      scannedAtIso,
+      fallbackIso: nowIso,
+    );
     final displayName = session['display_name']?.toString().trim();
     final sessionName = (displayName?.isNotEmpty ?? false)
         ? displayName!
@@ -623,7 +1094,43 @@ class EventService {
             .eq('ticket_id', ticketId)
             .limit(1);
         if (existing.isNotEmpty) {
-          return alreadyRecordedResponse();
+          final attendance = Map<String, dynamic>.from(existing.first);
+          final alreadyCheckedIn = _attendanceRecordCountsAsPresent(attendance);
+          if (alreadyCheckedIn) {
+            if (!dryRun &&
+                _shouldApplyIncomingCheckIn(
+                  incomingScanAtIso: effectiveScanAtIso,
+                  recordedCheckInAt: attendance['check_in_at'],
+                )) {
+              await _supabase
+                  .from('event_session_attendance')
+                  .update({
+                    'status': 'present',
+                    'check_in_at': effectiveScanAtIso,
+                    'updated_at': nowIso,
+                  })
+                  .eq('id', attendance['id']);
+              return successResponse();
+            }
+            return alreadyRecordedResponse();
+          }
+
+          if (dryRun) {
+            return successResponse();
+          }
+
+          await _supabase
+              .from('event_session_attendance')
+              .update({
+                'status': 'present',
+                'check_in_at': effectiveScanAtIso,
+                'last_scanned_by': teacherId,
+                'last_scanned_at': effectiveScanAtIso,
+                'updated_at': nowIso,
+              })
+              .eq('id', attendance['id']);
+
+          return successResponse();
         }
 
         if (dryRun) {
@@ -635,15 +1142,38 @@ class EventService {
           'registration_id': registrationId,
           'ticket_id': ticketId,
           'status': 'present',
-          'check_in_at': nowIso,
+          'check_in_at': effectiveScanAtIso,
           'last_scanned_by': teacherId,
-          'last_scanned_at': nowIso,
+          'last_scanned_at': effectiveScanAtIso,
           'updated_at': nowIso,
         });
 
         return successResponse();
       } catch (e) {
         if (_isUniqueViolationError(e)) {
+          final existing = await _supabase
+              .from('event_session_attendance')
+              .select('id,status,check_in_at')
+              .eq('session_id', sessionId)
+              .eq('ticket_id', ticketId)
+              .limit(1);
+          if (existing.isNotEmpty && !dryRun) {
+            final attendance = Map<String, dynamic>.from(existing.first);
+            if (_shouldApplyIncomingCheckIn(
+              incomingScanAtIso: effectiveScanAtIso,
+              recordedCheckInAt: attendance['check_in_at'],
+            )) {
+              await _supabase
+                  .from('event_session_attendance')
+                  .update({
+                    'status': 'present',
+                    'check_in_at': effectiveScanAtIso,
+                    'updated_at': nowIso,
+                  })
+                  .eq('id', attendance['id']);
+              return successResponse();
+            }
+          }
           return alreadyRecordedResponse();
         }
         if (!_isEventSessionAttendanceUnavailableError(e) &&
@@ -674,6 +1204,23 @@ class EventService {
               (attendance['check_in_at']?.toString().trim().isNotEmpty ??
                   false);
           if (alreadyCheckedIn) {
+            if (!dryRun &&
+                _shouldApplyIncomingCheckIn(
+                  incomingScanAtIso: effectiveScanAtIso,
+                  recordedCheckInAt: attendance['check_in_at'],
+                )) {
+              final payload = <String, dynamic>{
+                'status': 'present',
+                'check_in_at': effectiveScanAtIso,
+              };
+
+              await _supabase
+                  .from('attendance')
+                  .update(payload)
+                  .eq('id', attendance['id']);
+
+              return successResponse();
+            }
             return alreadyRecordedResponse();
           }
 
@@ -683,10 +1230,10 @@ class EventService {
 
           final payload = <String, dynamic>{
             'status': 'present',
-            'check_in_at': nowIso,
+            'check_in_at': effectiveScanAtIso,
           };
           if (supportsLastScannedAt) {
-            payload['last_scanned_at'] = nowIso;
+            payload['last_scanned_at'] = effectiveScanAtIso;
           }
 
           await _supabase
@@ -701,10 +1248,10 @@ class EventService {
           'ticket_id': ticketId,
           'session_id': sessionId,
           'status': 'present',
-          'check_in_at': nowIso,
+          'check_in_at': effectiveScanAtIso,
         };
         if (supportsLastScannedAt) {
-          insertPayload['last_scanned_at'] = nowIso;
+          insertPayload['last_scanned_at'] = effectiveScanAtIso;
         }
 
         if (dryRun) {
@@ -716,6 +1263,29 @@ class EventService {
         return successResponse();
       } catch (e) {
         if (_isUniqueViolationError(e)) {
+          final existingRows = await _supabase
+              .from('attendance')
+              .select('id,status,check_in_at')
+              .eq('ticket_id', ticketId)
+              .eq('session_id', sessionId)
+              .limit(1);
+          if (existingRows.isNotEmpty && !dryRun) {
+            final attendance = Map<String, dynamic>.from(existingRows.first);
+            if (_shouldApplyIncomingCheckIn(
+              incomingScanAtIso: effectiveScanAtIso,
+              recordedCheckInAt: attendance['check_in_at'],
+            )) {
+              final payload = <String, dynamic>{
+                'status': 'present',
+                'check_in_at': effectiveScanAtIso,
+              };
+              await _supabase
+                  .from('attendance')
+                  .update(payload)
+                  .eq('id', attendance['id']);
+              return successResponse();
+            }
+          }
           return alreadyRecordedResponse();
         }
         if (_isAccessPolicyError(e)) {
@@ -1131,6 +1701,7 @@ class EventService {
   Map<String, dynamic> _resolveEventWindowContext(
     Map<String, dynamic> eventSummary,
     dynamic startRaw,
+    dynamic endRaw,
     DateTime nowUtc, {
     String source = 'event',
     String missingMessage = 'Event start time is missing.',
@@ -1152,7 +1723,13 @@ class EventService {
       };
     }
 
-    final closesAt = startAt.add(const Duration(minutes: 30));
+    final windowMinutes =
+        int.tryParse(eventSummary['grace_time']?.toString() ?? '') ?? 30;
+    var closesAt = startAt.add(Duration(minutes: windowMinutes));
+    final endAt = _toUtcDate(endRaw);
+    if (endAt != null && endAt.isBefore(closesAt)) {
+      closesAt = endAt;
+    }
     if (nowUtc.isBefore(startAt)) {
       return {
         'status': 'waiting',
@@ -1161,7 +1738,7 @@ class EventService {
         'session': null,
         'opens_at': startAt.toIso8601String(),
         'closes_at': closesAt.toIso8601String(),
-        'window_minutes': 30,
+        'window_minutes': windowMinutes,
         'message': waitingMessage,
       };
     }
@@ -1174,7 +1751,7 @@ class EventService {
         'session': null,
         'opens_at': startAt.toIso8601String(),
         'closes_at': closesAt.toIso8601String(),
-        'window_minutes': 30,
+        'window_minutes': windowMinutes,
         'message': closedMessage,
       };
     }
@@ -1186,7 +1763,7 @@ class EventService {
       'session': null,
       'opens_at': startAt.toIso8601String(),
       'closes_at': closesAt.toIso8601String(),
-      'window_minutes': 30,
+      'window_minutes': windowMinutes,
       'message': openMessage,
     };
   }
@@ -1202,6 +1779,7 @@ class EventService {
       'location': event['location']?.toString() ?? '',
       'start_at': event['start_at']?.toString() ?? '',
       'end_at': event['end_at']?.toString() ?? '',
+      'grace_time': event['grace_time'],
     };
 
     if (eventId.isEmpty) {
@@ -1225,6 +1803,7 @@ class EventService {
         return _resolveEventWindowContext(
           eventSummary,
           event['start_at'],
+          event['end_at'],
           nowUtc,
           missingMessage: 'No seminar schedule found for this event.',
           waitingMessage: 'Waiting for event scan window.',
@@ -1242,7 +1821,11 @@ class EventService {
         if (startAt == null) continue;
 
         final windowMinutes = _sessionWindowMinutes(session);
-        final closesAt = startAt.add(Duration(minutes: windowMinutes));
+        var closesAt = startAt.add(Duration(minutes: windowMinutes));
+        final sessionEndAt = _toUtcDate(session['end_at']);
+        if (sessionEndAt != null && sessionEndAt.isBefore(closesAt)) {
+          closesAt = sessionEndAt;
+        }
         final payload = {
           'session': session,
           'opens_at': startAt.toIso8601String(),
@@ -1339,6 +1922,7 @@ class EventService {
         return _resolveEventWindowContext(
           eventSummary,
           event['start_at'],
+          event['end_at'],
           nowUtc,
           missingMessage: 'Seminar schedule is unavailable for this event.',
           waitingMessage: 'Waiting for event scan window.',
@@ -1378,7 +1962,12 @@ class EventService {
       };
     }
 
-    return _resolveEventWindowContext(eventSummary, event['start_at'], nowUtc);
+    return _resolveEventWindowContext(
+      eventSummary,
+      event['start_at'],
+      event['end_at'],
+      nowUtc,
+    );
   }
 
   String _normalizeTargetCourse(String? rawCourse) {
@@ -2443,12 +3032,11 @@ class EventService {
       );
       return {
         'ok': true,
-        'status': 'closed',
+        'status': 'no_assignment',
         'scanner_enabled': false,
-        'message':
-            closed.first['message']?.toString() ?? 'Scan window is closed.',
-        'context': closed.first,
-        'assignments': events.length,
+        'message': 'Assigned scanner event has already ended.',
+        'context': null,
+        'assignments': 0,
         'server_time': nowUtc.toIso8601String(),
       };
     }
@@ -2640,7 +3228,7 @@ class EventService {
           eventRows = await _supabase
               .from('events')
               .select(
-                'id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure',
+                'id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time',
               )
               .inFilter('id', eventIds.toList())
               .eq('status', 'published')
@@ -2650,7 +3238,7 @@ class EventService {
             eventRows = await _supabase
                 .from('events')
                 .select(
-                  'id,title,status,start_at,end_at,location,uses_sessions',
+                  'id,title,status,start_at,end_at,location,uses_sessions,grace_time',
                 )
                 .inFilter('id', eventIds.toList())
                 .eq('status', 'published')
@@ -2659,7 +3247,7 @@ class EventService {
             // Last-resort backward compatible schema (no uses_sessions).
             eventRows = await _supabase
                 .from('events')
-                .select('id,title,status,start_at,end_at,location')
+                .select('id,title,status,start_at,end_at,location,grace_time')
                 .inFilter('id', eventIds.toList())
                 .eq('status', 'published')
                 .limit(500);
@@ -3013,43 +3601,264 @@ class EventService {
   Future<List<Map<String, dynamic>>> getEventParticipants(
     String eventId,
   ) async {
-    try {
-      // Strategy 1: relational select with stable columns only.
-      final response = await _supabase
-          .from('event_registrations')
-          .select(
-            'id, registered_at, student_id, '
-            'users(first_name, middle_name, last_name, suffix, email, student_id), '
-            'tickets(*, attendance(*))',
-          )
-          .eq('event_id', eventId)
-          .order('registered_at', ascending: false);
-
-      final list = List<Map<String, dynamic>>.from(response);
-
-      // If users relation is null, fetch user profiles separately.
-      if (list.isNotEmpty && list[0]['users'] == null) {
-        final enriched = await _enrichParticipantsWithUsers(list);
-        return _enrichParticipantsWithSeminarAttendance(eventId, enriched);
-      }
-
-      return _enrichParticipantsWithSeminarAttendance(eventId, list);
-    } catch (_) {
-      // Strategy 2: if relational select fails, fetch base rows then enrich users.
+    Future<List<Map<String, dynamic>>> loadParticipants() async {
       try {
-        final base = await _supabase
+        final response = await _supabase
             .from('event_registrations')
-            .select('id, registered_at, student_id, tickets(*, attendance(*))')
+            .select(
+              'id, registered_at, student_id, '
+              'users(first_name, middle_name, last_name, suffix, email, student_id, photo_url), '
+              'tickets(*, attendance(*))',
+            )
             .eq('event_id', eventId)
             .order('registered_at', ascending: false);
-        final enriched = await _enrichParticipantsWithUsers(
-          List<Map<String, dynamic>>.from(base),
-        );
-        return _enrichParticipantsWithSeminarAttendance(eventId, enriched);
+
+        final list = List<Map<String, dynamic>>.from(response);
+        if (list.isNotEmpty && list[0]['users'] == null) {
+          final enriched = await _enrichParticipantsWithUsers(list);
+          return _enrichParticipantsWithSeminarAttendance(eventId, enriched);
+        }
+
+        return _enrichParticipantsWithSeminarAttendance(eventId, list);
       } catch (_) {
-        return [];
+        try {
+          final base = await _supabase
+              .from('event_registrations')
+              .select('id, registered_at, student_id, tickets(*, attendance(*))')
+              .eq('event_id', eventId)
+              .order('registered_at', ascending: false);
+          final enriched = await _enrichParticipantsWithUsers(
+            List<Map<String, dynamic>>.from(base),
+          );
+          return _enrichParticipantsWithSeminarAttendance(eventId, enriched);
+        } catch (_) {
+          return <Map<String, dynamic>>[];
+        }
       }
     }
+
+    final initial = await loadParticipants();
+    if (initial.isEmpty) return initial;
+
+    final materialized = await _materializeMissedAttendanceForEvent(
+      eventId,
+      participants: initial,
+    );
+    if (!materialized) {
+      return initial;
+    }
+
+    return loadParticipants();
+  }
+
+  Future<List<Map<String, dynamic>>> getOfflineScannerRoster(
+    String eventId,
+  ) async {
+    if (eventId.trim().isEmpty) return <Map<String, dynamic>>[];
+
+    Future<List<Map<String, dynamic>>> buildFromParticipants(
+      List<Map<String, dynamic>> participants,
+    ) async {
+      if (participants.isEmpty) return <Map<String, dynamic>>[];
+
+      final roster = <Map<String, dynamic>>[];
+      for (final participant in participants) {
+        final participantRow = Map<String, dynamic>.from(participant);
+        final userRaw = participantRow['users'];
+        Map<String, dynamic>? user;
+        if (userRaw is Map<String, dynamic>) {
+          user = userRaw;
+        } else if (userRaw is Map) {
+          user = Map<String, dynamic>.from(userRaw);
+        } else if (userRaw is List &&
+            userRaw.isNotEmpty &&
+            userRaw.first is Map) {
+          user = Map<String, dynamic>.from(userRaw.first as Map);
+        }
+
+        final registrationId = (participantRow['id']?.toString() ?? '').trim();
+        final participantName = _composeDisplayName(user);
+        final participantStudentId =
+            (user?['student_id']?.toString() ??
+                    participantRow['student_id']?.toString() ??
+                    '')
+                .trim();
+        final participantPhotoUrl = await _resolveAvatarDisplayUrl(
+          user?['photo_url']?.toString() ?? '',
+        );
+
+        final sessionPresence = <String, bool>{};
+        final sessionAttendance = participantRow['session_attendance'];
+        if (sessionAttendance is List) {
+          for (final item in sessionAttendance) {
+            if (item is! Map) continue;
+            final row = Map<String, dynamic>.from(item);
+            final sessionId = (row['session_id']?.toString() ?? '').trim();
+            if (sessionId.isEmpty) continue;
+            if (_attendanceRecordCountsAsPresent(row)) {
+              sessionPresence[sessionId] = true;
+            }
+          }
+        }
+
+        final ticketsRaw = participantRow['tickets'];
+        final tickets = ticketsRaw is List
+            ? ticketsRaw.whereType<Map>().map(Map<String, dynamic>.from).toList()
+            : (ticketsRaw is Map
+                  ? <Map<String, dynamic>>[Map<String, dynamic>.from(ticketsRaw)]
+                  : <Map<String, dynamic>>[]);
+        if (tickets.isEmpty) continue;
+        for (final rawTicket in tickets) {
+          final ticket = Map<String, dynamic>.from(rawTicket);
+          final ticketId = (ticket['id']?.toString() ?? '').trim();
+          if (ticketId.isEmpty) continue;
+
+          var attendanceStatus = 'unscanned';
+          final attendanceRaw = ticket['attendance'];
+          final attendance = attendanceRaw is List
+              ? attendanceRaw
+                  .whereType<Map>()
+                  .map(Map<String, dynamic>.from)
+                  .toList()
+              : (attendanceRaw is Map
+                    ? <Map<String, dynamic>>[Map<String, dynamic>.from(attendanceRaw)]
+                    : <Map<String, dynamic>>[]);
+          if (attendance.isNotEmpty) {
+            final row = Map<String, dynamic>.from(attendance.first);
+            if (_attendanceRecordCountsAsPresent(row)) {
+              attendanceStatus = 'present';
+            } else {
+              final rawStatus =
+                  (row['status']?.toString() ?? '').trim().toLowerCase();
+              attendanceStatus = rawStatus.isEmpty ? 'unscanned' : rawStatus;
+            }
+          }
+
+          roster.add({
+            'ticket_id': ticketId,
+            'registration_id': registrationId,
+            'event_id': eventId,
+            'participant_name': participantName,
+            'participant_student_id': participantStudentId,
+            'participant_photo_url': participantPhotoUrl,
+            'session_presence': sessionPresence,
+            'attendance_status': attendanceStatus,
+          });
+        }
+      }
+
+      return roster;
+    }
+
+    try {
+      List<Map<String, dynamic>> registrations;
+      try {
+        final response = await _supabase
+            .from('event_registrations')
+            .select(
+              'id, registered_at, student_id, '
+              'users(first_name, middle_name, last_name, suffix, email, student_id, photo_url)',
+            )
+            .eq('event_id', eventId)
+            .order('registered_at', ascending: false);
+        registrations = List<Map<String, dynamic>>.from(response);
+        if (registrations.isNotEmpty && registrations.first['users'] == null) {
+          registrations = await _enrichParticipantsWithUsers(registrations);
+        }
+      } catch (_) {
+        final base = await _supabase
+            .from('event_registrations')
+            .select('id, registered_at, student_id')
+            .eq('event_id', eventId)
+            .order('registered_at', ascending: false);
+        registrations = await _enrichParticipantsWithUsers(
+          List<Map<String, dynamic>>.from(base),
+        );
+      }
+
+      if (registrations.isEmpty) {
+        return <Map<String, dynamic>>[];
+      }
+
+      final registrationIds = registrations
+          .map((row) => row['id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet()
+          .toList();
+      if (registrationIds.isEmpty) {
+        return <Map<String, dynamic>>[];
+      }
+
+      final ticketRows = await _supabase
+          .from('tickets')
+          .select('id, registration_id')
+          .inFilter('registration_id', registrationIds);
+
+      final ticketsByRegistration = <String, List<Map<String, dynamic>>>{};
+      final ticketIds = <String>[];
+      for (final raw in List<Map<String, dynamic>>.from(ticketRows)) {
+        final ticketId = (raw['id']?.toString() ?? '').trim();
+        final registrationId = (raw['registration_id']?.toString() ?? '').trim();
+        if (ticketId.isEmpty || registrationId.isEmpty) continue;
+        ticketIds.add(ticketId);
+        ticketsByRegistration.putIfAbsent(registrationId, () => <Map<String, dynamic>>[]).add({
+          'id': ticketId,
+          'registration_id': registrationId,
+          'attendance': <Map<String, dynamic>>[],
+        });
+      }
+
+      if (ticketIds.isNotEmpty) {
+        try {
+          final attendanceRows = await _supabase
+              .from('attendance')
+              .select('ticket_id,status,check_in_at,last_scanned_at')
+              .inFilter('ticket_id', ticketIds);
+          for (final raw in List<Map<String, dynamic>>.from(attendanceRows)) {
+            final ticketId = (raw['ticket_id']?.toString() ?? '').trim();
+            if (ticketId.isEmpty) continue;
+            for (final entry in ticketsByRegistration.entries) {
+              final ticketIndex = entry.value.indexWhere(
+                (ticket) => (ticket['id']?.toString() ?? '').trim() == ticketId,
+              );
+              if (ticketIndex < 0) continue;
+              final ticket = Map<String, dynamic>.from(entry.value[ticketIndex]);
+              final attendance = ticket['attendance'] is List
+                  ? List<Map<String, dynamic>>.from(ticket['attendance'] as List)
+                  : <Map<String, dynamic>>[];
+              attendance.add(Map<String, dynamic>.from(raw));
+              ticket['attendance'] = attendance;
+              entry.value[ticketIndex] = ticket;
+              break;
+            }
+          }
+        } catch (_) {}
+      }
+
+      final participants = registrations.map((registration) {
+        final registrationId = (registration['id']?.toString() ?? '').trim();
+        return {
+          ...registration,
+          'tickets': List<Map<String, dynamic>>.from(
+            ticketsByRegistration[registrationId] ?? const <Map<String, dynamic>>[],
+          ),
+        };
+      }).toList();
+
+      final enriched = await _enrichParticipantsWithSeminarAttendance(
+        eventId,
+        participants,
+      );
+      final roster = await buildFromParticipants(enriched);
+      if (roster.isNotEmpty) {
+        return roster;
+      }
+    } catch (_) {
+      // Fallback below.
+    }
+
+    final participants = await getEventParticipants(eventId);
+    return buildFromParticipants(participants);
   }
 
   Future<bool> canTeacherManageAssistants(
@@ -3070,7 +3879,10 @@ class EventService {
     }
   }
 
-  Future<bool> canTeacherScanEvent(String eventId, String teacherId) async {
+  Future<bool?> verifyTeacherScanEventAccess(
+    String eventId,
+    String teacherId,
+  ) async {
     try {
       final response = await _supabase
           .from('event_teacher_assignments')
@@ -3081,13 +3893,16 @@ class EventService {
           .limit(1);
       return response.isNotEmpty;
     } catch (_) {
-      return false;
+      return null;
     }
   }
 
-  Future<bool> hasTeacherAnyScanAccess(String teacherId) async {
-    final now = DateTime.now().toUtc().toIso8601String();
+  Future<bool> canTeacherScanEvent(String eventId, String teacherId) async {
+    final verified = await verifyTeacherScanEventAccess(eventId, teacherId);
+    return verified == true;
+  }
 
+  Future<bool> hasTeacherAnyScanAccess(String teacherId) async {
     try {
       final assignmentRows = await _supabase
           .from('event_teacher_assignments')
@@ -3115,12 +3930,266 @@ class EventService {
           .select('id')
           .inFilter('id', eventIds)
           .eq('status', 'published')
-          .gte('end_at', now)
           .limit(1);
       return eventRows.isNotEmpty;
     } catch (_) {
       return false;
     }
+  }
+
+  DateTime? _parseReplayScanAtUtc(String? raw) {
+    final value = (raw ?? '').trim();
+    if (value.isEmpty) return null;
+    return DateTime.tryParse(value)?.toUtc();
+  }
+
+  Future<Map<String, String>> _loadTicketEventBinding(String ticketId) async {
+    var registrationId = '';
+    var eventId = '';
+
+    try {
+      final ticketRes = await _supabase
+          .from('tickets')
+          .select('id, registration_id, event_registrations!inner(event_id)')
+          .eq('id', ticketId)
+          .limit(1);
+
+      if (ticketRes.isNotEmpty) {
+        registrationId = ticketRes.first['registration_id']?.toString() ?? '';
+        final reg = ticketRes.first['event_registrations'];
+        if (reg is Map) {
+          eventId = reg['event_id']?.toString() ?? '';
+        } else if (reg is List && reg.isNotEmpty && reg.first is Map) {
+          eventId = (reg.first as Map)['event_id']?.toString() ?? '';
+        }
+      }
+    } catch (_) {
+      // Keep fallback query below.
+    }
+
+    if (eventId.isEmpty || registrationId.isEmpty) {
+      final ticketBaseRes = await _supabase
+          .from('tickets')
+          .select('id, registration_id')
+          .eq('id', ticketId)
+          .limit(1);
+
+      if (ticketBaseRes.isNotEmpty) {
+        registrationId =
+            ticketBaseRes.first['registration_id']?.toString() ??
+            registrationId;
+      }
+
+      if (registrationId.isNotEmpty) {
+        final regRes = await _supabase
+            .from('event_registrations')
+            .select('event_id')
+            .eq('id', registrationId)
+            .limit(1);
+        if (regRes.isNotEmpty) {
+          eventId = regRes.first['event_id']?.toString() ?? eventId;
+        }
+      }
+    }
+
+    return {
+      'registration_id': registrationId,
+      'event_id': eventId,
+    };
+  }
+
+  Future<Map<String, dynamic>?> _loadScannerReplayEvent(String eventId) async {
+    final id = eventId.trim();
+    if (id.isEmpty) return null;
+
+    try {
+      final rows = await _supabase
+          .from('events')
+          .select(
+            'id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time',
+          )
+          .eq('id', id)
+          .eq('status', 'published')
+          .limit(1);
+      if (rows.isNotEmpty) {
+        return Map<String, dynamic>.from(rows.first);
+      }
+    } catch (_) {
+      try {
+        final rows = await _supabase
+            .from('events')
+            .select(
+              'id,title,status,start_at,end_at,location,uses_sessions,grace_time',
+            )
+            .eq('id', id)
+            .eq('status', 'published')
+            .limit(1);
+        if (rows.isNotEmpty) {
+          return Map<String, dynamic>.from(rows.first);
+        }
+      } catch (_) {
+        final rows = await _supabase
+            .from('events')
+            .select('id,title,status,start_at,end_at,location,grace_time')
+            .eq('id', id)
+            .eq('status', 'published')
+            .limit(1);
+        if (rows.isNotEmpty) {
+          return Map<String, dynamic>.from(rows.first);
+        }
+      }
+    }
+
+    return null;
+  }
+
+  Future<Map<String, dynamic>> _resolveTeacherReplayScanContext({
+    required String teacherId,
+    required String ticketId,
+    required String scannedAtIso,
+  }) async {
+    final replayAt = _parseReplayScanAtUtc(scannedAtIso);
+    if (replayAt == null) {
+      return {
+        'ok': false,
+        'status': 'invalid',
+        'message': 'Recorded offline scan time is invalid.',
+      };
+    }
+
+    final binding = await _loadTicketEventBinding(ticketId);
+    final eventId = (binding['event_id'] ?? '').trim();
+    if (eventId.isEmpty) {
+      return {
+        'ok': false,
+        'status': 'invalid',
+        'message': 'Unable to resolve event for this ticket.',
+      };
+    }
+
+    final hasAccess = await canTeacherScanEvent(eventId, teacherId);
+    if (!hasAccess) {
+      return {
+        'ok': false,
+        'status': 'no_assignment',
+        'message': 'QR scanner access for this event was removed by admin.',
+      };
+    }
+
+    final event = await _loadScannerReplayEvent(eventId);
+    if (event == null) {
+      return {
+        'ok': false,
+        'status': 'invalid',
+        'message': 'Replay event data is unavailable.',
+      };
+    }
+
+    final context = await _resolveSingleEventScanContext(event, replayAt);
+    final status = (context['status']?.toString() ?? 'closed').trim().toLowerCase();
+    if (status != 'open') {
+      return {
+        'ok': false,
+        'status': status.isEmpty ? 'closed' : status,
+        'message':
+            context['message']?.toString() ??
+            'Recorded offline scan is outside the allowed scan window.',
+      };
+    }
+
+    return {
+      'ok': true,
+      'status': 'open',
+      'scanner_enabled': true,
+      'message': 'Replaying offline scan using the recorded scan time.',
+      'context': context,
+      'assignments': 1,
+    };
+  }
+
+  Future<Map<String, dynamic>> _resolveAssistantReplayScanContext({
+    required String studentId,
+    required String ticketId,
+    required String scannedAtIso,
+  }) async {
+    final replayAt = _parseReplayScanAtUtc(scannedAtIso);
+    if (replayAt == null) {
+      return {
+        'ok': false,
+        'status': 'invalid',
+        'message': 'Recorded offline scan time is invalid.',
+      };
+    }
+
+    final binding = await _loadTicketEventBinding(ticketId);
+    final eventId = (binding['event_id'] ?? '').trim();
+    if (eventId.isEmpty) {
+      return {
+        'ok': false,
+        'status': 'invalid',
+        'message': 'Unable to resolve event for this ticket.',
+      };
+    }
+
+    String assignedByTeacherId = '';
+    try {
+      final rows = await _supabase
+          .from('event_assistants')
+          .select('assigned_by_teacher_id')
+          .eq('event_id', eventId)
+          .eq('student_id', studentId)
+          .eq('allow_scan', true)
+          .limit(1);
+      if (rows.isNotEmpty) {
+        assignedByTeacherId =
+            rows.first['assigned_by_teacher_id']?.toString().trim() ?? '';
+      }
+    } catch (_) {
+      return {
+        'ok': false,
+        'status': 'error',
+        'message': 'Unable to verify assistant scanner access right now.',
+      };
+    }
+
+    if (assignedByTeacherId.isEmpty ||
+        !await canTeacherScanEvent(eventId, assignedByTeacherId)) {
+      return {
+        'ok': false,
+        'status': 'no_assignment',
+        'message': 'Scanner assistant access for this event is no longer available.',
+      };
+    }
+
+    final event = await _loadScannerReplayEvent(eventId);
+    if (event == null) {
+      return {
+        'ok': false,
+        'status': 'invalid',
+        'message': 'Replay event data is unavailable.',
+      };
+    }
+
+    final context = await _resolveSingleEventScanContext(event, replayAt);
+    final status = (context['status']?.toString() ?? 'closed').trim().toLowerCase();
+    if (status != 'open') {
+      return {
+        'ok': false,
+        'status': status.isEmpty ? 'closed' : status,
+        'message':
+            context['message']?.toString() ??
+            'Recorded offline scan is outside the allowed scan window.',
+      };
+    }
+
+    return {
+      'ok': true,
+      'status': 'open',
+      'scanner_enabled': true,
+      'message': 'Replaying offline scan using the recorded scan time.',
+      'context': context,
+      'assignments': 1,
+    };
   }
 
   Future<List<Map<String, dynamic>>> _enrichParticipantsWithUsers(
@@ -3140,7 +4209,7 @@ class EventService {
       final usersRes = await _supabase
           .from('users')
           .select(
-            'id, first_name, middle_name, last_name, suffix, email, student_id',
+            'id, first_name, middle_name, last_name, suffix, email, student_id, photo_url',
           )
           .inFilter('id', ids);
 
@@ -3164,6 +4233,7 @@ class EventService {
             'suffix': u['suffix'],
             'email': u['email'],
             'student_id': u['student_id'],
+            'photo_url': u['photo_url'],
             // Keep compatibility with existing UI renderers.
             'id_number': u['id_number'] ?? u['student_id'],
             'course': u['course'],
@@ -3271,7 +4341,7 @@ class EventService {
     final pushKey = Env.mobilePushApiKey.trim();
 
     // Preferred path when PHP backend is hosted.
-    if (baseUrl.isNotEmpty) {
+    if (_isHostedMobilePushConfiguredBaseUrl(baseUrl)) {
       final normalizedBase = baseUrl.endsWith('/')
           ? baseUrl.substring(0, baseUrl.length - 1)
           : baseUrl;
@@ -3589,7 +4659,7 @@ class EventService {
   Future<Map<String, dynamic>> checkInParticipantAsTeacher(
     String ticketPayload,
     String teacherId,
-    {bool dryRun = false}
+    {bool dryRun = false, String? scannedAtIso}
   ) async {
     if (!ticketPayload.startsWith('PULSE-')) {
       return {
@@ -3600,29 +4670,43 @@ class EventService {
     }
 
     final ticketId = ticketPayload.replaceFirst('PULSE-', '').trim();
+    final replayRequested =
+        !dryRun && ((scannedAtIso?.trim().isNotEmpty) ?? false);
 
     try {
-      final scanContext = await getTeacherScanContext(teacherId);
-      if (scanContext['ok'] != true) {
-        return {
-          'ok': false,
-          'error':
-              scanContext['message']?.toString() ??
-              'Unable to load scanner context.',
-          'status': scanContext['status']?.toString() ?? 'error',
-        };
-      }
+      var scanContext = await getTeacherScanContext(teacherId);
+      var contextStatus =
+          (scanContext['status']?.toString() ?? '').toLowerCase();
+      if (scanContext['ok'] != true || contextStatus != 'open') {
+        if (!replayRequested) {
+          return {
+            'ok': false,
+            'error':
+                scanContext['message']?.toString() ??
+                'Scanner is not open for this schedule.',
+            'status':
+                contextStatus.isEmpty
+                    ? (scanContext['status']?.toString() ?? 'error')
+                    : contextStatus,
+          };
+        }
 
-      final contextStatus = (scanContext['status']?.toString() ?? '')
-          .toLowerCase();
-      if (contextStatus != 'open') {
-        return {
-          'ok': false,
-          'error':
-              scanContext['message']?.toString() ??
-              'Scanner is not open for this schedule.',
-          'status': contextStatus.isEmpty ? 'closed' : contextStatus,
-        };
+        final replayContext = await _resolveTeacherReplayScanContext(
+          teacherId: teacherId,
+          ticketId: ticketId,
+          scannedAtIso: scannedAtIso ?? '',
+        );
+        if (replayContext['ok'] != true) {
+          return {
+            'ok': false,
+            'error':
+                replayContext['message']?.toString() ??
+                'Recorded offline scan is outside the allowed scan window.',
+            'status': replayContext['status']?.toString() ?? 'error',
+          };
+        }
+        scanContext = replayContext;
+        contextStatus = 'open';
       }
 
       final context = scanContext['context'];
@@ -3644,57 +4728,16 @@ class EventService {
         };
       }
 
-      String ticketEventId = '';
-      String registrationId = '';
+      final binding = await _loadTicketEventBinding(ticketId);
+      final ticketEventId = (binding['event_id'] ?? '').trim();
+      final registrationId = (binding['registration_id'] ?? '').trim();
 
-      try {
-        final ticketRes = await _supabase
-            .from('tickets')
-            .select('id, registration_id, event_registrations!inner(event_id)')
-            .eq('id', ticketId)
-            .limit(1);
-
-        if (ticketRes.isNotEmpty) {
-          registrationId = ticketRes.first['registration_id']?.toString() ?? '';
-          final reg = ticketRes.first['event_registrations'];
-          if (reg is Map) {
-            ticketEventId = reg['event_id']?.toString() ?? '';
-          } else if (reg is List && reg.isNotEmpty && reg.first is Map) {
-            ticketEventId = (reg.first as Map)['event_id']?.toString() ?? '';
-          }
-        }
-      } catch (_) {
-        // fallback query below
-      }
-
-      if (ticketEventId.isEmpty || registrationId.isEmpty) {
-        final ticketBaseRes = await _supabase
-            .from('tickets')
-            .select('id, registration_id')
-            .eq('id', ticketId)
-            .limit(1);
-
-        if (ticketBaseRes.isEmpty) {
-          return {
-            'ok': false,
-            'error': 'Ticket not found in the system.',
-            'status': 'invalid',
-          };
-        }
-
-        registrationId =
-            ticketBaseRes.first['registration_id']?.toString() ??
-            registrationId;
-        if (registrationId.isNotEmpty) {
-          final regRes = await _supabase
-              .from('event_registrations')
-              .select('event_id')
-              .eq('id', registrationId)
-              .limit(1);
-          if (regRes.isNotEmpty) {
-            ticketEventId = regRes.first['event_id']?.toString() ?? '';
-          }
-        }
+      if (registrationId.isEmpty) {
+        return {
+          'ok': false,
+          'error': 'Ticket not found in the system.',
+          'status': 'invalid',
+        };
       }
 
       if (ticketEventId.isEmpty) {
@@ -3714,6 +4757,10 @@ class EventService {
       }
 
       final nowIso = DateTime.now().toUtc().toIso8601String();
+      final effectiveScanAtIso = _normalizedScanTimestampIso(
+        scannedAtIso,
+        fallbackIso: nowIso,
+      );
       final participantIdentity = await _resolveParticipantIdentityForRegistration(
         registrationId,
       );
@@ -3747,6 +4794,7 @@ class EventService {
           sessionId: sessionId,
           teacherId: teacherId,
           nowIso: nowIso,
+          scannedAtIso: effectiveScanAtIso,
           session: session,
           participantName: participantName,
           participantPhotoUrl: participantPhotoUrl,
@@ -3773,6 +4821,29 @@ class EventService {
           _isCheckedInStatus(attendance['status']) ||
           (attendance['check_in_at']?.toString().trim().isNotEmpty ?? false);
       if (alreadyCheckedIn) {
+        if (!dryRun &&
+            _shouldApplyIncomingCheckIn(
+              incomingScanAtIso: effectiveScanAtIso,
+              recordedCheckInAt: attendance['check_in_at'],
+            )) {
+          await _supabase
+              .from('attendance')
+              .update({
+                'status': 'present',
+                'check_in_at': effectiveScanAtIso,
+              })
+              .eq('ticket_id', ticketId);
+
+          return {
+            'ok': true,
+            'ticket_id': ticketId,
+            'status': 'present',
+            'participant_name': participantName,
+            'participant_photo_url': participantPhotoUrl,
+            'participant_student_id': participantStudentId,
+            'message': 'Check-in synchronized using the earliest recorded scan time.',
+          };
+        }
         return {
           'ok': false,
           'error': 'Ticket already checked in.',
@@ -3799,8 +4870,8 @@ class EventService {
           .from('attendance')
           .update({
             'status': 'present',
-            'check_in_at': nowIso,
-            'last_scanned_at': nowIso,
+            'check_in_at': effectiveScanAtIso,
+            'last_scanned_at': effectiveScanAtIso,
           })
           .eq('ticket_id', ticketId);
 
@@ -3856,7 +4927,7 @@ class EventService {
   Future<Map<String, dynamic>> checkInParticipantAsAssistant(
     String ticketPayload,
     String studentId,
-    {bool dryRun = false}
+    {bool dryRun = false, String? scannedAtIso}
   ) async {
     if (!ticketPayload.startsWith('PULSE-')) {
       return {
@@ -3867,29 +4938,43 @@ class EventService {
     }
 
     final ticketId = ticketPayload.replaceFirst('PULSE-', '').trim();
+    final replayRequested =
+        !dryRun && ((scannedAtIso?.trim().isNotEmpty) ?? false);
 
     try {
-      final scanContext = await getStudentScanContext(studentId);
-      if (scanContext['ok'] != true) {
-        return {
-          'ok': false,
-          'error':
-              scanContext['message']?.toString() ??
-              'Unable to load scanner context.',
-          'status': scanContext['status']?.toString() ?? 'error',
-        };
-      }
+      var scanContext = await getStudentScanContext(studentId);
+      var contextStatus =
+          (scanContext['status']?.toString() ?? '').toLowerCase();
+      if (scanContext['ok'] != true || contextStatus != 'open') {
+        if (!replayRequested) {
+          return {
+            'ok': false,
+            'error':
+                scanContext['message']?.toString() ??
+                'Scanner is not open for this schedule.',
+            'status':
+                contextStatus.isEmpty
+                    ? (scanContext['status']?.toString() ?? 'error')
+                    : contextStatus,
+          };
+        }
 
-      final contextStatus = (scanContext['status']?.toString() ?? '')
-          .toLowerCase();
-      if (contextStatus != 'open') {
-        return {
-          'ok': false,
-          'error':
-              scanContext['message']?.toString() ??
-              'Scanner is not open for this schedule.',
-          'status': contextStatus.isEmpty ? 'closed' : contextStatus,
-        };
+        final replayContext = await _resolveAssistantReplayScanContext(
+          studentId: studentId,
+          ticketId: ticketId,
+          scannedAtIso: scannedAtIso ?? '',
+        );
+        if (replayContext['ok'] != true) {
+          return {
+            'ok': false,
+            'error':
+                replayContext['message']?.toString() ??
+                'Recorded offline scan is outside the allowed scan window.',
+            'status': replayContext['status']?.toString() ?? 'error',
+          };
+        }
+        scanContext = replayContext;
+        contextStatus = 'open';
       }
 
       final context = scanContext['context'];
@@ -3911,57 +4996,16 @@ class EventService {
         };
       }
 
-      String ticketEventId = '';
-      String registrationId = '';
+      final binding = await _loadTicketEventBinding(ticketId);
+      final ticketEventId = (binding['event_id'] ?? '').trim();
+      final registrationId = (binding['registration_id'] ?? '').trim();
 
-      try {
-        final ticketRes = await _supabase
-            .from('tickets')
-            .select('id, registration_id, event_registrations!inner(event_id)')
-            .eq('id', ticketId)
-            .limit(1);
-
-        if (ticketRes.isNotEmpty) {
-          registrationId = ticketRes.first['registration_id']?.toString() ?? '';
-          final reg = ticketRes.first['event_registrations'];
-          if (reg is Map) {
-            ticketEventId = reg['event_id']?.toString() ?? '';
-          } else if (reg is List && reg.isNotEmpty && reg.first is Map) {
-            ticketEventId = (reg.first as Map)['event_id']?.toString() ?? '';
-          }
-        }
-      } catch (_) {
-        // fallback query below
-      }
-
-      if (ticketEventId.isEmpty || registrationId.isEmpty) {
-        final ticketBaseRes = await _supabase
-            .from('tickets')
-            .select('id, registration_id')
-            .eq('id', ticketId)
-            .limit(1);
-
-        if (ticketBaseRes.isEmpty) {
-          return {
-            'ok': false,
-            'error': 'Ticket not found in the system.',
-            'status': 'invalid',
-          };
-        }
-
-        registrationId =
-            ticketBaseRes.first['registration_id']?.toString() ??
-            registrationId;
-        if (registrationId.isNotEmpty) {
-          final regRes = await _supabase
-              .from('event_registrations')
-              .select('event_id')
-              .eq('id', registrationId)
-              .limit(1);
-          if (regRes.isNotEmpty) {
-            ticketEventId = regRes.first['event_id']?.toString() ?? '';
-          }
-        }
+      if (registrationId.isEmpty) {
+        return {
+          'ok': false,
+          'error': 'Ticket not found in the system.',
+          'status': 'invalid',
+        };
       }
 
       if (ticketEventId.isEmpty) {
@@ -3981,6 +5025,10 @@ class EventService {
       }
 
       final nowIso = DateTime.now().toUtc().toIso8601String();
+      final effectiveScanAtIso = _normalizedScanTimestampIso(
+        scannedAtIso,
+        fallbackIso: nowIso,
+      );
       final participantIdentity = await _resolveParticipantIdentityForRegistration(
         registrationId,
       );
@@ -4014,6 +5062,7 @@ class EventService {
           sessionId: sessionId,
           teacherId: studentId,
           nowIso: nowIso,
+          scannedAtIso: effectiveScanAtIso,
           session: session,
           participantName: participantName,
           participantPhotoUrl: participantPhotoUrl,
@@ -4040,6 +5089,29 @@ class EventService {
           _isCheckedInStatus(attendance['status']) ||
           (attendance['check_in_at']?.toString().trim().isNotEmpty ?? false);
       if (alreadyCheckedIn) {
+        if (!dryRun &&
+            _shouldApplyIncomingCheckIn(
+              incomingScanAtIso: effectiveScanAtIso,
+              recordedCheckInAt: attendance['check_in_at'],
+            )) {
+          await _supabase
+              .from('attendance')
+              .update({
+                'status': 'present',
+                'check_in_at': effectiveScanAtIso,
+              })
+              .eq('ticket_id', ticketId);
+
+          return {
+            'ok': true,
+            'ticket_id': ticketId,
+            'status': 'present',
+            'participant_name': participantName,
+            'participant_photo_url': participantPhotoUrl,
+            'participant_student_id': participantStudentId,
+            'message': 'Check-in synchronized using the earliest recorded scan time.',
+          };
+        }
         return {
           'ok': false,
           'error': 'Ticket already checked in.',
@@ -4066,8 +5138,8 @@ class EventService {
           .from('attendance')
           .update({
             'status': 'present',
-            'check_in_at': nowIso,
-            'last_scanned_at': nowIso,
+            'check_in_at': effectiveScanAtIso,
+            'last_scanned_at': effectiveScanAtIso,
           })
           .eq('ticket_id', ticketId);
 
@@ -5308,52 +6380,45 @@ class EventService {
       if (eventStartAt == null) {
         continue;
       }
-      final closesAt = eventStartAt.add(const Duration(minutes: 30));
+      final closesAt = eventStartAt.add(
+        Duration(minutes: _eventGraceMinutes(event)),
+      );
       if (!nowUtc.isAfter(closesAt)) {
-        continue;
-      }
-      final eventEndAt = _toUtcDate(event['end_at']);
-      final lockAt = eventEndAt ?? closesAt;
-      if (!nowUtc.isAfter(lockAt)) {
         continue;
       }
 
       var present = false;
+      var attendanceStateResolved = false;
       if (ticketId.isNotEmpty) {
         try {
           final attendanceRows = await _supabase
               .from('attendance')
               .select('status,check_in_at')
               .eq('ticket_id', ticketId)
-              .limit(1);
-          if (attendanceRows.isNotEmpty) {
-            present = _attendanceRecordCountsAsPresent(
-              Map<String, dynamic>.from(attendanceRows.first),
-            );
+              .limit(50);
+          for (final row in List<Map<String, dynamic>>.from(attendanceRows)) {
+            if (_attendanceRecordCountsAsPresent(row)) {
+              present = true;
+              break;
+            }
           }
+          attendanceStateResolved = true;
         } catch (_) {
-          present = false;
+          attendanceStateResolved = false;
         }
+      }
+
+      if (!attendanceStateResolved) {
+        // Fail-open when attendance lookup itself cannot be verified.
+        continue;
       }
 
       if (present) continue;
 
-      // Strict rule for simple events: only trigger if explicitly absent.
-      bool explicitlyAbsent = false;
-      if (ticketId.isNotEmpty) {
-        try {
-          final absentRows = await _supabase
-              .from('attendance')
-              .select('status')
-              .eq('ticket_id', ticketId)
-              .eq('status', 'absent')
-              .limit(1);
-          explicitlyAbsent = absentRows.isNotEmpty;
-        } catch (_) {
-          explicitlyAbsent = false;
-        }
-      }
-      if (!explicitlyAbsent) continue;
+      // Simple-event lock should align with the rest of the attendance flow:
+      // once the grace window is closed and there is no present record,
+      // treat the registration as missed/absent even if the explicit absent
+      // row has not been materialized yet.
 
       final scopeKey = _absenceScopeKey(eventId);
       if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {

@@ -6,8 +6,13 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:crypto/crypto.dart';
 import 'package:bcrypt/bcrypt.dart';
 
+import 'offline_backup_service.dart';
+import 'offline_scan_store.dart';
+import 'offline_sync_service.dart';
+
 class AuthService {
   final _supabase = Supabase.instance.client;
+  final OfflineBackupService _offlineBackupService = OfflineBackupService();
   static final RegExp _emailRegex = RegExp(
     r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$",
     caseSensitive: false,
@@ -165,6 +170,7 @@ class AuthService {
         'user_role',
         (user['role']?.toString() ?? 'student'),
       );
+      await _offlineBackupService.autoBackupIfConfigured();
       return user;
     } catch (_) {
       return null;
@@ -273,6 +279,9 @@ class AuthService {
         }
       }
       final userId = user['id']?.toString() ?? '';
+      var restoredOfflineQueueCount = 0;
+      var syncedOfflineQueueCount = 0;
+      var reconciledOfflineQueueCount = 0;
       if (userId.isNotEmpty) {
         _mergeAvatarCache(user, prefs, userId);
       }
@@ -293,8 +302,48 @@ class AuthService {
           );
         }
       }
+      await _offlineBackupService.autoRestoreIfNeeded();
+      if (userId.isNotEmpty) {
+        try {
+          final offlineSyncService = OfflineSyncService();
+          final isTeacher = role.toLowerCase() == 'teacher';
+          restoredOfflineQueueCount = await offlineSyncService.pendingQueueCount(
+            actorId: userId,
+            isTeacher: isTeacher,
+          );
+          await offlineSyncService.syncPendingQueue(
+            actorId: userId,
+            isTeacher: isTeacher,
+          ).then((result) {
+            syncedOfflineQueueCount =
+                (result['synced'] is num)
+                    ? (result['synced'] as num).toInt()
+                    : int.tryParse(result['synced']?.toString() ?? '') ?? 0;
+            reconciledOfflineQueueCount =
+                (result['conflict_resolved'] is num)
+                    ? (result['conflict_resolved'] as num).toInt()
+                    : int.tryParse(
+                            result['conflict_resolved']?.toString() ?? '',
+                          ) ??
+                        0;
+          });
+          await offlineSyncService.refreshSnapshotForCurrentScanner(
+            actorId: userId,
+            isTeacher: isTeacher,
+          );
+        } catch (_) {
+          // Keep login resilient if offline recovery cannot finish right away.
+        }
+      }
+      await _offlineBackupService.autoBackupIfConfigured(force: true);
 
-      return {'ok': true, 'user': user};
+      return {
+        'ok': true,
+        'user': user,
+        'restored_offline_queue_count': restoredOfflineQueueCount,
+        'synced_offline_queue_count': syncedOfflineQueueCount,
+        'reconciled_offline_queue_count': reconciledOfflineQueueCount,
+      };
     } catch (e) {
       return {'ok': false, 'error': 'Connection error. Please try again.'};
     }
@@ -384,7 +433,24 @@ class AuthService {
       // Fail silently - still proceed with logout
     }
     final prefs = await SharedPreferences.getInstance();
+    final preservedStringLists = <String, List<String>>{};
+    for (final key in prefs.getKeys()) {
+      if (key == 'shown_local_interactive_notifications' ||
+          key.startsWith('shown_local_interactive_notifications_') ||
+          key == 'pwd_changes' ||
+          key.startsWith('pwd_changes_')) {
+        final value = prefs.getStringList(key);
+        if (value != null) {
+          preservedStringLists[key] = List<String>.from(value);
+        }
+      }
+    }
     await prefs.clear();
+    for (final entry in preservedStringLists.entries) {
+      await prefs.setStringList(entry.key, entry.value);
+    }
+    await OfflineScanStore.instance.clearAll();
+    await _offlineBackupService.autoBackupIfConfigured();
   }
 
   // Clear local login markers without touching remote tokens/state.
@@ -393,6 +459,8 @@ class AuthService {
     await prefs.remove('user_id');
     await prefs.remove('user_role');
     await prefs.remove('user_data');
+    await OfflineScanStore.instance.clearAll();
+    await _offlineBackupService.autoBackupIfConfigured();
   }
 
   // Simple password hashing (for MVP)
@@ -513,6 +581,7 @@ class AuthService {
 
       // Update local storage
       await prefs.setString('user_data', jsonEncode(response));
+      await _offlineBackupService.autoBackupIfConfigured();
 
       return {'ok': true, 'user': response};
     } catch (e) {
@@ -571,6 +640,7 @@ class AuthService {
       if (warning != null) {
         response['warning'] = warning;
       }
+      await _offlineBackupService.autoBackupIfConfigured();
       return response;
     } catch (e) {
       return {'ok': false, 'error': 'Photo update failed: ${e.toString()}'};

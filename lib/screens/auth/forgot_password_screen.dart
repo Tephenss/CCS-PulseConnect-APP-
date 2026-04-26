@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:bcrypt/bcrypt.dart';
 import 'dart:math';
 import 'package:mailer/mailer.dart';
-import 'package:mailer/smtp_server/gmail.dart';
+import 'package:mailer/smtp_server.dart';
 import '../../widgets/custom_loader.dart';
 import '../../utils/teacher_theme_utils.dart';
 import '../../config/env.dart';
@@ -34,6 +35,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
   int _currentStep = 0; // 0 = email, 1 = code, 2 = new password, 3 = success
   String? _verifiedUserId;
   String? _resetToken;
+  String? _lastResetEmailError;
 
   bool get _isTeacher => widget.role.toLowerCase() == 'teacher';
   Color get _primaryColor =>
@@ -116,7 +118,11 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
         code: code,
       );
       if (!sent) {
-        _showError('Unable to send reset code email. Please try again.');
+        _showError(
+          (_lastResetEmailError ?? '').trim().isNotEmpty
+              ? _lastResetEmailError!
+              : 'Unable to send reset code email. Please try again.',
+        );
         setState(() => _isLoading = false);
         return;
       }
@@ -754,11 +760,43 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
     required String fullName,
     required String code,
   }) async {
+    _lastResetEmailError = null;
     final sender = Env.emailSenderAddress.trim();
-    final appPassword = Env.emailSenderAppPassword.trim();
-    if (sender.isEmpty || appPassword.isEmpty) return false;
-    try {
-      final smtpServer = gmail(sender, appPassword);
+    final appPassword = Env.emailSenderAppPassword.replaceAll(
+      RegExp(r'\s+'),
+      '',
+    );
+    if (sender.isEmpty ||
+        appPassword.isEmpty ||
+        recipientEmail.trim().isEmpty) {
+      _lastResetEmailError =
+          'Sender SMTP config is missing. Set sender email and app password.';
+      return false;
+    }
+
+    final smtpServers = <SmtpServer>[
+      gmail(sender, appPassword),
+      SmtpServer(
+        'smtp.gmail.com',
+        port: 465,
+        ssl: true,
+        username: sender,
+        password: appPassword,
+      ),
+      // Last-resort fallback for networks/devices with broken TLS trust chains.
+      // Keep this last so normal secure validation is always attempted first.
+      SmtpServer(
+        'smtp.gmail.com',
+        port: 465,
+        ssl: true,
+        ignoreBadCertificate: true,
+        username: sender,
+        password: appPassword,
+      ),
+    ];
+    String lastRawError = '';
+
+    for (var i = 0; i < smtpServers.length; i++) {
       final message = Message()
         ..from = Address(sender, 'CCS PulseConnect')
         ..recipients.add(recipientEmail.trim())
@@ -767,10 +805,45 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
             'Hello $fullName,\n\nUse this code to reset your password: $code\n\nThis code expires in 10 minutes.'
         ..html =
             '<div style="font-family:Arial,sans-serif;"><h2>CCS PulseConnect</h2><p>Hello <b>$fullName</b>,</p><p>Use this code to reset your password:</p><p style="font-size:24px;font-weight:700;letter-spacing:4px;">$code</p><p>This code expires in 10 minutes.</p></div>';
-      await send(message, smtpServer);
-      return true;
-    } catch (_) {
-      return false;
+      try {
+        await send(message, smtpServers[i]);
+        _lastResetEmailError = null;
+        return true;
+      } catch (e) {
+        lastRawError = e.toString();
+        if (kDebugMode) {
+          debugPrint(
+            'Password reset email send attempt ${i + 1} failed: $lastRawError',
+          );
+        }
+      }
     }
+
+    final lower = lastRawError.toLowerCase();
+    if (lower.contains('username and password not accepted') ||
+        lower.contains('authentication') ||
+        lower.contains('bad credentials') ||
+        lower.contains('535')) {
+      _lastResetEmailError =
+          'SMTP authentication failed. Check Gmail app password and 2-Step Verification.';
+    } else if (lower.contains('failed host lookup') ||
+        lower.contains('socketexception') ||
+        lower.contains('network is unreachable') ||
+        lower.contains('connection refused') ||
+        lower.contains('timed out')) {
+      _lastResetEmailError =
+          'Unable to reach Gmail SMTP server. Check internet or network firewall.';
+    } else if (lower.contains('certificate') ||
+        lower.contains('handshake') ||
+        lower.contains('tls')) {
+      _lastResetEmailError =
+          'SMTP TLS/SSL handshake failed on this network/device.';
+    } else if (lastRawError.trim().isNotEmpty) {
+      _lastResetEmailError = 'SMTP send failed: $lastRawError';
+    } else {
+      _lastResetEmailError =
+          'Unable to send reset code email. Please check sender SMTP settings.';
+    }
+    return false;
   }
 }

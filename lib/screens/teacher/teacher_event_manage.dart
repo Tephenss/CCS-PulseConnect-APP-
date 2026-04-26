@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:intl/intl.dart';
 import 'dart:io';
 import 'dart:async';
@@ -6,7 +7,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/auth_service.dart';
+import '../../services/app_cache_service.dart';
 import '../../services/event_service.dart';
+import '../../services/offline_sync_service.dart';
 import '../../widgets/custom_loader.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/teacher_theme_utils.dart';
@@ -23,6 +26,8 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
   late TabController _tabController;
   final _eventService = EventService();
   final _authService = AuthService();
+  final _appCacheService = AppCacheService();
+  final _offlineSyncService = OfflineSyncService();
 
   List<Map<String, dynamic>> _participants = [];
   List<Map<String, dynamic>> _assistants = [];
@@ -35,6 +40,10 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
   RealtimeChannel? _attendanceChannel;
   Timer? _participantsRefreshDebounce;
   Set<String> _eventSessionIds = <String>{};
+  bool _usingCachedParticipants = false;
+  int _pendingOfflineParticipantCount = 0;
+  bool _isOfflineMode = false;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
 
   @override
   void initState() {
@@ -43,23 +52,318 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     // Only show Participants and Assistants tabs for Published or Expired events
     _isApprovalPhase = status != 'published' && status != 'expired';
     _tabController = TabController(length: _isApprovalPhase ? 1 : 3, vsync: this);
+    unawaited(_initConnectivityMonitoring());
     _loadData();
+  }
+
+  bool _resultsAreOffline(List<ConnectivityResult> results) {
+    if (results.isEmpty) return true;
+    return !results.any((result) => result != ConnectivityResult.none);
+  }
+
+  Future<void> _initConnectivityMonitoring() async {
+    try {
+      final initial = await Connectivity().checkConnectivity();
+      if (!mounted) return;
+      setState(() => _isOfflineMode = _resultsAreOffline(initial));
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isOfflineMode = false);
+    }
+
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen((
+      results,
+    ) {
+      if (!mounted) return;
+      final nextOffline = _resultsAreOffline(results);
+      if (nextOffline == _isOfflineMode) return;
+      setState(() {
+        _isOfflineMode = nextOffline;
+        if (nextOffline && _participants.isNotEmpty) {
+          _usingCachedParticipants = true;
+        }
+      });
+      if (nextOffline) {
+        unawaited(_persistCurrentSnapshotToCache());
+      } else {
+        unawaited(_loadData());
+      }
+    });
+  }
+
+  Future<void> _persistCurrentSnapshotToCache() async {
+    final eventId = widget.event['id']?.toString() ?? '';
+    if (eventId.isEmpty) return;
+    try {
+      if (_participants.isNotEmpty) {
+        await _appCacheService.saveJsonList(
+          _participantsCacheKey(eventId),
+          _participants,
+        );
+      }
+      if (_assistants.isNotEmpty) {
+        await _appCacheService.saveJsonList(
+          _assistantsCacheKey(eventId),
+          _assistants,
+        );
+      }
+      if (_eventSessions.isNotEmpty) {
+        await _appCacheService.saveJsonList(
+          _sessionsCacheKey(eventId),
+          _eventSessions,
+        );
+      }
+    } catch (_) {
+      // Ignore cache persistence failures; current in-memory view remains usable.
+    }
+  }
+
+  String _participantsCacheKey(String eventId) =>
+      'teacher_event_manage_participants_$eventId';
+
+  String _assistantsCacheKey(String eventId) =>
+      'teacher_event_manage_assistants_$eventId';
+
+  String _sessionsCacheKey(String eventId) =>
+      'teacher_event_manage_sessions_$eventId';
+
+  String _participantKey(Map<String, dynamic> participant) {
+    final registrationId = (participant['id']?.toString() ?? '').trim();
+    if (registrationId.isNotEmpty) return 'registration:$registrationId';
+
+    final studentId =
+        (participant['student_id']?.toString() ??
+                ((participant['users'] is Map)
+                    ? (participant['users']['student_id']?.toString() ?? '')
+                    : ''))
+            .trim();
+    if (studentId.isNotEmpty) return 'student:$studentId';
+
+    final fallbackName = _getName(participant).trim().toLowerCase();
+    return fallbackName.isNotEmpty ? 'name:$fallbackName' : 'participant:unknown';
+  }
+
+  bool _participantHasPendingSync(Map<String, dynamic> participant) {
+    if (participant['offline_pending'] == true) return true;
+
+    final sessionAttendance = _getSessionAttendance(participant);
+    if (sessionAttendance.any((row) => row['offline_pending'] == true)) {
+      return true;
+    }
+
+    final tickets = participant['tickets'];
+    if (tickets is List) {
+      for (final rawTicket in tickets) {
+        if (rawTicket is! Map) continue;
+        final attendance = rawTicket['attendance'];
+        if (attendance is! List) continue;
+        for (final rawRow in attendance) {
+          if (rawRow is! Map) continue;
+          if (rawRow['offline_pending'] == true) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  List<Map<String, dynamic>> _mergeParticipantSources({
+    required List<Map<String, dynamic>> baseParticipants,
+    required List<Map<String, dynamic>> offlineParticipants,
+  }) {
+    final merged = <String, Map<String, dynamic>>{};
+
+    for (final participant in baseParticipants) {
+      merged[_participantKey(participant)] = Map<String, dynamic>.from(
+        participant,
+      );
+    }
+
+    for (final offline in offlineParticipants) {
+      final key = _participantKey(offline);
+      final existing = merged[key];
+      if (existing == null) {
+        merged[key] = Map<String, dynamic>.from(offline);
+        continue;
+      }
+
+      final next = Map<String, dynamic>.from(existing);
+      final offlineCopy = Map<String, dynamic>.from(offline);
+
+      final offlineId = (offlineCopy['id']?.toString() ?? '').trim();
+      if (offlineId.isNotEmpty) {
+        next['id'] = offlineId;
+      }
+
+      final offlineStudentId =
+          (offlineCopy['student_id']?.toString() ?? '').trim();
+      if (offlineStudentId.isNotEmpty) {
+        next['student_id'] = offlineStudentId;
+      }
+
+      final offlineDisplayName =
+          (offlineCopy['display_name']?.toString() ?? '').trim();
+      if (offlineDisplayName.isNotEmpty) {
+        next['display_name'] = offlineDisplayName;
+      }
+
+      final baseUsers = next['users'] is Map
+          ? Map<String, dynamic>.from(next['users'] as Map)
+          : <String, dynamic>{};
+      final offlineUsers = offlineCopy['users'] is Map
+          ? Map<String, dynamic>.from(offlineCopy['users'] as Map)
+          : <String, dynamic>{};
+      for (final entry in offlineUsers.entries) {
+        final value = entry.value?.toString().trim() ?? '';
+        if (value.isNotEmpty) {
+          baseUsers[entry.key] = entry.value;
+        }
+      }
+      next['users'] = baseUsers;
+
+      // Only override attendance payloads when offline rows are pending sync.
+      // This keeps website-accurate fetched status/time while still surfacing
+      // local unsynced updates.
+      if (offlineCopy['session_attendance'] is List) {
+        final offlineSessionRows = List<Map<String, dynamic>>.from(
+          (offlineCopy['session_attendance'] as List).map(
+            (row) => Map<String, dynamic>.from(row as Map),
+          ),
+        );
+        final hasPendingSessionRows = offlineSessionRows.any(
+          (row) => row['offline_pending'] == true,
+        );
+        if (hasPendingSessionRows) {
+          next['session_attendance'] = offlineSessionRows;
+        }
+      }
+
+      if (offlineCopy['tickets'] is List) {
+        final offlineTickets = List<Map<String, dynamic>>.from(
+          (offlineCopy['tickets'] as List).map(
+            (row) => Map<String, dynamic>.from(row as Map),
+          ),
+        );
+        final hasPendingTicketRows = offlineTickets.any((ticket) {
+          if (ticket['offline_pending'] == true) return true;
+          final attendance = ticket['attendance'];
+          if (attendance is! List) return false;
+          for (final row in attendance) {
+            if (row is Map && row['offline_pending'] == true) return true;
+          }
+          return false;
+        });
+        if (hasPendingTicketRows) {
+          next['tickets'] = offlineTickets;
+        }
+      }
+
+      if (offlineCopy['offline_pending'] == true) {
+        next['offline_pending'] = true;
+      }
+      if ((offlineCopy['offline_updated_at']?.toString() ?? '').trim().isNotEmpty) {
+        next['offline_updated_at'] = offlineCopy['offline_updated_at'];
+      }
+      if (offlineCopy['offline_cached'] == true) {
+        next['offline_cached'] = true;
+      }
+
+      merged[key] = next;
+    }
+
+    final rows = merged.values.toList()
+      ..sort(
+        (a, b) => _getName(a).toLowerCase().compareTo(_getName(b).toLowerCase()),
+      );
+    return rows;
+  }
+
+  Future<Map<String, dynamic>> _loadCachedEventData({
+    required String eventId,
+    required String teacherId,
+  }) async {
+    final cachedParticipants = await _appCacheService.loadJsonList(
+      _participantsCacheKey(eventId),
+    );
+    final cachedAssistants = await _appCacheService.loadJsonList(
+      _assistantsCacheKey(eventId),
+    );
+    final cachedSessions = await _appCacheService.loadJsonList(
+      _sessionsCacheKey(eventId),
+    );
+    final offlineParticipants = teacherId.trim().isEmpty
+        ? <Map<String, dynamic>>[]
+        : await _offlineSyncService.getOfflineParticipantRoster(
+            actorId: teacherId,
+            isTeacher: true,
+            eventId: eventId,
+          );
+
+    final mergedParticipants = _mergeParticipantSources(
+      baseParticipants: cachedParticipants,
+      offlineParticipants: offlineParticipants,
+    );
+
+    return {
+      'participants': mergedParticipants,
+      'assistants': cachedAssistants,
+      'sessions': cachedSessions,
+      'offline_participants': offlineParticipants,
+      'has_any':
+          mergedParticipants.isNotEmpty ||
+          cachedAssistants.isNotEmpty ||
+          cachedSessions.isNotEmpty,
+    };
   }
 
   Future<void> _loadData([bool showLoader = false]) async {
     if (showLoader && mounted) {
       setState(() => _isLoading = true);
     }
-    
+
     final eventId = widget.event['id']?.toString() ?? '';
     if (eventId.isEmpty) {
       if (mounted) setState(() => _isLoading = false);
       return;
     }
 
+    final user = await _authService.getCurrentUser();
+    final teacherId = user?['id']?.toString() ?? '';
+    final cachedData = await _loadCachedEventData(
+      eventId: eventId,
+      teacherId: teacherId,
+    );
+
+    if (mounted && cachedData['has_any'] == true) {
+      final cachedParticipants = List<Map<String, dynamic>>.from(
+        cachedData['participants'] as List,
+      );
+      final cachedAssistants = List<Map<String, dynamic>>.from(
+        cachedData['assistants'] as List,
+      );
+      final cachedSessions = List<Map<String, dynamic>>.from(
+        cachedData['sessions'] as List,
+      );
+      final cachedEventSessionIds = cachedSessions
+          .map((s) => s['id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet();
+      setState(() {
+        _participants = cachedParticipants;
+        _assistants = cachedAssistants;
+        _eventSessions = cachedSessions;
+        _eventSessionIds = cachedEventSessionIds;
+        _currentTeacherId = teacherId;
+        _pendingOfflineParticipantCount = cachedParticipants
+            .where(_participantHasPendingSync)
+            .length;
+        _usingCachedParticipants = true;
+        if (!showLoader) {
+          _isLoading = false;
+        }
+      });
+    }
+
     try {
-      final user = await _authService.getCurrentUser();
-      final teacherId = user?['id']?.toString() ?? '';
       final results = await Future.wait([
         _eventService.getEventParticipants(eventId),
         _eventService.getEventAssistants(eventId),
@@ -73,33 +377,77 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       final assistants = results[1] as List<Map<String, dynamic>>;
       final canManageAssistants = results[2] as bool;
       final eventSessions = results[3] as List<Map<String, dynamic>>;
+      final offlineParticipants = List<Map<String, dynamic>>.from(
+        cachedData['offline_participants'] as List,
+      );
+      final mergedParticipants = _mergeParticipantSources(
+        baseParticipants: participants,
+        offlineParticipants: offlineParticipants,
+      );
       final eventSessionIds = eventSessions
           .map((s) => s['id']?.toString() ?? '')
           .where((id) => id.isNotEmpty)
           .toSet();
 
+      await _appCacheService.saveJsonList(
+        _participantsCacheKey(eventId),
+        mergedParticipants,
+      );
+      await _appCacheService.saveJsonList(_assistantsCacheKey(eventId), assistants);
+      await _appCacheService.saveJsonList(_sessionsCacheKey(eventId), eventSessions);
+
       if (mounted) {
         setState(() {
           _isLoading = false;
-          _participants = participants;
+          _participants = mergedParticipants;
           _assistants = assistants;
           _eventSessions = eventSessions;
           _eventSessionIds = eventSessionIds;
           _currentTeacherId = teacherId;
           _canManageAssistants = canManageAssistants;
+          _pendingOfflineParticipantCount = mergedParticipants
+              .where(_participantHasPendingSync)
+              .length;
+          _usingCachedParticipants = offlineParticipants.isNotEmpty;
         });
       }
       _bindAttendanceRealtime();
     } catch (_) {
       if (mounted) {
+        final fallbackParticipants = List<Map<String, dynamic>>.from(
+          cachedData['participants'] as List,
+        );
+        final fallbackAssistants = List<Map<String, dynamic>>.from(
+          cachedData['assistants'] as List,
+        );
+        final fallbackSessions = List<Map<String, dynamic>>.from(
+          cachedData['sessions'] as List,
+        );
+        final fallbackEventSessionIds = fallbackSessions
+            .map((s) => s['id']?.toString() ?? '')
+            .where((id) => id.isNotEmpty)
+            .toSet();
+        final keepCurrentParticipants =
+            _participants.isNotEmpty && fallbackParticipants.length <= _participants.length;
+        final keepCurrentAssistants =
+            _assistants.isNotEmpty && fallbackAssistants.length <= _assistants.length;
+        final keepCurrentSessions =
+            _eventSessions.isNotEmpty && fallbackSessions.length <= _eventSessions.length;
         setState(() {
           _isLoading = false;
-          _participants = [];
-          _assistants = [];
-          _eventSessions = [];
-          _eventSessionIds = <String>{};
-          _currentTeacherId = '';
+          _participants =
+              keepCurrentParticipants ? _participants : fallbackParticipants;
+          _assistants = keepCurrentAssistants ? _assistants : fallbackAssistants;
+          _eventSessions = keepCurrentSessions ? _eventSessions : fallbackSessions;
+          _eventSessionIds =
+              keepCurrentSessions ? _eventSessionIds : fallbackEventSessionIds;
+          _currentTeacherId = teacherId;
           _canManageAssistants = false;
+          _pendingOfflineParticipantCount = _participants
+              .where(_participantHasPendingSync)
+              .length;
+          _usingCachedParticipants =
+              _isOfflineMode || cachedData['has_any'] == true || _usingCachedParticipants;
         });
       }
     }
@@ -132,11 +480,50 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     if (eventId.isEmpty) return;
     try {
       final participants = await _eventService.getEventParticipants(eventId);
+      final offlineParticipants = _currentTeacherId.trim().isEmpty
+          ? <Map<String, dynamic>>[]
+          : await _offlineSyncService.getOfflineParticipantRoster(
+              actorId: _currentTeacherId,
+              isTeacher: true,
+              eventId: eventId,
+            );
+      final mergedParticipants = _mergeParticipantSources(
+        baseParticipants: participants,
+        offlineParticipants: offlineParticipants,
+      );
+      await _appCacheService.saveJsonList(
+        _participantsCacheKey(eventId),
+        mergedParticipants,
+      );
       if (!mounted) return;
       setState(() {
-        _participants = participants;
+        _participants = mergedParticipants;
+        _pendingOfflineParticipantCount = mergedParticipants
+            .where(_participantHasPendingSync)
+            .length;
+        _usingCachedParticipants = offlineParticipants.isNotEmpty;
       });
-    } catch (_) {}
+    } catch (_) {
+      final cachedData = await _loadCachedEventData(
+        eventId: eventId,
+        teacherId: _currentTeacherId,
+      );
+      if (!mounted) return;
+      final fallbackParticipants = List<Map<String, dynamic>>.from(
+        cachedData['participants'] as List,
+      );
+      final keepCurrentParticipants =
+          _participants.isNotEmpty && fallbackParticipants.length <= _participants.length;
+      setState(() {
+        _participants =
+            keepCurrentParticipants ? _participants : fallbackParticipants;
+        _pendingOfflineParticipantCount = _participants
+            .where(_participantHasPendingSync)
+            .length;
+        _usingCachedParticipants =
+            _isOfflineMode || cachedData['has_any'] == true || _usingCachedParticipants;
+      });
+    }
   }
 
   void _bindAttendanceRealtime() {
@@ -176,6 +563,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
   @override
   void dispose() {
     _participantsRefreshDebounce?.cancel();
+    _connectivitySubscription?.cancel();
     _attendanceChannel?.unsubscribe();
     _tabController.dispose();
     super.dispose();
@@ -183,9 +571,15 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
 
   // â”€â”€â”€ Helper: extract student name â”€â”€â”€
   String _getName(Map<String, dynamic> p) {
+    final displayName = (p['display_name']?.toString() ?? '').trim();
+    if (displayName.isNotEmpty) return displayName;
     final u = p['users'];
     if (u == null) return 'Unknown Student';
     if (u is Map) {
+      final fullName = (u['full_name']?.toString() ?? '').trim();
+      if (fullName.isNotEmpty) return fullName;
+      final mappedDisplay = (u['display_name']?.toString() ?? '').trim();
+      if (mappedDisplay.isNotEmpty) return mappedDisplay;
       final first = (u['first_name'] ?? '').toString().trim();
       final last = (u['last_name'] ?? '').toString().trim();
       final name = '$first $last'.trim();
@@ -324,7 +718,9 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
   bool _sessionWindowClosed(Map<String, dynamic> session) {
     final startUtc = _parseUtcTimestamp(session['start_at']);
     if (startUtc == null) return false;
+    final explicitEndUtc = _parseUtcTimestamp(session['end_at']);
     final closesAtUtc =
+        explicitEndUtc ??
         startUtc.add(Duration(minutes: _sessionWindowMinutes(session)));
     return DateTime.now().toUtc().isAfter(closesAtUtc);
   }
@@ -393,13 +789,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
 
   String _getLegacyAttStatus(Map<String, dynamic> p) {
     try {
-      final tickets = p['tickets'];
-      if (tickets == null) return 'unscanned';
-      final ticket = (tickets is List && tickets.isNotEmpty) ? tickets[0] : null;
-      if (ticket == null) return 'unscanned';
-      final attendance = ticket['attendance'];
-      if (attendance == null) return 'unscanned';
-      final att = (attendance is List && attendance.isNotEmpty) ? attendance[0] : null;
+      final att = _canonicalTicketAttendance(p);
       if (att == null) return 'unscanned';
       final raw = (att['status']?.toString() ?? '').trim().toLowerCase();
       return raw.isEmpty ? 'unscanned' : raw;
@@ -466,7 +856,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     ).toLocal();
   }
 
-    String _formatStoredTime(dynamic raw) {
+  String _formatStoredTime(dynamic raw) {
     final text = raw?.toString().trim() ?? '';
     if (text.isEmpty) return '-';
     final local = _parseBackendTimestampToLocal(text);
@@ -474,27 +864,96 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     return DateFormat('hh:mm a').format(local);
   }
 
+  Map<String, dynamic>? _canonicalTicketAttendance(Map<String, dynamic> participant) {
+    try {
+      final tickets = participant['tickets'];
+      if (tickets == null || (tickets is List && tickets.isEmpty)) return null;
+      final ticket = (tickets is List) ? tickets[0] : null;
+      if (ticket is! Map) return null;
+
+      final attendanceRaw = ticket['attendance'];
+      final attendance = attendanceRaw is List
+          ? attendanceRaw.whereType<Map>().map(Map<String, dynamic>.from).toList()
+          : (attendanceRaw is Map
+              ? <Map<String, dynamic>>[Map<String, dynamic>.from(attendanceRaw)]
+              : <Map<String, dynamic>>[]);
+      if (attendance.isEmpty) return null;
+
+      int rank(Map<String, dynamic> row) {
+        final checkIn = (row['check_in_at']?.toString() ?? '').trim();
+        final status = (row['status']?.toString() ?? '').trim().toLowerCase();
+        if (checkIn.isNotEmpty) return 0;
+        if (status == 'present' || status == 'late' || status == 'early' || status == 'scanned') {
+          return 1;
+        }
+        if (status == 'absent') return 3;
+        return 2;
+      }
+
+      attendance.sort((a, b) {
+        final rankCompare = rank(a).compareTo(rank(b));
+        if (rankCompare != 0) return rankCompare;
+
+        final aCheckIn = (a['check_in_at']?.toString() ?? '').trim();
+        final bCheckIn = (b['check_in_at']?.toString() ?? '').trim();
+        if (aCheckIn.isNotEmpty && bCheckIn.isNotEmpty) {
+          return aCheckIn.compareTo(bCheckIn);
+        }
+        if (aCheckIn.isNotEmpty) return -1;
+        if (bCheckIn.isNotEmpty) return 1;
+
+        final aLast = (a['last_scanned_at']?.toString() ?? '').trim();
+        final bLast = (b['last_scanned_at']?.toString() ?? '').trim();
+        if (aLast.isNotEmpty && bLast.isNotEmpty) {
+          return aLast.compareTo(bLast);
+        }
+        if (aLast.isNotEmpty) return -1;
+        if (bLast.isNotEmpty) return 1;
+        return 0;
+      });
+
+      return attendance.first;
+    } catch (_) {
+      return null;
+    }
+  }
+
   String _getCheckIn(Map<String, dynamic> p) {
     if (_isSeminarBasedEvent()) {
-      final sessionAttendance = _getSessionAttendance(p);
-      if (sessionAttendance.isEmpty) return '-';
-      for (final scan in sessionAttendance) {
-        final formatted =
-            _formatStoredTime(scan['check_in_at'] ?? scan['last_scanned_at']);
-        if (formatted != '-') return formatted;
-      }
-      return '-';
+      final presentRows = _getPresentSessionAttendance(p);
+      if (presentRows.isEmpty) return '-';
+
+      presentRows.sort((a, b) {
+        final aSessionNo = int.tryParse(a['session_no']?.toString() ?? '') ?? 999;
+        final bSessionNo = int.tryParse(b['session_no']?.toString() ?? '') ?? 999;
+        final bySessionNo = aSessionNo.compareTo(bSessionNo);
+        if (bySessionNo != 0) return bySessionNo;
+
+        final aStart = _parseUtcTimestamp(a['start_at']);
+        final bStart = _parseUtcTimestamp(b['start_at']);
+        if (aStart != null && bStart != null) {
+          final byStart = aStart.compareTo(bStart);
+          if (byStart != 0) return byStart;
+        } else if (aStart != null) {
+          return -1;
+        } else if (bStart != null) {
+          return 1;
+        }
+
+        final aCheck = (a['check_in_at']?.toString() ?? '').trim();
+        final bCheck = (b['check_in_at']?.toString() ?? '').trim();
+        return aCheck.compareTo(bCheck);
+      });
+
+      final primary = presentRows.first;
+      return _formatStoredTime(primary['check_in_at'] ?? primary['last_scanned_at']);
     }
 
     try {
-      final tickets = p['tickets'];
-      if (tickets == null || (tickets is List && tickets.isEmpty)) return '-';
-      final ticket = (tickets is List) ? tickets[0] : null;
-      if (ticket == null) return '-';
-      final attendance = ticket['attendance'];
-      final att =
-          (attendance is List && attendance.isNotEmpty) ? attendance[0] : null;
-      return att != null ? _formatStoredTime(att['check_in_at']) : '-';
+      final att = _canonicalTicketAttendance(p);
+      return att != null
+          ? _formatStoredTime(att['check_in_at'] ?? att['last_scanned_at'])
+          : '-';
     } catch (_) {
       return '-';
     }
@@ -1352,6 +1811,75 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
   }
 
   // â•â•â•â•â•â•â•â•â•â•â• PARTICIPANTS TAB â•â•â•â•â•â•â•â•â•â•â•
+  Widget _buildParticipantsDataBanner() {
+    final hasPending = _pendingOfflineParticipantCount > 0;
+    final showCachedBanner = _isOfflineMode && _usingCachedParticipants;
+    if (!hasPending && !showCachedBanner) {
+      return const SizedBox.shrink();
+    }
+
+    final backgroundColor = hasPending
+        ? const Color(0xFFFFF7ED)
+        : const Color(0xFFEFF6FF);
+    final borderColor = hasPending
+        ? const Color(0xFFF59E0B).withValues(alpha: 0.3)
+        : const Color(0xFF3B82F6).withValues(alpha: 0.22);
+    final iconColor = hasPending
+        ? const Color(0xFFD97706)
+        : const Color(0xFF2563EB);
+    final title = hasPending
+        ? (_isOfflineMode ? 'Offline monitoring active' : 'Pending offline sync')
+        : 'Showing saved participant data';
+    final message = hasPending
+        ? '$_pendingOfflineParticipantCount participant check-in${_pendingOfflineParticipantCount == 1 ? '' : 's'} still pending sync.'
+        : 'This roster is using the latest cached participant data on this device.';
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 0, 20, 14),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: backgroundColor,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: borderColor),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            hasPending ? Icons.sync_problem_rounded : Icons.cloud_off_rounded,
+            size: 18,
+            color: iconColor,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: iconColor,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  message,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: iconColor.withValues(alpha: 0.82),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildParticipantsTab() {
     final filtered = _searchQuery.isEmpty
         ? _participants
@@ -1489,6 +2017,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
             ],
           ),
         ),
+        _buildParticipantsDataBanner(),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         Expanded(
           child: filtered.isEmpty
@@ -1544,6 +2073,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     final checkIn = _getCheckIn(p);
     final sessionAttendance = _visibleSessionIndicators(p);
     final sessionCount = _getSessionCount(p);
+    final hasPendingSync = _participantHasPendingSync(p);
 
     final u = p['users'];
     final email = (u is Map ? u['email'] : null)?.toString() ?? '';
@@ -1766,6 +2296,38 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                     ],
                   ),
                 ),
+                if (hasPendingSync) ...[
+                  const SizedBox(height: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 5,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFFF7ED),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        Icon(
+                          Icons.cloud_upload_rounded,
+                          size: 12,
+                          color: Color(0xFFD97706),
+                        ),
+                        SizedBox(width: 4),
+                        Text(
+                          'Pending Sync',
+                          style: TextStyle(
+                            color: Color(0xFFD97706),
+                            fontWeight: FontWeight.w700,
+                            fontSize: 10,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ],
             ),
           ],
@@ -1941,5 +2503,3 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     );
   }
 }
-
-

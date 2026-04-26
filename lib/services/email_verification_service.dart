@@ -1,8 +1,9 @@
 import 'dart:math';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:mailer/mailer.dart';
-import 'package:mailer/smtp_server/gmail.dart';
+import 'package:mailer/smtp_server.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -62,25 +63,24 @@ class EmailVerificationService {
       'last_sent_at': now.toIso8601String(),
     });
 
-    await _setCooldown(userId);
-
-    final deliveryOk = await _deliverEmailCode(
+    final delivery = await _deliverEmailCode(
       email: email,
       fullName: fullName,
       code: code,
     );
-    if (!deliveryOk) {
+    if (delivery['ok'] != true) {
       return {
         'ok': false,
-        'error':
+        'error': delivery['error']?.toString() ??
             'Failed to deliver verification email. Please check sender SMTP settings.',
       };
     }
 
+    await _setCooldown(userId);
     return {'ok': true, 'expires_at': expiresAt.toIso8601String()};
   }
 
-  Future<bool> _deliverEmailCode({
+  Future<Map<String, dynamic>> _deliverEmailCode({
     required String email,
     required String fullName,
     required String code,
@@ -117,11 +117,11 @@ If you did not request this, please ignore this email.
   Future<bool> sendUnderReviewEmail({
     required String email,
     required String fullName,
-  }) {
+  }) async {
     final displayName = fullName.trim().isEmpty
         ? 'CCS PulseConnect User'
         : fullName.trim();
-    return _sendEmail(
+    final result = await _sendEmail(
       recipientEmail: email,
       subject: 'CCS PulseConnect Application Under Review',
       textBody:
@@ -144,32 +144,101 @@ Please wait for another email once your application is approved or rejected.
 </div>
 ''',
     );
+    return result['ok'] == true;
   }
 
-  Future<bool> _sendEmail({
+  String _normalizeSmtpError(String raw) {
+    final message = raw.trim();
+    final lower = message.toLowerCase();
+    if (lower.contains('username and password not accepted') ||
+        lower.contains('authentication') ||
+        lower.contains('bad credentials') ||
+        lower.contains('535')) {
+      return 'SMTP authentication failed. Check Gmail app password and 2-Step Verification.';
+    }
+    if (lower.contains('failed host lookup') ||
+        lower.contains('socketexception') ||
+        lower.contains('network is unreachable') ||
+        lower.contains('connection refused') ||
+        lower.contains('timed out')) {
+      return 'Unable to reach Gmail SMTP server. Check internet or network firewall.';
+    }
+    if (lower.contains('certificate') ||
+        lower.contains('handshake') ||
+        lower.contains('tls')) {
+      return 'SMTP TLS/SSL handshake failed on this network/device.';
+    }
+    if (message.isEmpty) {
+      return 'SMTP send failed. Please check sender SMTP settings.';
+    }
+    return 'SMTP send failed: $message';
+  }
+
+  Future<Map<String, dynamic>> _sendEmail({
     required String recipientEmail,
     required String subject,
     required String textBody,
     required String htmlBody,
   }) async {
     final sender = Env.emailSenderAddress.trim();
-    final appPassword = Env.emailSenderAppPassword.trim();
-    if (sender.isEmpty || appPassword.isEmpty) {
-      return false;
+    final appPassword = Env.emailSenderAppPassword.replaceAll(
+      RegExp(r'\s+'),
+      '',
+    );
+    if (sender.isEmpty ||
+        appPassword.isEmpty ||
+        recipientEmail.trim().isEmpty) {
+      return {
+        'ok': false,
+        'error':
+            'Sender SMTP config is missing. Set sender email and app password.',
+      };
     }
-    try {
-      final smtpServer = gmail(sender, appPassword);
+
+    final smtpServers = <SmtpServer>[
+      gmail(sender, appPassword),
+      SmtpServer(
+        'smtp.gmail.com',
+        port: 465,
+        ssl: true,
+        username: sender,
+        password: appPassword,
+      ),
+      // Last-resort fallback for networks/devices with broken TLS trust chains.
+      // Keep this last so normal secure validation is always attempted first.
+      SmtpServer(
+        'smtp.gmail.com',
+        port: 465,
+        ssl: true,
+        ignoreBadCertificate: true,
+        username: sender,
+        password: appPassword,
+      ),
+    ];
+
+    String lastRawError = '';
+    for (var i = 0; i < smtpServers.length; i++) {
       final message = Message()
         ..from = Address(sender, 'CCS PulseConnect')
         ..recipients.add(recipientEmail.trim())
         ..subject = subject
         ..text = textBody
         ..html = htmlBody;
-      await send(message, smtpServer);
-      return true;
-    } catch (_) {
-      return false;
+      try {
+        await send(message, smtpServers[i]);
+        return {'ok': true};
+      } catch (e) {
+        lastRawError = e.toString();
+        if (kDebugMode) {
+          debugPrint('Email send attempt ${i + 1} failed: $lastRawError');
+        }
+      }
     }
+
+    return {
+      'ok': false,
+      'error': _normalizeSmtpError(lastRawError),
+    };
   }
 
   Future<Map<String, dynamic>> verifyCode({

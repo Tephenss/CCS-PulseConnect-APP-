@@ -1,7 +1,8 @@
-﻿import 'dart:async';
-import 'dart:io';
+import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
 import 'student_events.dart';
@@ -11,11 +12,14 @@ import 'student_profile.dart';
 import 'student_scan.dart';
 import '../welcome_screen.dart';
 import '../../services/notification_service.dart';
+import '../../services/offline_backup_service.dart';
+import '../../services/offline_sync_service.dart';
 import '../../widgets/notifications_modal.dart';
 import '../../widgets/animated_greeting_text.dart';
 import '../../widgets/card_swap_widget.dart';
 import '../../widgets/shiny_text.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/safe_circle_avatar.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/course_theme_utils.dart';
 
@@ -28,7 +32,11 @@ class StudentHome extends StatefulWidget {
 
 class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   final _authService = AuthService();
+  final Connectivity _connectivity = Connectivity();
   final _eventService = EventService();
+  final _offlineSyncService = OfflineSyncService();
+  final _offlineBackupService = OfflineBackupService();
+  final _supabase = Supabase.instance.client;
   Map<String, dynamic>? _user;
   List<Map<String, dynamic>> _upcomingEvents = [];
   int _currentIndex = 0;
@@ -40,6 +48,8 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   int _currentHeaderSlide = 0;
   StreamSubscription<int>? _unreadSubscription;
   Timer? _absenceScopeRefreshTimer;
+  RealtimeChannel? _scannerAccessChannel;
+  Timer? _scannerAccessGuardTimer;
 
   // Section Selection Gate
   List<Map<String, dynamic>> _sections = [];
@@ -137,9 +147,63 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
+  Future<bool> _hasNoConnectivity() async {
+    final connectivity = await _connectivity.checkConnectivity();
+    return connectivity.isEmpty ||
+        connectivity.every((result) => result == ConnectivityResult.none);
+  }
+
+  Future<void> _refreshScannerAccessGuard(String studentId) async {
+    final actorId = studentId.trim();
+    if (actorId.isEmpty) return;
+    if (await _hasNoConnectivity()) return;
+
+    try {
+      await _offlineSyncService.refreshSnapshotForCurrentScanner(
+        actorId: actorId,
+        isTeacher: false,
+      );
+    } catch (_) {
+      // Keep the shell stable even if access refresh fails.
+    }
+  }
+
+  void _restartScannerAccessGuard(String studentId) {
+    _scannerAccessGuardTimer?.cancel();
+    _scannerAccessChannel?.unsubscribe();
+    _scannerAccessChannel = null;
+
+    final actorId = studentId.trim();
+    if (actorId.isEmpty) return;
+
+    _scannerAccessChannel =
+        _supabase.channel('public:student_home_scan_access:$actorId');
+    _scannerAccessChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'event_assistants',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'student_id',
+        value: actorId,
+      ),
+      callback: (_) {
+        unawaited(_refreshScannerAccessGuard(actorId));
+      },
+    );
+    _scannerAccessChannel!.subscribe();
+
+    _scannerAccessGuardTimer = Timer.periodic(
+      const Duration(seconds: 3),
+      (_) => unawaited(_refreshScannerAccessGuard(actorId)),
+    );
+  }
+
   Future<void> _loadData() async {
     final user = await _authService.getCurrentUser();
     final userId = user?['id']?.toString() ?? '';
+
+    unawaited(_primeOfflineReadiness(user));
     
     // Initialize Realtime once user is known
     if (user != null) {
@@ -147,6 +211,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
         _notifService.initRealtime(userId);
       }
     }
+    _restartScannerAccessGuard(userId);
 
     String? yearLevel;
     String? courseCode;
@@ -209,6 +274,24 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _primeOfflineReadiness(Map<String, dynamic>? user) async {
+    final actorId = (user?['id']?.toString() ?? '').trim();
+    if (actorId.isEmpty) {
+      await _offlineBackupService.autoBackupIfConfigured();
+      return;
+    }
+
+    try {
+      await _offlineSyncService.refreshSnapshotForCurrentScanner(
+        actorId: actorId,
+        isTeacher: false,
+      );
+    } catch (_) {
+      // Keep home refresh smooth even if background warmup fails.
+    }
+    await _offlineBackupService.autoBackupIfConfigured();
+  }
+
   String _getGreeting() {
     final hour = DateTime.now().hour;
     if (hour < 12) return 'Good Morning';
@@ -221,6 +304,10 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) {
       _refreshUnreadCount();
       _loadData();
+      final studentId = (_user?['id']?.toString() ?? '').trim();
+      if (studentId.isNotEmpty) {
+        unawaited(_refreshScannerAccessGuard(studentId));
+      }
     }
   }
 
@@ -229,6 +316,8 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _unreadSubscription?.cancel();
     _absenceScopeRefreshTimer?.cancel();
+    _scannerAccessGuardTimer?.cancel();
+    _scannerAccessChannel?.unsubscribe();
     _headerPageController.dispose();
     _absenceReasonController.dispose();
     super.dispose();
@@ -1075,37 +1164,22 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                           onTap: () {
                             setState(() => _currentIndex = 4);
                           },
-                          child: Container(
-                            width: 50,
-                            height: 50,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: const Color(0xFFD4A843), // Gold Border
-                                  width: 2,
-                                ),
-                                image: _user?['photo_url'] != null && (_user?['photo_url'] as String).isNotEmpty
-                                    ? DecorationImage(
-                                        image: (_user?['photo_url'] as String).startsWith('http')
-                                            ? NetworkImage(_user?['photo_url'])
-                                            : FileImage(File(_user?['photo_url'])),
-                                        fit: BoxFit.cover,
-                                      )
-                                    : null,
-                              ),
-                              child: _user?['photo_url'] == null || (_user?['photo_url'] as String).isEmpty
-                                ? Center(
-                                    child: Text(
-                                      firstName.isNotEmpty ? firstName[0].toUpperCase() : 'S',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w800,
-                                        fontSize: 20,
-                                      ),
-                                    ),
-                                  )
-                                : null,
+                          child: SafeCircleAvatar(
+                            size: 50,
+                            imagePathOrUrl: _user?['photo_url']?.toString(),
+                            fallbackText: firstName.isNotEmpty
+                                ? firstName[0].toUpperCase()
+                                : 'S',
+                            backgroundColor: _studentPrimary(context),
+                            textColor: Colors.white,
+                            borderColor: const Color(0xFFD4A843),
+                            borderWidth: 2,
+                            textStyle: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 20,
                             ),
+                          ),
                         ),
                         const SizedBox(width: 14),
                         // Expanded Column for full-width name support

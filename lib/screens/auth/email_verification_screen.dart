@@ -26,8 +26,7 @@ class EmailVerificationScreen extends StatefulWidget {
       _EmailVerificationScreenState();
 }
 
-class _EmailVerificationScreenState extends State<EmailVerificationScreen>
-    with WidgetsBindingObserver {
+class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   final _service = EmailVerificationService();
   final _authService = AuthService();
   final _codeController = TextEditingController();
@@ -37,7 +36,6 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen>
   int _cooldownSeconds = 0;
   String? _message;
   String? _error;
-  bool _hasGoneBackground = false;
 
   String get _userId => widget.user['id']?.toString() ?? '';
   String get _email => widget.user['email']?.toString() ?? '';
@@ -54,13 +52,11 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen>
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
     _initialize();
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     _cooldownTimer?.cancel();
     _codeController.dispose();
     super.dispose();
@@ -121,20 +117,6 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen>
       ),
       (route) => false,
     );
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.detached) {
-      _hasGoneBackground = true;
-      return;
-    }
-    if (state == AppLifecycleState.resumed && _hasGoneBackground && mounted) {
-      _hasGoneBackground = false;
-      _backToLogin();
-    }
   }
 
   Future<void> _sendCode({required bool forceResend}) async {

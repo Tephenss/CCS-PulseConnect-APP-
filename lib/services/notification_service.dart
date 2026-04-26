@@ -54,6 +54,11 @@ class NotificationService {
       _lastRefreshAt != null &&
       DateTime.now().difference(_lastRefreshAt!) < const Duration(seconds: 8);
 
+  String _shownInteractiveNotificationsKey(String userId) =>
+      'shown_local_interactive_notifications_$userId';
+
+  String _passwordChangesKey(String userId) => 'pwd_changes_$userId';
+
   void dispose() {
     _notifChannel?.unsubscribe();
     _pollTimer?.cancel();
@@ -362,27 +367,58 @@ class NotificationService {
     }
   }
 
+  bool _isHostedMobilePushConfigured() {
+    final raw = Env.mobilePushApiBaseUrl.trim();
+    if (raw.isEmpty) return false;
+    if (raw.contains('YOUR-WEB-DOMAIN')) return false;
+
+    final uri = Uri.tryParse(raw);
+    if (uri == null) return false;
+    if (!(uri.scheme == 'http' || uri.scheme == 'https')) return false;
+
+    final host = uri.host.trim().toLowerCase();
+    if (host.isEmpty || host == 'your-web-domain') return false;
+    return true;
+  }
+
   Future<void> _showFreshInteractiveNotifications(
     List<AppNotification> previousNotifications,
     List<AppNotification> nextNotifications,
   ) async {
     final previousIds = previousNotifications.map((n) => n.id).toSet();
     final prefs = await SharedPreferences.getInstance();
-    final shownIds = (prefs.getStringList('shown_local_interactive_notifications') ?? [])
-        .toSet();
+    final activeUserId = (_activeUserId ?? '').trim();
+    final shownIds = <String>{
+      ...(prefs.getStringList('shown_local_interactive_notifications') ?? const <String>[]),
+      if (activeUserId.isNotEmpty)
+        ...(prefs.getStringList(_shownInteractiveNotificationsKey(activeUserId)) ??
+            const <String>[]),
+    };
     var didChange = false;
 
     for (final notification in nextNotifications) {
       final isEvalOpen = notification.id.startsWith('eval_open_');
       final isCertificateReady = notification.id.startsWith('cert_');
       final isScannerAssigned = notification.id.startsWith('scan_assign_');
-      if (!isEvalOpen && !isCertificateReady && !isScannerAssigned) {
+      final isPublishedEvent = notification.id.startsWith('pub_');
+      final isRegistrationUpdate = notification.id.startsWith('reg_closed_');
+      final isTeacherAssigned = notification.id.startsWith('assign_');
+      final isProposalApproved = notification.id.startsWith('approved_');
+      final isProposalRejected = notification.id.startsWith('reject_');
+      if (!isEvalOpen &&
+          !isCertificateReady &&
+          !isScannerAssigned &&
+          !isPublishedEvent &&
+          !isRegistrationUpdate &&
+          !isTeacherAssigned &&
+          !isProposalApproved &&
+          !isProposalRejected) {
         continue;
       }
 
       // Scanner-assignment notifications are delivered by server FCM
       // when mobile push API is configured. Avoid duplicate local popup.
-      if (isScannerAssigned && Env.mobilePushApiBaseUrl.trim().isNotEmpty) {
+      if (isScannerAssigned && _isHostedMobilePushConfigured()) {
         shownIds.add(notification.id);
         didChange = true;
         continue;
@@ -413,10 +449,18 @@ class NotificationService {
     }
 
     if (didChange) {
-      await prefs.setStringList(
-        'shown_local_interactive_notifications',
-        shownIds.toList(),
-      );
+      final shownList = shownIds.toList();
+      if (activeUserId.isNotEmpty) {
+        await prefs.setStringList(
+          _shownInteractiveNotificationsKey(activeUserId),
+          shownList,
+        );
+      } else {
+        await prefs.setStringList(
+          'shown_local_interactive_notifications',
+          shownList,
+        );
+      }
     }
   }
 
@@ -894,7 +938,14 @@ class NotificationService {
 
       // Add local 'Password Changed' notifications
       final prefs = await SharedPreferences.getInstance();
-      final pwdChangedList = prefs.getStringList('pwd_changes') ?? [];
+      final activeUserId = currentUserId.trim();
+      final pwdChangedList = <String>[
+        ...(activeUserId.isNotEmpty
+            ? (prefs.getStringList(_passwordChangesKey(activeUserId)) ??
+                const <String>[])
+            : const <String>[]),
+        ...(prefs.getStringList('pwd_changes') ?? const <String>[]),
+      ];
       for (int i = 0; i < pwdChangedList.length; i++) {
         final isoDate = pwdChangedList[i];
         try {
@@ -980,9 +1031,13 @@ class NotificationService {
   // Method to trigger local password change notification
   Future<void> addPasswordChangeNotification() async {
     final prefs = await SharedPreferences.getInstance();
-    final pwdChangedList = prefs.getStringList('pwd_changes') ?? [];
+    final activeUserId = (_activeUserId ?? '').trim();
+    final key = activeUserId.isNotEmpty
+        ? _passwordChangesKey(activeUserId)
+        : 'pwd_changes';
+    final pwdChangedList = prefs.getStringList(key) ?? [];
     pwdChangedList.add(DateTime.now().toIso8601String());
-    await prefs.setStringList('pwd_changes', pwdChangedList);
+    await prefs.setStringList(key, pwdChangedList);
     await refresh(force: true);
   }
 

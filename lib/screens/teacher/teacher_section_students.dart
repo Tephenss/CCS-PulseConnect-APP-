@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/safe_circle_avatar.dart';
 import '../../utils/teacher_theme_utils.dart';
 
 class TeacherSectionStudents extends StatefulWidget {
@@ -208,31 +209,19 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                         ),
                         child: Row(
                           children: [
-                            Container(
-                              width: 52,
-                              height: 52,
-                              decoration: BoxDecoration(
-                                color: TeacherThemeUtils.primary.withValues(alpha: 0.1),
-                                shape: BoxShape.circle,
-                                image: photoUrl != null && photoUrl.isNotEmpty
-                                    ? DecorationImage(
-                                        image: NetworkImage(photoUrl),
-                                        fit: BoxFit.cover,
-                                      )
-                                    : null,
+                            SafeCircleAvatar(
+                              size: 52,
+                              imagePathOrUrl: photoUrl,
+                              fallbackText: student['name'][0].toUpperCase(),
+                              backgroundColor: TeacherThemeUtils.primary.withValues(
+                                alpha: 0.1,
                               ),
-                              child: photoUrl == null || photoUrl.isEmpty
-                                  ? Center(
-                                      child: Text(
-                                        student['name'][0].toUpperCase(),
-                                        style: const TextStyle(
-                                          color: TeacherThemeUtils.primary,
-                                          fontWeight: FontWeight.w800,
-                                          fontSize: 22,
-                                        ),
-                                      ),
-                                    )
-                                  : null,
+                              textColor: TeacherThemeUtils.primary,
+                              textStyle: const TextStyle(
+                                color: TeacherThemeUtils.primary,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 22,
+                              ),
                             ),
                             const SizedBox(width: 16),
                             Expanded(

@@ -157,6 +157,13 @@ class _WelcomeScreenState extends State<WelcomeScreen>
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.of(context).size;
+    const authHorizontalPadding = 32.0;
+    final headerHeight = (size.height * 0.24).clamp(220.0, 300.0);
+    final glowSafeInset = (size.width * 0.1).clamp(28.0, 52.0);
+    final fullHeaderWidth = size.width;
+    final sideLogoSize = (size.width * 0.22).clamp(72.0, 88.0);
+    final centerLogoSize = (size.width * 0.42).clamp(132.0, 160.0);
+    final logoEntryTravel = (size.width / 2) + (sideLogoSize / 2) + 18;
 
     return Scaffold(
       backgroundColor: const Color(0xFF09090B),
@@ -239,294 +246,267 @@ class _WelcomeScreenState extends State<WelcomeScreen>
             // Content
             SafeArea(
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 32),
+                padding: const EdgeInsets.symmetric(horizontal: authHorizontalPadding),
                 child: SingleChildScrollView(
+                  clipBehavior: Clip.none,
                   child: Column(
                     children: [
                       SizedBox(height: size.height * 0.06),
 
                       // Collision Animation Header
                       SizedBox(
-                        height: 200,
+                        height: headerHeight,
                         width: double.infinity,
-                        child: AnimatedBuilder(
-                          animation: _collisionController,
-                          builder: (context, child) {
-                            final t = _collisionController.value;
-                            final halfW =
-                                size.width *
-                                0.6; // how far off-screen logos start
+                        child: OverflowBox(
+                          minWidth: fullHeaderWidth,
+                          maxWidth: fullHeaderWidth,
+                          minHeight: 0,
+                          maxHeight: headerHeight + (glowSafeInset * 2),
+                          alignment: Alignment.center,
+                          child: SizedBox(
+                            width: fullHeaderWidth,
+                            child: Padding(
+                              padding: EdgeInsets.symmetric(
+                                horizontal: 0,
+                                vertical: glowSafeInset * 0.75,
+                              ),
+                              child: SizedBox(
+                                height: headerHeight - (glowSafeInset * 0.4),
+                                width: fullHeaderWidth,
+                                child: AnimatedBuilder(
+                                  animation: _collisionController,
+                                  builder: (context, child) {
+                                    final t = _collisionController.value;
+                                    final halfW = logoEntryTravel;
 
-                            // === BSIT Logo (collideLeft CSS) ===
-                            double bsitX = -halfW;
-                            double bsitOpacity = 0;
-                            double bsitScale = 0.8;
-                            double bsitRotation = -0.26;
+                                    double bsitX = -halfW;
+                                    double bsitOpacity = 0;
+                                    double bsitScale = 0.8;
+                                    double bsitRotation = -0.26;
 
-                            if (t < 0.05) {
-                              bsitX = -halfW;
-                              bsitOpacity = 0;
-                            } else if (t < 0.10) {
-                              double local = (t - 0.05) / 0.05;
-                              bsitX = -halfW * (1.0 - local * 0.15);
-                              bsitOpacity = local;
-                            } else if (t < 0.22) {
-                              double local = (t - 0.10) / 0.12;
-                              bsitX = -halfW * 0.85 * (1.0 - local);
-                              bsitOpacity = 1.0;
-                              bsitScale = 0.8 + 0.3 * local;
-                              bsitRotation = -0.26 + 0.44 * local;
-                            } else if (t < 0.25) {
-                              double local = (t - 0.22) / 0.03;
-                              bsitX = 0;
-                              bsitOpacity = 1.0 - local;
-                              bsitScale = 1.1 + 0.2 * local;
-                              bsitRotation = 0.17 + 0.09 * local;
-                            }
+                                    if (t < 0.05) {
+                                      bsitX = -halfW;
+                                      bsitOpacity = 0;
+                                    } else if (t < 0.10) {
+                                      final local = (t - 0.05) / 0.05;
+                                      bsitX = -halfW * (1.0 - local * 0.15);
+                                      bsitOpacity = local;
+                                    } else if (t < 0.22) {
+                                      final local = (t - 0.10) / 0.12;
+                                      bsitX = -halfW * 0.85 * (1.0 - local);
+                                      bsitOpacity = 1.0;
+                                      bsitScale = 0.8 + 0.3 * local;
+                                      bsitRotation = -0.26 + 0.44 * local;
+                                    } else if (t < 0.25) {
+                                      final local = (t - 0.22) / 0.03;
+                                      bsitX = 0;
+                                      bsitOpacity = 1.0 - local;
+                                      bsitScale = 1.1 + 0.2 * local;
+                                      bsitRotation = 0.17 + 0.09 * local;
+                                    }
 
-                            // === CS Logo (collideRight CSS) ===
-                            double csX = halfW;
-                            double csOpacity = 0;
-                            double csScale = 0.8;
-                            double csRotation = 0.26;
+                                    double csX = halfW;
+                                    double csOpacity = 0;
+                                    double csScale = 0.8;
+                                    double csRotation = 0.26;
 
-                            if (t < 0.05) {
-                              csX = halfW;
-                              csOpacity = 0;
-                            } else if (t < 0.10) {
-                              double local = (t - 0.05) / 0.05;
-                              csX = halfW * (1.0 - local * 0.15);
-                              csOpacity = local;
-                            } else if (t < 0.22) {
-                              double local = (t - 0.10) / 0.12;
-                              csX = halfW * 0.85 * (1.0 - local);
-                              csOpacity = 1.0;
-                              csScale = 0.8 + 0.3 * local;
-                              csRotation = 0.26 - 0.44 * local;
-                            } else if (t < 0.25) {
-                              double local = (t - 0.22) / 0.03;
-                              csX = 0;
-                              csOpacity = 1.0 - local;
-                              csScale = 1.1 + 0.2 * local;
-                              csRotation = -0.17 - 0.09 * local;
-                            }
+                                    if (t < 0.05) {
+                                      csX = halfW;
+                                      csOpacity = 0;
+                                    } else if (t < 0.10) {
+                                      final local = (t - 0.05) / 0.05;
+                                      csX = halfW * (1.0 - local * 0.15);
+                                      csOpacity = local;
+                                    } else if (t < 0.22) {
+                                      final local = (t - 0.10) / 0.12;
+                                      csX = halfW * 0.85 * (1.0 - local);
+                                      csOpacity = 1.0;
+                                      csScale = 0.8 + 0.3 * local;
+                                      csRotation = 0.26 - 0.44 * local;
+                                    } else if (t < 0.25) {
+                                      final local = (t - 0.22) / 0.03;
+                                      csX = 0;
+                                      csOpacity = 1.0 - local;
+                                      csScale = 1.1 + 0.2 * local;
+                                      csRotation = -0.17 - 0.09 * local;
+                                    }
 
-                            // === Flash Burst (flashBurst CSS) ===
-                            double flashOpacity = 0;
-                            double flashScale = 0;
-                            if (t >= 0.21 && t < 0.22) {
-                              double local = (t - 0.21) / 0.01;
-                              flashOpacity = local;
-                              flashScale = local * 1.5;
-                            } else if (t >= 0.22 && t < 0.28) {
-                              double local = (t - 0.22) / 0.06;
-                              flashOpacity = 1.0 - local * 0.2;
-                              flashScale = 1.5 + local * 1.5; // grow to 3
-                            } else if (t >= 0.28 && t < 0.45) {
-                              double local = (t - 0.28) / 0.17;
-                              flashOpacity = 0.8 * (1.0 - local);
-                              flashScale = 3.0 + local; // grow to 4
-                            }
+                                    double flashOpacity = 0;
+                                    double flashScale = 0;
+                                    if (t >= 0.21 && t < 0.22) {
+                                      final local = (t - 0.21) / 0.01;
+                                      flashOpacity = local;
+                                      flashScale = local * 1.5;
+                                    } else if (t >= 0.22 && t < 0.28) {
+                                      final local = (t - 0.22) / 0.06;
+                                      flashOpacity = 1.0 - local * 0.2;
+                                      flashScale = 1.5 + local * 1.5;
+                                    } else if (t >= 0.28 && t < 0.45) {
+                                      final local = (t - 0.28) / 0.17;
+                                      flashOpacity = 0.8 * (1.0 - local);
+                                      flashScale = 3.0 + local;
+                                    }
 
-                            // === CCS Reveal (revealCCS CSS) ===
-                            double ccsOpacity = 0;
-                            double ccsScale = 0.5;
-                            double ccsTranslateY = 20;
+                                    double ccsOpacity = 0;
+                                    double ccsScale = 0.5;
+                                    double ccsTranslateY = 20;
 
-                            if (t < 0.22) {
-                              ccsOpacity = 0;
-                              ccsScale = 0.5;
-                              ccsTranslateY = 20;
-                            } else if (t < 0.25) {
-                              double local = (t - 0.22) / 0.03;
-                              ccsOpacity = local;
-                              ccsScale = 0.5 + 0.6 * local; // to 1.1
-                              ccsTranslateY = 20 * (1.0 - local);
-                            } else if (t < 0.28) {
-                              double local = (t - 0.25) / 0.03;
-                              ccsOpacity = 1.0;
-                              ccsScale = 1.1 - 0.1 * local; // settle to 1.0
-                              ccsTranslateY = 0;
-                            } else if (t < 0.85) {
-                              ccsOpacity = 1.0;
-                              ccsScale = 1.0;
-                              ccsTranslateY = 0;
-                            } else if (t < 0.92) {
-                              double local = (t - 0.85) / 0.07;
-                              ccsOpacity = 1.0 - local;
-                              ccsScale = 1.0 - 0.1 * local; // to 0.9
-                              ccsTranslateY = -20 * local;
-                            }
+                                    if (t < 0.22) {
+                                      ccsOpacity = 0;
+                                      ccsScale = 0.5;
+                                      ccsTranslateY = 20;
+                                    } else if (t < 0.25) {
+                                      final local = (t - 0.22) / 0.03;
+                                      ccsOpacity = local;
+                                      ccsScale = 0.5 + 0.6 * local;
+                                      ccsTranslateY = 20 * (1.0 - local);
+                                    } else if (t < 0.28) {
+                                      final local = (t - 0.25) / 0.03;
+                                      ccsOpacity = 1.0;
+                                      ccsScale = 1.1 - 0.1 * local;
+                                      ccsTranslateY = 0;
+                                    } else if (t < 0.85) {
+                                      ccsOpacity = 1.0;
+                                      ccsScale = 1.0;
+                                      ccsTranslateY = 0;
+                                    } else if (t < 0.92) {
+                                      final local = (t - 0.85) / 0.07;
+                                      ccsOpacity = 1.0 - local;
+                                      ccsScale = 1.0 - 0.1 * local;
+                                      ccsTranslateY = -20 * local;
+                                    }
 
-                            return Stack(
-                              alignment: Alignment.center,
-                              clipBehavior: Clip.none,
-                              children: [
-                                // BSIT Logo (Left)
-                                if (bsitOpacity > 0)
-                                  Transform.translate(
-                                    offset: Offset(bsitX, 0),
-                                    child: Transform.rotate(
-                                      angle: bsitRotation,
-                                      child: Transform.scale(
-                                        scale: bsitScale,
-                                        child: Opacity(
-                                          opacity: bsitOpacity.clamp(0.0, 1.0),
-                                          child: Container(
-                                            decoration: BoxDecoration(
-                                              boxShadow: [
-                                                BoxShadow(
-                                                  color: const Color(
-                                                    0xFF9F1239,
-                                                  ).withValues(alpha: 0.5),
-                                                  blurRadius: 20,
+                                    return Stack(
+                                      alignment: Alignment.center,
+                                      clipBehavior: Clip.none,
+                                      children: [
+                                        if (bsitOpacity > 0)
+                                          Transform.translate(
+                                            offset: Offset(bsitX, 0),
+                                            child: Transform.rotate(
+                                              angle: bsitRotation,
+                                              child: Transform.scale(
+                                                scale: bsitScale,
+                                                child: Opacity(
+                                                  opacity: bsitOpacity.clamp(0.0, 1.0),
+                                                  child: Container(
+                                                    decoration: BoxDecoration(
+                                                      boxShadow: [
+                                                        BoxShadow(
+                                                          color: const Color(0xFF9F1239).withValues(alpha: 0.5),
+                                                          blurRadius: 20,
+                                                        ),
+                                                      ],
+                                                    ),
+                                                    child: Image.asset(
+                                                      'assets/BSIT.png',
+                                                      width: sideLogoSize,
+                                                      height: sideLogoSize,
+                                                    ),
+                                                  ),
                                                 ),
-                                              ],
-                                            ),
-                                            child: Image.asset(
-                                              'assets/BSIT.png',
-                                              width: 80,
-                                              height: 80,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-
-                                // CS Logo (Right)
-                                if (csOpacity > 0)
-                                  Transform.translate(
-                                    offset: Offset(csX, 0),
-                                    child: Transform.rotate(
-                                      angle: csRotation,
-                                      child: Transform.scale(
-                                        scale: csScale,
-                                        child: Opacity(
-                                          opacity: csOpacity.clamp(0.0, 1.0),
-                                          child: Container(
-                                            decoration: BoxDecoration(
-                                              boxShadow: [
-                                                BoxShadow(
-                                                  color: const Color(
-                                                    0xFF1D4ED8,
-                                                  ).withValues(alpha: 0.5),
-                                                  blurRadius: 20,
-                                                ),
-                                              ],
-                                            ),
-                                            child: Image.asset(
-                                              'assets/CS.png',
-                                              width: 80,
-                                              height: 80,
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-
-                                // Lightning bolt
-                                if (t >= 0.218 && t < 0.245)
-                                  Positioned(top: 0, child: _buildLightning(t)),
-
-                                // Spark lines (4 diagonal directions)
-                                _buildSpark(
-                                  t,
-                                  0.785,
-                                  60,
-                                  -60,
-                                ), // top-right 45deg
-                                _buildSpark(
-                                  t,
-                                  -0.785,
-                                  -60,
-                                  -60,
-                                ), // top-left -45deg
-                                _buildSpark(
-                                  t,
-                                  2.356,
-                                  60,
-                                  60,
-                                ), // bottom-right 135deg
-                                _buildSpark(
-                                  t,
-                                  -2.356,
-                                  -60,
-                                  60,
-                                ), // bottom-left -135deg
-                                // Flash Burst
-                                if (flashOpacity > 0)
-                                  Transform.scale(
-                                    scale: flashScale,
-                                    child: Opacity(
-                                      opacity: flashOpacity.clamp(0.0, 1.0),
-                                      child: Container(
-                                        width: 10,
-                                        height: 10,
-                                        decoration: BoxDecoration(
-                                          shape: BoxShape.circle,
-                                          color: const Color(0xFFFEF3C7),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: const Color(
-                                                0xFFFDE68A,
-                                              ).withValues(alpha: 0.9),
-                                              blurRadius: 60,
-                                              spreadRadius: 40,
-                                            ),
-                                            BoxShadow(
-                                              color: const Color(
-                                                0xFFF59E0B,
-                                              ).withValues(alpha: 0.7),
-                                              blurRadius: 100,
-                                              spreadRadius: 60,
-                                            ),
-                                            BoxShadow(
-                                              color: const Color(
-                                                0xFFD97706,
-                                              ).withValues(alpha: 0.5),
-                                              blurRadius: 150,
-                                              spreadRadius: 80,
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-
-                                // CCS Final Logo
-                                if (ccsOpacity > 0)
-                                  Transform.translate(
-                                    offset: Offset(0, ccsTranslateY),
-                                    child: Transform.scale(
-                                      scale: ccsScale,
-                                      child: Opacity(
-                                        opacity: ccsOpacity.clamp(0.0, 1.0),
-                                        child: Container(
-                                          decoration: BoxDecoration(
-                                            boxShadow: [
-                                              BoxShadow(
-                                                color: const Color(
-                                                  0xFFF59E0B,
-                                                ).withValues(alpha: 0.4),
-                                                blurRadius: 30,
-                                                spreadRadius: 5,
                                               ),
-                                            ],
+                                            ),
                                           ),
-                                          child: Image.asset(
-                                            'assets/CCS.png',
-                                            width: 150,
-                                            height: 150,
+                                        if (csOpacity > 0)
+                                          Transform.translate(
+                                            offset: Offset(csX, 0),
+                                            child: Transform.rotate(
+                                              angle: csRotation,
+                                              child: Transform.scale(
+                                                scale: csScale,
+                                                child: Opacity(
+                                                  opacity: csOpacity.clamp(0.0, 1.0),
+                                                  child: Container(
+                                                    decoration: BoxDecoration(
+                                                      boxShadow: [
+                                                        BoxShadow(
+                                                          color: const Color(0xFF1D4ED8).withValues(alpha: 0.5),
+                                                          blurRadius: 20,
+                                                        ),
+                                                      ],
+                                                    ),
+                                                    child: Image.asset(
+                                                      'assets/CS.png',
+                                                      width: sideLogoSize,
+                                                      height: sideLogoSize,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
                                           ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                              ],
-                            );
-                          },
+                                        if (t >= 0.218 && t < 0.245)
+                                          Positioned(top: 0, child: _buildLightning(t)),
+                                        _buildSpark(t, 0.785, 60, -60),
+                                        _buildSpark(t, -0.785, -60, -60),
+                                        _buildSpark(t, 2.356, 60, 60),
+                                        _buildSpark(t, -2.356, -60, 60),
+                                        if (flashOpacity > 0)
+                                          Transform.scale(
+                                            scale: flashScale,
+                                            child: Opacity(
+                                              opacity: flashOpacity.clamp(0.0, 1.0),
+                                              child: Container(
+                                                width: 10,
+                                                height: 10,
+                                                decoration: BoxDecoration(
+                                                  shape: BoxShape.circle,
+                                                  color: const Color(0xFFFEF3C7),
+                                                  boxShadow: [
+                                                    BoxShadow(
+                                                      color: const Color(0xFFFDE68A).withValues(alpha: 0.9),
+                                                      blurRadius: 60,
+                                                      spreadRadius: 40,
+                                                    ),
+                                                    BoxShadow(
+                                                      color: const Color(0xFFF59E0B).withValues(alpha: 0.7),
+                                                      blurRadius: 100,
+                                                      spreadRadius: 60,
+                                                    ),
+                                                    BoxShadow(
+                                                      color: const Color(0xFFD97706).withValues(alpha: 0.5),
+                                                      blurRadius: 150,
+                                                      spreadRadius: 80,
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        if (ccsOpacity > 0)
+                                          Transform.translate(
+                                            offset: Offset(0, ccsTranslateY),
+                                            child: Transform.scale(
+                                              scale: ccsScale,
+                                              child: Opacity(
+                                                opacity: ccsOpacity.clamp(0.0, 1.0),
+                                                child: Container(
+                                                  decoration: BoxDecoration(
+                                                    boxShadow: [
+                                                      BoxShadow(
+                                                        color: const Color(0xFFF59E0B).withValues(alpha: 0.4),
+                                                        blurRadius: 30,
+                                                        spreadRadius: 5,
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  child: Image.asset(
+                                                    'assets/CCS.png',
+                                                    width: centerLogoSize,
+                                                    height: centerLogoSize,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                      ],
+                                    );
+                                  },
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
                       ),
 
