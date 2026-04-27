@@ -119,6 +119,50 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
     );
   }
 
+  Future<void> _showVerificationSuccessDialog() async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF18181B),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: _primaryColor.withValues(alpha: 0.35)),
+          ),
+          title: const Text(
+            'Verification Successful',
+            style: TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+              fontSize: 18,
+            ),
+          ),
+          content: Text(
+            'Your email is now verified. Your account is under admin review. Please wait for approval before logging in.',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.82),
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: Text(
+                'OK',
+                style: TextStyle(
+                  color: _primaryColor,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Future<void> _sendCode({required bool forceResend}) async {
     setState(() {
       _isSending = true;
@@ -172,6 +216,8 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
         final updatedUser = Map<String, dynamic>.from(result['user'] as Map);
         if (widget.postRegistrationReviewFlow) {
           await _service.sendUnderReviewEmail(email: _email, fullName: _name);
+          if (!mounted) return;
+          await _showVerificationSuccessDialog();
           if (!mounted) return;
           Navigator.pushAndRemoveUntil(
             context,

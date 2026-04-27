@@ -16,15 +16,14 @@ Future<int?> showNotificationsModal(BuildContext context) {
     return Future<int?>.value(null);
   }
 
-  final route = ModalRoute.of(context);
-  if (route == null || !route.isCurrent || _isNotificationsModalOpen) {
+  if (_isNotificationsModalOpen) {
     return Future<int?>.value(null);
   }
 
   _isNotificationsModalOpen = true;
   return showGeneralDialog<int>(
     context: context,
-    useRootNavigator: false,
+    useRootNavigator: true,
     barrierDismissible: true,
     barrierLabel: 'Notifications',
     barrierColor: Colors.black.withValues(alpha: 0.28),
@@ -48,6 +47,9 @@ Future<int?> showNotificationsModal(BuildContext context) {
     },
   ).whenComplete(() {
     _isNotificationsModalOpen = false;
+  }).catchError((_) {
+    _isNotificationsModalOpen = false;
+    return null;
   });
 }
 

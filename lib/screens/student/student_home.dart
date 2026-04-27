@@ -42,6 +42,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   int _currentIndex = 0;
   bool _isLoading = true;
   int _unreadCount = 0;
+  bool _isOpeningNotifications = false;
   DateTime _calendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
   final _notifService = NotificationService();
   final PageController _headerPageController = PageController();
@@ -145,6 +146,27 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
         setState(() => _unreadCount = unread);
       }
     } catch (_) {}
+  }
+
+  Future<void> _openNotificationsModal() async {
+    if (_isOpeningNotifications) return;
+    setState(() => _isOpeningNotifications = true);
+
+    try {
+      unawaited(_refreshUnreadCount());
+      final result = await showNotificationsModal(context);
+      if (!mounted) return;
+      if (result is int) {
+        setState(() => _currentIndex = result);
+      }
+      unawaited(_refreshUnreadCount());
+    } finally {
+      if (mounted) {
+        setState(() => _isOpeningNotifications = false);
+      } else {
+        _isOpeningNotifications = false;
+      }
+    }
   }
 
   Future<bool> _hasNoConnectivity() async {
@@ -1219,39 +1241,32 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                             children: [
                               IconButton(
                                 icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
-                                onPressed: () async {
-                                  await _refreshUnreadCount();
-                                  if (!mounted) return;
-                                  final result = await showNotificationsModal(context);
-                                  if (!mounted) return;
-                                  if (result is int) {
-                                    setState(() => _currentIndex = result);
-                                  }
-                                  await _refreshUnreadCount();
-                                },
+                                onPressed: _isOpeningNotifications ? null : _openNotificationsModal,
                               ),
                               if (_unreadCount > 0)
                                 Positioned(
                                   top: 8,
                                   right: 10,
-                                  child: Container(
-                                    padding: const EdgeInsets.all(4),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFFEF4444),
-                                      shape: BoxShape.circle,
-                                      border: Border.all(
-                                        color: _studentChrome(context),
-                                        width: 1.5,
+                                  child: IgnorePointer(
+                                    child: Container(
+                                      padding: const EdgeInsets.all(4),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFEF4444),
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                          color: _studentChrome(context),
+                                          width: 1.5,
+                                        ),
                                       ),
-                                    ),
-                                    constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
-                                    child: Center(
-                                      child: Text(
-                                        _unreadCount > 9 ? '9+' : _unreadCount.toString(),
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w800,
+                                      constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+                                      child: Center(
+                                        child: Text(
+                                          _unreadCount > 9 ? '9+' : _unreadCount.toString(),
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w800,
+                                          ),
                                         ),
                                       ),
                                     ),

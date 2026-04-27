@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
 import '../student/student_home.dart';
@@ -31,7 +32,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   bool get _isTeacher => widget.role.toLowerCase() == 'teacher';
   Color get _primaryColor => _isTeacher ? TeacherThemeUtils.primary : const Color(0xFF9F1239);
   Color get _accentColor => _isTeacher ? TeacherThemeUtils.mid : const Color(0xFFBE123C);
-  late AnimationController _gradientController;
   late AnimationController _floatController;
   Offset _pointerPosition = const Offset(0, 0);
   bool _pointerActive = false;
@@ -39,11 +39,6 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   @override
   void initState() {
     super.initState();
-    _gradientController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 5),
-    )..repeat(reverse: true);
-
     _floatController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
@@ -54,12 +49,17 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   void dispose() {
     _emailController.dispose();
     _passwordController.dispose();
-    _gradientController.dispose();
     _floatController.dispose();
     super.dispose();
   }
 
   void _updatePointer(PointerEvent details) {
+    if (details.kind != PointerDeviceKind.mouse) {
+      if (_pointerActive) {
+        setState(() => _pointerActive = false);
+      }
+      return;
+    }
     setState(() {
       _pointerPosition = details.position;
       _pointerActive = true;
@@ -67,7 +67,9 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   }
 
   void _hidePointer(PointerEvent details) {
-    setState(() => _pointerActive = false);
+    if (_pointerActive) {
+      setState(() => _pointerActive = false);
+    }
   }
   void _showOfflineRecoveryNotices({
     required int restoredCount,
@@ -318,28 +320,22 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
               right: 0,
               height: size.height,
               child: IgnorePointer(
-                child: AnimatedBuilder(
-                  animation: _gradientController,
-                  builder: (context, child) {
-                    final t = _gradientController.value;
-                    return Opacity(
-                      opacity: _pointerActive ? 0.3 : 0.95,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          gradient: RadialGradient(
-                            center: Alignment(-0.9 + 1.8 * t, -0.6 + 1.2 * t),
-                            radius: 1.4 + 0.4 * t,
-                            colors: [
-                              (_isTeacher ? TeacherThemeUtils.dark : const Color(0xFF6F1D2D)).withValues(alpha: 0.85 + 0.1 * t),
-                              (_isTeacher ? const Color(0xFF1D4ED8) : const Color(0xFF7F1D1D)).withValues(alpha: 0.5 + 0.2 * t),
-                              Colors.transparent,
-                            ],
-                            stops: [0.0, 0.45 + 0.2 * t, 1.0],
-                          ),
-                        ),
+                child: Opacity(
+                  opacity: _pointerActive ? 0.3 : 0.92,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: RadialGradient(
+                        center: const Alignment(-0.35, -0.58),
+                        radius: 1.25,
+                        colors: [
+                          (_isTeacher ? TeacherThemeUtils.dark : const Color(0xFF6F1D2D)).withValues(alpha: 0.82),
+                          (_isTeacher ? const Color(0xFF1D4ED8) : const Color(0xFF7F1D1D)).withValues(alpha: 0.44),
+                          Colors.transparent,
+                        ],
+                        stops: const [0.0, 0.48, 1.0],
                       ),
-                    );
-                  },
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -375,7 +371,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                             boxShadow: [
                               BoxShadow(
                                 color: _primaryColor.withValues(alpha: 0.4),
-                                blurRadius: 12,
+                                blurRadius: 8,
                                 offset: const Offset(0, 4),
                               ),
                             ],
@@ -441,13 +437,13 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                                           boxShadow: [
                                             BoxShadow(
                                               color: _primaryColor.withValues(alpha: 0.35),
-                                              blurRadius: 45,
-                                              spreadRadius: 10,
+                                              blurRadius: 18,
+                                              spreadRadius: 2,
                                             ),
                                             BoxShadow(
                                               color: const Color(0xFFF59E0B).withValues(alpha: 0.15),
-                                              blurRadius: 65,
-                                              spreadRadius: 18,
+                                              blurRadius: 28,
+                                              spreadRadius: 4,
                                             ),
                                           ],
                                         ),
@@ -507,7 +503,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                                 boxShadow: [
                                   BoxShadow(
                                     color: Colors.black.withValues(alpha: 0.4),
-                                    blurRadius: 30,
+                                    blurRadius: 16,
                                     offset: const Offset(0, 10),
                                   ),
                                 ],
@@ -697,7 +693,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                                           boxShadow: [
                                             BoxShadow(
                                               color: _primaryColor.withValues(alpha: 0.45),
-                                              blurRadius: 24,
+                                              blurRadius: 14,
                                               offset: const Offset(0, 8),
                                             ),
                                           ],

@@ -4987,7 +4987,8 @@ class EventService {
       if (registrationId.isEmpty) {
         return {
           'ok': false,
-          'error': 'Ticket not found in the system.',
+          'error':
+              'Ticket is not recognized for this scanner. It may belong to a different event.',
           'status': 'invalid',
         };
       }
@@ -5003,7 +5004,8 @@ class EventService {
       if (ticketEventId != activeEventId) {
         return {
           'ok': false,
-          'error': 'Ticket is not for the current active event/seminar.',
+          'error':
+              'This ticket belongs to a different event. Please scan it in the correct event scanner.',
           'status': 'wrong_event',
         };
       }
@@ -5255,7 +5257,8 @@ class EventService {
       if (registrationId.isEmpty) {
         return {
           'ok': false,
-          'error': 'Ticket not found in the system.',
+          'error':
+              'Ticket is not recognized for this scanner. It may belong to a different event.',
           'status': 'invalid',
         };
       }
@@ -5271,7 +5274,8 @@ class EventService {
       if (ticketEventId != activeEventId) {
         return {
           'ok': false,
-          'error': 'Ticket is not for the current active event/seminar.',
+          'error':
+              'This ticket belongs to a different event. Please scan it in the correct event scanner.',
           'status': 'wrong_event',
         };
       }
@@ -5469,7 +5473,8 @@ class EventService {
       if (existingParams.isEmpty) {
         return {
           'ok': false,
-          'error': 'Ticket not found in the system.',
+          'error':
+              'Ticket is not recognized for this scanner. It may belong to a different event.',
           'status': 'invalid',
         };
       }

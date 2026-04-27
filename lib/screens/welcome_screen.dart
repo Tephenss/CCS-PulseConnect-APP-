@@ -754,7 +754,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                       Padding(
                         padding: const EdgeInsets.only(bottom: 24),
                         child: Text(
-                          '(c) ${DateTime.now().year} CCS PulseConnect',
+                          '${DateTime.now().year} PulseCONNECT',
                           style: const TextStyle(
                             fontSize: 11,
                             color: Color(0xFF71717A),

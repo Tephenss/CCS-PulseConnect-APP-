@@ -1,4 +1,6 @@
+import 'dart:ui' show PointerDeviceKind;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'email_verification_screen.dart';
@@ -21,43 +23,24 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
   final _idNumberCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
-  final _confirmPasswordCtrl = TextEditingController();
 
   String? _selectedCourse;
   bool _isLoading = false;
   bool _obscurePassword = true;
-  bool _obscureConfirm = true;
   String? _errorMessage;
   String? _successMessage;
 
-  late AnimationController _gradientController;
   late AnimationController _logoFloatController;
-  late ScrollController _scrollController;
-  double _scrollDim = 0.0; // 0.0 = top, 1.0 = fully scrolled
   Offset _pointerPosition = const Offset(0, 0);
   bool _pointerActive = false;
 
   @override
   void initState() {
     super.initState();
-    _gradientController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 5),
-    )..repeat(reverse: true);
-    
     _logoFloatController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
     )..repeat(reverse: true);
-
-    _scrollController = ScrollController();
-    _scrollController.addListener(_onScroll);
-  }
-
-  void _onScroll() {
-    final maxScroll = 250.0; // px scrolled before fully dim
-    final offset = _scrollController.offset.clamp(0.0, maxScroll);
-    setState(() => _scrollDim = offset / maxScroll);
   }
 
   @override
@@ -69,10 +52,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
     _idNumberCtrl.dispose();
     _emailCtrl.dispose();
     _passwordCtrl.dispose();
-    _confirmPasswordCtrl.dispose();
-    _gradientController.dispose();
     _logoFloatController.dispose();
-    _scrollController.dispose();
     super.dispose();
   }
 
@@ -80,11 +60,6 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
 
   Future<void> _handleRegister() async {
     if (!_formKey.currentState!.validate()) return;
-
-    if (_passwordCtrl.text != _confirmPasswordCtrl.text) {
-      setState(() => _errorMessage = 'Passwords do not match.');
-      return;
-    }
 
     setState(() {
       _isLoading = true;
@@ -129,6 +104,12 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
   }
 
   void _updatePointer(PointerEvent details) {
+    if (details.kind != PointerDeviceKind.mouse) {
+      if (_pointerActive) {
+        setState(() => _pointerActive = false);
+      }
+      return;
+    }
     setState(() {
       _pointerPosition = details.position;
       _pointerActive = true;
@@ -136,7 +117,9 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
   }
 
   void _hidePointer(PointerEvent details) {
-    setState(() => _pointerActive = false);
+    if (_pointerActive) {
+      setState(() => _pointerActive = false);
+    }
   }
 
   InputDecoration _inputDeco({required String hint, IconData? icon, Widget? suffix}) {
@@ -172,6 +155,66 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
     );
   }
 
+  bool _hasUppercase(String value) => RegExp(r'[A-Z]').hasMatch(value);
+  bool _hasLowercase(String value) => RegExp(r'[a-z]').hasMatch(value);
+  bool _hasDigit(String value) => RegExp(r'\d').hasMatch(value);
+  bool _hasSpecial(String value) => RegExp(r'[^A-Za-z0-9]').hasMatch(value);
+
+  int _passwordStrengthScore(String value) {
+    var score = 0;
+    if (value.length >= 8) score++;
+    if (_hasUppercase(value)) score++;
+    if (_hasLowercase(value)) score++;
+    if (_hasDigit(value)) score++;
+    if (_hasSpecial(value)) score++;
+    return score;
+  }
+
+  bool _isStrongPassword(String value) {
+    return value.length >= 8 &&
+        _hasUppercase(value) &&
+        _hasLowercase(value) &&
+        _hasDigit(value) &&
+        _hasSpecial(value);
+  }
+
+  Color _strengthColor(int score) {
+    if (score >= 5) return const Color(0xFF16A34A);
+    if (score >= 3) return const Color(0xFFD97706);
+    return const Color(0xFFDC2626);
+  }
+
+  String _strengthLabel(int score) {
+    if (score >= 5) return 'Strong';
+    if (score >= 3) return 'Medium';
+    return 'Weak';
+  }
+
+  Widget _buildPasswordRule({
+    required String text,
+    required bool met,
+  }) {
+    final color = met ? const Color(0xFF22C55E) : const Color(0xFF71717A);
+    return Row(
+      children: [
+        Icon(
+          met ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
+          size: 14,
+          color: color,
+        ),
+        const SizedBox(width: 6),
+        Text(
+          text,
+          style: TextStyle(
+            fontSize: 11,
+            color: color,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final size = MediaQuery.of(context).size;
@@ -187,40 +230,33 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
           children: [
             // Background Image — dims on scroll
             Positioned.fill(
-              child: AnimatedOpacity(
-                duration: const Duration(milliseconds: 100),
-                opacity: (1.0 - _scrollDim * 0.85).clamp(0.15, 1.0),
-                child: Transform.translate(
-                  offset: Offset(0, -_scrollDim * 40),
-                  child: Image.asset(
-                    'assets/bg.png',
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) => const SizedBox(),
-                  ),
-                ),
+              child: Image.asset(
+                'assets/bg.png',
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) => const SizedBox(),
               ),
             ),
 
             // Smooth dark fade — gets stronger on scroll
             Positioned.fill(
               child: Container(
-                decoration: BoxDecoration(
+                decoration: const BoxDecoration(
                   gradient: LinearGradient(
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [
-                      Color(0xFF09090B).withValues(alpha: 0.0 + _scrollDim * 0.4),
-                      Color(0xFF09090B).withValues(alpha: 0.03 + _scrollDim * 0.2),
-                      Color(0xFF09090B).withValues(alpha: 0.08 + _scrollDim * 0.2),
-                      Color(0xFF09090B).withValues(alpha: 0.18 + _scrollDim * 0.15),
-                      Color(0xFF09090B).withValues(alpha: 0.35 + _scrollDim * 0.15),
-                      Color(0xFF09090B).withValues(alpha: 0.55 + _scrollDim * 0.1),
-                      Color(0xFF09090B).withValues(alpha: 0.72 + _scrollDim * 0.08),
-                      Color(0xFF09090B).withValues(alpha: 0.85 + _scrollDim * 0.05),
-                      Color(0xFF09090B).withValues(alpha: 0.94 + _scrollDim * 0.03),
-                      const Color(0xFF09090B),
+                      Color(0x0009090B),
+                      Color(0x0809090B),
+                      Color(0x1409090B),
+                      Color(0x2E09090B),
+                      Color(0x5909090B),
+                      Color(0x8009090B),
+                      Color(0xB809090B),
+                      Color(0xD809090B),
+                      Color(0xEF09090B),
+                      Color(0xFF09090B),
                     ],
-                    stops: const [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.65, 0.8, 0.9, 1.0],
+                    stops: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.65, 0.8, 0.9, 1.0],
                   ),
                 ),
               ),
@@ -257,28 +293,22 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
               right: 0,
               height: size.height,
               child: IgnorePointer(
-                child: AnimatedBuilder(
-                  animation: _gradientController,
-                  builder: (context, child) {
-                    final t = _gradientController.value;
-                    return Opacity(
-                      opacity: _pointerActive ? 0.3 : 0.95,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          gradient: RadialGradient(
-                            center: Alignment(-0.9 + 1.8 * t, -0.6 + 1.2 * t),
-                            radius: 1.4 + 0.4 * t,
-                            colors: [
-                              const Color(0xFF6F1D2D).withValues(alpha: 0.85 + 0.1 * t),
-                              const Color(0xFF7F1D1D).withValues(alpha: 0.5 + 0.2 * t),
-                              Colors.transparent,
-                            ],
-                            stops: [0.0, 0.45 + 0.2 * t, 1.0],
-                          ),
-                        ),
+                child: Opacity(
+                  opacity: _pointerActive ? 0.3 : 0.92,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: RadialGradient(
+                        center: const Alignment(-0.35, -0.58),
+                        radius: 1.25,
+                        colors: [
+                          const Color(0xFF6F1D2D).withValues(alpha: 0.82),
+                          const Color(0xFF7F1D1D).withValues(alpha: 0.44),
+                          Colors.transparent,
+                        ],
+                        stops: const [0.0, 0.48, 1.0],
                       ),
-                    );
-                  },
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -314,7 +344,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                             boxShadow: [
                               BoxShadow(
                                 color: const Color(0xFF15803D).withValues(alpha: 0.4),
-                                blurRadius: 12,
+                                blurRadius: 8,
                                 offset: const Offset(0, 4),
                               ),
                             ],
@@ -343,7 +373,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                   // Scrollable form
                   Expanded(
                     child: SingleChildScrollView(
-                      controller: _scrollController,
+                      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 28),
                         child: Column(
@@ -365,13 +395,13 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                   boxShadow: [
                                     BoxShadow(
                                       color: const Color(0xFF9F1239).withValues(alpha: 0.35),
-                                      blurRadius: 45,
-                                      spreadRadius: 10,
+                                      blurRadius: 18,
+                                      spreadRadius: 2,
                                     ),
                                     BoxShadow(
                                       color: const Color(0xFFF59E0B).withValues(alpha: 0.15),
-                                      blurRadius: 65,
-                                      spreadRadius: 18,
+                                      blurRadius: 28,
+                                      spreadRadius: 4,
                                     ),
                                   ],
                                 ),
@@ -428,7 +458,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                 boxShadow: [
                                   BoxShadow(
                                     color: Colors.black.withValues(alpha: 0.3),
-                                    blurRadius: 40,
+                                    blurRadius: 18,
                                     offset: const Offset(0, 12),
                                   ),
                                 ],
@@ -467,7 +497,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                                 controller: _middleNameCtrl,
                                                 style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
                                                 cursorColor: const Color(0xFF9F1239),
-                                                decoration: _inputDeco(hint: 'Optional'),
+                                                decoration: _inputDeco(hint: 'Middle Name'),
                                               ),
                                             ],
                                           ),
@@ -512,8 +542,19 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                       controller: _idNumberCtrl, // added new controller
                                       style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
                                       cursorColor: const Color(0xFF9F1239),
+                                      keyboardType: TextInputType.text,
+                                      inputFormatters: [
+                                        FilteringTextInputFormatter.allow(RegExp(r'[0-9-]')),
+                                      ],
                                       decoration: _inputDeco(hint: 'e.g. 231-*****', icon: Icons.badge_outlined),
-                                      validator: (v) => v == null || v.trim().isEmpty ? 'ID Number is required' : null,
+                                      validator: (v) {
+                                        final value = (v ?? '').trim();
+                                        if (value.isEmpty) return 'ID Number is required';
+                                        if (!RegExp(r'^[0-9-]+$').hasMatch(value)) {
+                                          return 'Only numbers and - are allowed';
+                                        }
+                                        return null;
+                                      },
                                     ),
 
                                     const SizedBox(height: 20),
@@ -604,6 +645,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                       obscureText: _obscurePassword,
                                       style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
                                       cursorColor: const Color(0xFF9F1239),
+                                      onChanged: (_) => setState(() {}),
                                       decoration: _inputDeco(
                                         hint: 'Minimum 8 characters',
                                         icon: Icons.lock_outline_rounded,
@@ -616,35 +658,70 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                         ),
                                       ),
                                       validator: (v) {
-                                        if (v == null || v.length < 8) return 'At least 8 characters';
+                                        final value = (v ?? '').trim();
+                                        if (value.isEmpty) return 'Password is required';
+                                        if (!_isStrongPassword(value)) {
+                                          return 'Use 8+ chars with upper, lower, number, and symbol';
+                                        }
                                         return null;
                                       },
                                     ),
 
-                                    const SizedBox(height: 14),
-
-                                    // Confirm Password
-                                    _buildLabel('Confirm Password'),
-                                    const SizedBox(height: 8),
-                                    TextFormField(
-                                      controller: _confirmPasswordCtrl,
-                                      obscureText: _obscureConfirm,
-                                      style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                                      cursorColor: const Color(0xFF9F1239),
-                                      decoration: _inputDeco(
-                                        hint: 'Re-enter password',
-                                        icon: Icons.lock_outline,
-                                        suffix: IconButton(
-                                          icon: Icon(
-                                            _obscureConfirm ? Icons.visibility_off_outlined : Icons.visibility_outlined,
-                                            color: const Color(0xFF52525B), size: 20,
-                                          ),
-                                          onPressed: () => setState(() => _obscureConfirm = !_obscureConfirm),
-                                        ),
-                                      ),
-                                      validator: (v) {
-                                        if (v != _passwordCtrl.text) return 'Passwords do not match';
-                                        return null;
+                                    const SizedBox(height: 10),
+                                    Builder(
+                                      builder: (_) {
+                                        final password = _passwordCtrl.text;
+                                        final score = _passwordStrengthScore(password);
+                                        final color = _strengthColor(score);
+                                        final meterValue = password.isEmpty ? 0.0 : (score / 5).clamp(0.0, 1.0);
+                                        return Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Row(
+                                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                              children: [
+                                                const Text(
+                                                  'Password strength',
+                                                  style: TextStyle(
+                                                    fontSize: 11,
+                                                    color: Color(0xFFA1A1AA),
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  password.isEmpty ? '-' : _strengthLabel(score),
+                                                  style: TextStyle(
+                                                    fontSize: 11,
+                                                    color: password.isEmpty ? const Color(0xFF71717A) : color,
+                                                    fontWeight: FontWeight.w700,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                            const SizedBox(height: 6),
+                                            ClipRRect(
+                                              borderRadius: BorderRadius.circular(99),
+                                              child: LinearProgressIndicator(
+                                                minHeight: 6,
+                                                value: meterValue,
+                                                backgroundColor: const Color(0xFF27272A),
+                                                valueColor: AlwaysStoppedAnimation<Color>(color),
+                                              ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            Wrap(
+                                              spacing: 10,
+                                              runSpacing: 6,
+                                              children: [
+                                                _buildPasswordRule(text: '8+ chars', met: password.length >= 8),
+                                                _buildPasswordRule(text: 'Uppercase', met: _hasUppercase(password)),
+                                                _buildPasswordRule(text: 'Lowercase', met: _hasLowercase(password)),
+                                                _buildPasswordRule(text: 'Number', met: _hasDigit(password)),
+                                                _buildPasswordRule(text: 'Symbol', met: _hasSpecial(password)),
+                                              ],
+                                            ),
+                                          ],
+                                        );
                                       },
                                     ),
 
@@ -664,7 +741,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                           boxShadow: [
                                             BoxShadow(
                                               color: const Color(0xFF9F1239).withValues(alpha: 0.45),
-                                              blurRadius: 24,
+                                              blurRadius: 14,
                                               offset: const Offset(0, 8),
                                             ),
                                           ],

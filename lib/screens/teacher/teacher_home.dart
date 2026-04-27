@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -43,6 +43,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   bool _isLoading = true;
   bool _usingCachedUpcomingEvents = false;
   int _unreadCount = 0;
+  bool _isOpeningNotifications = false;
   DateTime _calendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
   final _notifService = NotificationService();
   final PageController _headerPageController = PageController();
@@ -79,6 +80,31 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
         setState(() => _unreadCount = unread);
       }
     } catch (_) {}
+  }
+
+  Future<void> _openNotificationsModal() async {
+    if (_isOpeningNotifications) return;
+    setState(() => _isOpeningNotifications = true);
+
+    try {
+      unawaited(_refreshUnreadCount());
+      final result = await showNotificationsModal(context);
+      if (!mounted) return;
+
+      if (result is int) {
+        setState(() {
+          _currentIndex = result;
+        });
+      }
+
+      unawaited(_refreshUnreadCount());
+    } finally {
+      if (mounted) {
+        setState(() => _isOpeningNotifications = false);
+      } else {
+        _isOpeningNotifications = false;
+      }
+    }
   }
 
   Future<bool> _hasNoConnectivity() async {
@@ -474,41 +500,30 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                                   padding: const EdgeInsets.all(10),
                                   splashRadius: 22,
                                   icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
-                                  onPressed: () async {
-                                    await _refreshUnreadCount();
-                                    if (!mounted) return;
-                                    final result = await showNotificationsModal(context);
-                                    if (!mounted) return;
-
-                                    if (result is int) {
-                                      setState(() {
-                                        _currentIndex = result;
-                                      });
-                                    }
-
-                                    await _refreshUnreadCount();
-                                  },
+                                  onPressed: _isOpeningNotifications ? null : _openNotificationsModal,
                                 ),
                               ),
                               if (_unreadCount > 0)
                                 Positioned(
                                   top: -4,
                                   right: -4,
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: const Color(0xFFEF4444),
-                                      borderRadius: BorderRadius.circular(999),
-                                      border: Border.all(color: _teacherMid, width: 1.5),
-                                    ),
-                                    constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
-                                    child: Text(
-                                      _unreadCount > 99 ? '99+' : _unreadCount.toString(),
-                                      textAlign: TextAlign.center,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w800,
+                                  child: IgnorePointer(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFEF4444),
+                                        borderRadius: BorderRadius.circular(999),
+                                        border: Border.all(color: _teacherMid, width: 1.5),
+                                      ),
+                                      constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+                                      child: Text(
+                                        _unreadCount > 99 ? '99+' : _unreadCount.toString(),
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w800,
+                                        ),
                                       ),
                                     ),
                                   ),

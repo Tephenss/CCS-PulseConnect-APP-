@@ -272,6 +272,14 @@ class NotificationService {
     return status == 'paid' || status == 'waived';
   }
 
+  bool _eventAllowsOpenRegistration(Map<String, dynamic> event) {
+    final raw = event['allow_registration'];
+    if (raw is bool) return raw;
+    final text = raw?.toString().trim().toLowerCase() ?? '';
+    if (text.isEmpty) return true;
+    return text == 'true' || text == '1' || text == 'yes' || text == 'on';
+  }
+
   String _sessionNotificationTitle(Map<String, dynamic> session) {
     final title = session['title']?.toString().trim() ?? '';
     if (title.isNotEmpty) return title;
@@ -442,6 +450,7 @@ class NotificationService {
     };
     var didChange = false;
     var didChangeApprovedEvents = false;
+    final hostedPushConfigured = _isHostedMobilePushConfigured();
 
     for (final notification in nextNotifications) {
       final isEvalOpen = notification.id.startsWith('eval_open_');
@@ -467,9 +476,26 @@ class NotificationService {
         continue;
       }
 
-      // Scanner-assignment notifications are delivered by server FCM
-      // when mobile push API is configured. Avoid duplicate local popup.
-      if (isScannerAssigned && _isHostedMobilePushConfigured()) {
+      final isPushBackedInteractive =
+          isScannerAssigned ||
+          isPublishedEvent ||
+          isRegistrationUpdate ||
+          isRegistrationApproved ||
+          isTeacherAssigned ||
+          isProposalApproved ||
+          isProposalRejected;
+
+      // Registration open/closed updates are already emitted as push from web APIs.
+      // Never mirror them as local popup to prevent duplicate tray notifications.
+      if (isPublishedEvent || isRegistrationUpdate) {
+        shownIds.add(notification.id);
+        didChange = true;
+        continue;
+      }
+
+      // When hosted push is enabled, these interactive entries are already
+      // delivered through FCM. Skip local popup to avoid duplicate tray cards.
+      if (hostedPushConfigured && isPushBackedInteractive) {
         shownIds.add(notification.id);
         didChange = true;
         continue;
@@ -735,6 +761,7 @@ class NotificationService {
               _tryParseLocalDate(event['updated_at']) ??
               _tryParseLocalDate(event['created_at']) ??
               startAt;
+          final allowsOpenRegistration = _eventAllowsOpenRegistration(event);
           final description = event['description'] ?? '';
 
           // Check if event has actually ended
@@ -833,7 +860,8 @@ class NotificationService {
           if (status == 'published') {
           // New Published Event / Registration Open
           // Visible to Students and Assigned Teachers as long as the event hasn't finished yet
-          bool shouldNotify = (role == 'student') || (role == 'teacher' && isTeacherAssigned);
+          bool shouldNotify = (role == 'teacher' && isTeacherAssigned) ||
+              (role == 'student' && allowsOpenRegistration);
           
           if (shouldNotify && !isFinished && now.difference(updatedAt).inDays <= 7) {
             notifications.add(AppNotification(
