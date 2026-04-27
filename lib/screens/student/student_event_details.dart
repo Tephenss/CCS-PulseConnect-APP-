@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../../services/auth_service.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'dart:async';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'student_ticket_view.dart';
@@ -22,16 +23,25 @@ class StudentEventDetails extends StatefulWidget {
   State<StudentEventDetails> createState() => _StudentEventDetailsState();
 }
 
-class _StudentEventDetailsState extends State<StudentEventDetails> {
+class _StudentEventDetailsState extends State<StudentEventDetails>
+    with WidgetsBindingObserver {
   final _eventService = EventService();
+  final _supabase = Supabase.instance.client;
   Map<String, dynamic>? _event;
   bool _isLoading = true;
   bool _isRegistered = false;
   bool _isRegistrationResolved = false;
   bool _isRegistering = false;
   bool _isAccessDenied = false;
+  bool _canRegisterNow = false;
+  bool _approvalRequired = false;
+  String _registrationMessage = '';
   int _participantCount = 0;
   List<Map<String, dynamic>> _eventSessions = [];
+  bool _isRefreshingEvent = false;
+  Timer? _approvalRefreshTimer;
+  RealtimeChannel? _approvalChannel;
+  String _approvalChannelUserId = '';
 
   Color _studentPrimary(BuildContext context) =>
       Theme.of(context).colorScheme.primary;
@@ -41,6 +51,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     if (widget.initialEvent != null) {
       _event = Map<String, dynamic>.from(widget.initialEvent!);
       _isLoading = false;
@@ -49,9 +60,146 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     _loadEvent();
   }
 
-  Future<void> _loadEvent() async {
+  @override
+  void dispose() {
+    _approvalRefreshTimer?.cancel();
+    _approvalChannel?.unsubscribe();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _loadEvent(silent: true);
+    }
+  }
+
+  void _scheduleApprovalRefresh() {
+    _approvalRefreshTimer?.cancel();
+    if (_isRegistered || _canRegisterNow || _isAccessDenied) {
+      return;
+    }
+
+    _approvalRefreshTimer = Timer.periodic(const Duration(seconds: 6), (_) {
+      if (!mounted) return;
+      if (_isRegistered || _canRegisterNow || _isAccessDenied) {
+        _approvalRefreshTimer?.cancel();
+        return;
+      }
+      unawaited(_loadEvent(silent: true));
+    });
+  }
+
+  bool _payloadAllowsRegistration(Map<String, dynamic> payload) {
+    final approved = payload['approved'];
+    final paymentStatus =
+        (payload['payment_status']?.toString() ?? '').trim().toLowerCase();
+
+    final approvedBool =
+        approved == true ||
+        (approved?.toString().trim().toLowerCase() == 'true') ||
+        (approved?.toString().trim() == '1');
+
+    return approvedBool || paymentStatus == 'paid' || paymentStatus == 'waived';
+  }
+
+  void _applyApprovedRegistrationState(String userId) {
+    unawaited(
+      _eventService.cacheApprovedRegistrationAccess(userId, widget.eventId),
+    );
+    if (!mounted) return;
+    setState(() {
+      _canRegisterNow = true;
+      _approvalRequired = false;
+      _registrationMessage = '';
+      _isRegistrationResolved = true;
+    });
+    unawaited(_loadEvent(silent: true));
+  }
+
+  void _bindApprovalRealtime(String userId) {
+    final trimmedUserId = userId.trim();
+    if (trimmedUserId.isEmpty) {
+      _approvalChannel?.unsubscribe();
+      _approvalChannel = null;
+      _approvalChannelUserId = '';
+      return;
+    }
+
+    if (_approvalChannel != null && _approvalChannelUserId == trimmedUserId) {
+      return;
+    }
+
+    _approvalChannel?.unsubscribe();
+    _approvalChannelUserId = trimmedUserId;
+
+    final signalId = 'reg_access_approved_${widget.eventId}';
+    _approvalChannel = _supabase.channel(
+      'public:student_registration_access:$trimmedUserId:${widget.eventId}',
+    );
+
+    _approvalChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'user_notification_reads',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'user_id',
+        value: trimmedUserId,
+      ),
+      callback: (payload) {
+        final record = payload.newRecord.isNotEmpty
+            ? payload.newRecord
+            : payload.oldRecord;
+        final notificationId =
+            (record['notification_id']?.toString() ?? '').trim();
+        if (notificationId == signalId) {
+          _applyApprovedRegistrationState(trimmedUserId);
+        }
+      },
+    );
+
+    _approvalChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'event_registration_access',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'student_id',
+        value: trimmedUserId,
+      ),
+      callback: (payload) {
+        final record = payload.newRecord.isNotEmpty
+            ? payload.newRecord
+            : payload.oldRecord;
+        final eventId = (record['event_id']?.toString() ?? '').trim();
+        if (eventId != widget.eventId) {
+          return;
+        }
+        if (_payloadAllowsRegistration(record)) {
+          _applyApprovedRegistrationState(trimmedUserId);
+        }
+      },
+    );
+
+    _approvalChannel!.subscribe();
+  }
+
+  Future<void> _loadEvent({bool silent = false}) async {
+    if (_isRefreshingEvent) return;
+    _isRefreshingEvent = true;
+
+    if (!silent && mounted) {
+      setState(() {
+        _isLoading = true;
+      });
+    }
+
+    try {
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id') ?? '';
+    _bindApprovalRealtime(userId);
     final results = await Future.wait([
       _eventService.getEventById(widget.eventId),
       _eventService.isRegistered(widget.eventId, userId),
@@ -64,6 +212,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     final count = results[2] as int;
     final sessions = results[3] as List<Map<String, dynamic>>;
     var accessDenied = false;
+    var canRegisterNow = false;
+    var approvalRequired = false;
+    var registrationMessage = '';
 
     if (!isReg) {
       // Fallback: if registration row check misses, verify by ticket existence.
@@ -74,14 +225,15 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     }
 
     if (event != null && !isReg) {
-      final authService = AuthService();
-      final yearLevel = await authService.getStudentYearLevel();
-      final courseCode = await authService.getStudentCourseCode();
-      accessDenied = !_eventService.isStudentAllowedForEvent(
-        Map<String, dynamic>.from(event),
-        yearLevel: yearLevel,
-        courseCode: courseCode,
+      final availability = await _eventService.getStudentRegistrationAvailability(
+        widget.eventId,
+        userId,
+        preloadedEvent: Map<String, dynamic>.from(event),
       );
+      accessDenied = availability['targetAllowed'] == false;
+      canRegisterNow = availability['allowed'] == true;
+      approvalRequired = availability['approvalRequired'] == true;
+      registrationMessage = (availability['message'] as String? ?? '').trim();
     }
 
     if (mounted) {
@@ -89,20 +241,35 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
         _event = event ?? _event;
         _isRegistered = isReg;
         _isAccessDenied = accessDenied;
+        _canRegisterNow = canRegisterNow;
+        _approvalRequired = approvalRequired;
+        _registrationMessage = registrationMessage;
         _participantCount = count;
         _eventSessions = sessions;
         _isRegistrationResolved = true;
         _isLoading = false;
       });
+      _scheduleApprovalRefresh();
+    }
+    } finally {
+      _isRefreshingEvent = false;
     }
   }
 
   Future<void> _handleRegister() async {
-    if (_isAccessDenied) {
+    if (_approvalRequired && !_canRegisterNow) {
+      await _loadEvent(silent: true);
+    }
+
+    if (_isAccessDenied || !_canRegisterNow) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('You are not allowed to register for this event.'),
+          SnackBar(
+            content: Text(
+              _registrationMessage.isNotEmpty
+                  ? _registrationMessage
+                  : 'You are not allowed to register for this event.',
+            ),
           ),
         );
       }
@@ -254,13 +421,18 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     final startDate = parseStoredEventDateTime(startAt);
     final endDate = parseStoredEventDateTime(endAt);
 
-    bool isRegistrationOpen = _event!['status'] == 'published';
+    final registrationStatusLabel = _isRegistered
+        ? 'Registered'
+        : (_canRegisterNow
+            ? 'Open'
+            : (_approvalRequired ? 'Approval Required' : 'Closed'));
     final usesSessions = usesEventSessions(_event!) || _eventSessions.isNotEmpty;
     final canTapAction =
         _isRegistrationResolved &&
         !_isAccessDenied &&
         !_isRegistering &&
-        !(!isRegistrationOpen && !_isRegistered);
+        (_isRegistered || _canRegisterNow);
+    final isActionDisabled = !_isRegistered && !_canRegisterNow;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -358,7 +530,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
                     ),
 
                   _buildTopStatsGrid(
-                    isRegistrationOpen: isRegistrationOpen,
+                    registrationStatusLabel: registrationStatusLabel,
                     eventSpan: eventSpan,
                   ),
 
@@ -439,76 +611,138 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
             ),
           ],
         ),
-        child: SizedBox(
-          width: double.infinity,
-          height: 60, // Prevents the loader's Center from expanding to fill the screen
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              gradient: LinearGradient(
-                colors: _isRegistered
-                    ? [const Color(0xFFD4A843), const Color(0xFFB8942F)]
-                    : [_studentDark(context), _studentPrimary(context)],
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: (_isRegistered
-                          ? const Color(0xFFD4A843)
-                              : _studentPrimary(context))
-                      .withValues(alpha: 0.3),
-                  blurRadius: 15,
-                  offset: const Offset(0, 4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_registrationMessage.isNotEmpty &&
+                !_isRegistered &&
+                !_approvalRequired) ...[
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: _approvalRequired
+                      ? const Color(0xFFFFF7ED)
+                      : const Color(0xFFF3F4F6),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: _approvalRequired
+                        ? const Color(0xFFFED7AA)
+                        : const Color(0xFFE5E7EB),
+                  ),
                 ),
-              ],
-            ),
-            child: ElevatedButton(
-              onPressed: canTapAction
-                  ? (_isRegistered ? _handleViewTicket : _handleRegister)
-                  : null,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.transparent,
-                shadowColor: Colors.transparent,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 18),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                ),
-              ),
-              child: (_isRegistering || !_isRegistrationResolved)
-                  ? const PulseConnectLoader(
-                      size: 14,
-                      color: Colors.white,
-                    )
-                  : Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                          _isRegistered
-                              ? Icons.confirmation_num_rounded
-                              : Icons.how_to_reg_rounded,
-                          size: 20,
-                        ),
-                        const SizedBox(width: 10),
-                        Text(
-                          _isRegistered 
-                            ? 'See Ticket' 
-                            : (isRegistrationOpen ? 'Register' : 'Registration Closed'),
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ],
+                child: Row(
+                  children: [
+                    Icon(
+                      _approvalRequired
+                          ? Icons.verified_user_outlined
+                          : Icons.info_outline_rounded,
+                      size: 18,
+                      color: _approvalRequired
+                          ? const Color(0xFFEA580C)
+                          : const Color(0xFF6B7280),
                     ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _registrationMessage,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: _approvalRequired
+                              ? const Color(0xFF9A3412)
+                              : const Color(0xFF374151),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            SizedBox(
+              width: double.infinity,
+              height: 60,
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
+                  gradient: LinearGradient(
+                    colors: _isRegistered
+                        ? [const Color(0xFFD4A843), const Color(0xFFB8942F)]
+                        : (isActionDisabled
+                            ? const [Color(0xFFE5E7EB), Color(0xFFD1D5DB)]
+                            : [_studentDark(context), _studentPrimary(context)]),
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: (_isRegistered
+                              ? const Color(0xFFD4A843)
+                              : (isActionDisabled
+                                  ? const Color(0xFF9CA3AF)
+                                  : _studentPrimary(context)))
+                          .withValues(alpha: 0.3),
+                      blurRadius: 15,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: ElevatedButton(
+                  onPressed: canTapAction
+                      ? (_isRegistered ? _handleViewTicket : _handleRegister)
+                      : null,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.transparent,
+                    shadowColor: Colors.transparent,
+                    foregroundColor: Colors.white,
+                    disabledForegroundColor: const Color(0xFF6B7280),
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  child: (_isRegistering || !_isRegistrationResolved)
+                      ? const PulseConnectLoader(
+                          size: 14,
+                          color: Colors.white,
+                        )
+                      : Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              _isRegistered
+                                  ? Icons.confirmation_num_rounded
+                                  : (_approvalRequired
+                                      ? Icons.lock_clock_rounded
+                                      : Icons.how_to_reg_rounded),
+                              size: 20,
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              _isRegistered
+                                  ? 'See Ticket'
+                                  : (_canRegisterNow
+                                      ? 'Register'
+                                      : (_approvalRequired
+                                          ? 'Approval Required'
+                                          : 'Registration Closed')),
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
+                ),
+              ),
             ),
-          ),
+          ],
         ),
       ),
     );
   }
 
   Widget _buildTopStatsGrid({
-    required bool isRegistrationOpen,
+    required String registrationStatusLabel,
     required String eventSpan,
   }) {
     final screenWidth = MediaQuery.of(context).size.width;
@@ -527,8 +761,14 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
         itemWidth,
       ),
       _buildInfoChip(
-        isRegistrationOpen ? Icons.check_circle_rounded : Icons.info_outline_rounded,
-        _isRegistered ? 'Registered' : (isRegistrationOpen ? 'Open' : 'Closed'),
+        _isRegistered
+            ? Icons.confirmation_num_rounded
+            : (_canRegisterNow
+                ? Icons.check_circle_rounded
+                : (_approvalRequired
+                    ? Icons.lock_clock_rounded
+                    : Icons.info_outline_rounded)),
+        registrationStatusLabel,
         'Status',
         itemWidth,
       ),
@@ -578,11 +818,12 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontWeight: FontWeight.w800,
-                fontSize: 15,
+                fontSize: 14,
                 color: _studentPrimary(context),
               ),
-              maxLines: 1,
+              maxLines: 2,
               overflow: TextOverflow.ellipsis,
+              softWrap: true,
             ),
             const SizedBox(height: 2),
             Text(
@@ -896,3 +1137,4 @@ class _StudentEventDetailsState extends State<StudentEventDetails> {
     }
   }
 }
+

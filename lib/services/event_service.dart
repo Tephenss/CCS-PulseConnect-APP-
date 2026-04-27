@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import '../config/env.dart';
 
 class EventService {
@@ -12,6 +13,63 @@ class EventService {
   final Map<String, bool> _attendanceColumnSupport = {};
   bool? _eventSessionAttendanceTableSupported;
   DateTime? _eventSessionAttendanceSupportCheckedAtUtc;
+
+  String _approvedRegistrationCacheKey(String userId) =>
+      'approved_registration_events_${userId.trim()}';
+
+  Future<void> cacheApprovedRegistrationAccess(
+    String userId,
+    String eventId,
+  ) async {
+    final trimmedUserId = userId.trim();
+    final trimmedEventId = eventId.trim();
+    if (trimmedUserId.isEmpty || trimmedEventId.isEmpty) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final key = _approvedRegistrationCacheKey(trimmedUserId);
+    final values = <String>{
+      ...(prefs.getStringList(key) ?? const <String>[]),
+      trimmedEventId,
+    };
+    await prefs.setStringList(key, values.toList());
+  }
+
+  Future<bool> hasCachedApprovedRegistrationAccess(
+    String userId,
+    String eventId,
+  ) async {
+    final trimmedUserId = userId.trim();
+    final trimmedEventId = eventId.trim();
+    if (trimmedUserId.isEmpty || trimmedEventId.isEmpty) return false;
+
+    final prefs = await SharedPreferences.getInstance();
+    final values = prefs.getStringList(
+          _approvedRegistrationCacheKey(trimmedUserId),
+        ) ??
+        const <String>[];
+    return values.contains(trimmedEventId);
+  }
+
+  Future<bool> _hasServerApprovedRegistrationSignal(
+    String userId,
+    String eventId,
+  ) async {
+    final trimmedUserId = userId.trim();
+    final trimmedEventId = eventId.trim();
+    if (trimmedUserId.isEmpty || trimmedEventId.isEmpty) return false;
+
+    try {
+      final row = await _supabase
+          .from('user_notification_reads')
+          .select('notification_id')
+          .eq('user_id', trimmedUserId)
+          .eq('notification_id', 'reg_access_approved_$trimmedEventId')
+          .maybeSingle();
+      return row != null;
+    } catch (_) {
+      return false;
+    }
+  }
 
   bool _isMissingAssistantsTableError(Object error) {
     final msg = error.toString().toLowerCase();
@@ -2254,6 +2312,209 @@ class EventService {
     }
   }
 
+  bool _asRegistrationBool(dynamic value) {
+    if (value is bool) {
+      return value;
+    }
+    final normalized = value?.toString().trim().toLowerCase() ?? '';
+    return const {'1', 'true', 't', 'yes', 'y', 'on'}.contains(normalized);
+  }
+
+  String _normalizeRegistrationPaymentStatus(dynamic value) {
+    final normalized = value?.toString().trim().toLowerCase() ?? '';
+    switch (normalized) {
+      case 'paid':
+      case 'approve':
+      case 'approved':
+      case 'allow':
+      case 'allowed':
+      case 'yes':
+      case 'y':
+      case '1':
+      case 'true':
+      case 't':
+        return 'paid';
+      case 'waived':
+      case 'waive':
+      case 'free':
+      case 'exempt':
+        return 'waived';
+      case 'rejected':
+      case 'reject':
+      case 'declined':
+      case 'denied':
+      case 'deny':
+      case 'blocked':
+      case 'no':
+      case 'n':
+      case '0':
+      case 'false':
+      case 'f':
+        return 'rejected';
+      default:
+        return 'pending';
+    }
+  }
+
+  bool _registrationAccessRowAllows(Map<String, dynamic> row) {
+    if (_asRegistrationBool(row['approved'])) {
+      return true;
+    }
+
+    final paymentStatus = _normalizeRegistrationPaymentStatus(
+      row['payment_status'],
+    );
+    return paymentStatus == 'paid' || paymentStatus == 'waived';
+  }
+
+  Future<Map<String, dynamic>?> _fetchRegistrationEvent(String eventId) async {
+    try {
+      final response = await _supabase
+          .from('events')
+          .select('id,status,event_for,allow_registration')
+          .eq('id', eventId)
+          .maybeSingle();
+      if (response == null) {
+        return null;
+      }
+      return Map<String, dynamic>.from(response);
+    } catch (_) {
+      try {
+        final fallback = await _supabase
+            .from('events')
+            .select('id,status,event_for')
+            .eq('id', eventId)
+            .maybeSingle();
+        if (fallback == null) {
+          return null;
+        }
+        return {
+          ...Map<String, dynamic>.from(fallback),
+          'allow_registration': false,
+        };
+      } catch (_) {
+        return null;
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>> getStudentRegistrationAvailability(
+    String eventId,
+    String studentId, {
+    Map<String, dynamic>? preloadedEvent,
+  }) async {
+    final event = preloadedEvent != null
+        ? Map<String, dynamic>.from(preloadedEvent)
+        : await _fetchRegistrationEvent(eventId);
+
+    if (event == null) {
+      return {
+        'allowed': false,
+        'targetAllowed': false,
+        'approvalRequired': false,
+        'registrationOpenToAll': false,
+        'message': 'Event not found.',
+      };
+    }
+
+    final status = (event['status']?.toString() ?? '').trim().toLowerCase();
+    if (status != 'published') {
+      return {
+        'allowed': false,
+        'targetAllowed': false,
+        'approvalRequired': false,
+        'registrationOpenToAll': false,
+        'message': 'Registration is currently closed.',
+      };
+    }
+
+    final studentScope = await getStudentTargetScope(studentId);
+    final targetAllowed = isStudentAllowedForEvent(
+      event,
+      yearLevel: studentScope['yearLevel'],
+      courseCode: studentScope['courseCode'],
+    );
+    if (!targetAllowed) {
+      return {
+        'allowed': false,
+        'targetAllowed': false,
+        'approvalRequired': false,
+        'registrationOpenToAll': false,
+        'message': 'This event is not available for your course/year level.',
+      };
+    }
+
+    final registrationOpenToAll = _asRegistrationBool(
+      event['allow_registration'],
+    );
+    if (registrationOpenToAll) {
+      return {
+        'allowed': true,
+        'targetAllowed': true,
+        'approvalRequired': false,
+        'registrationOpenToAll': true,
+        'message': '',
+      };
+    }
+
+    try {
+      final accessRows = List<Map<String, dynamic>>.from(
+        await _supabase
+          .from('event_registration_access')
+          .select('approved,payment_status,payment_note,updated_at')
+          .eq('event_id', eventId)
+          .eq('student_id', studentId)
+          .order('updated_at', ascending: false)
+          .limit(1),
+      );
+
+      if (accessRows.isNotEmpty) {
+        final accessRow = Map<String, dynamic>.from(accessRows.first);
+        if (_registrationAccessRowAllows(accessRow)) {
+          await cacheApprovedRegistrationAccess(studentId, eventId);
+          return {
+            'allowed': true,
+            'targetAllowed': true,
+            'approvalRequired': false,
+            'registrationOpenToAll': false,
+            'message': '',
+          };
+        }
+      }
+    } catch (_) {
+      // If the approval table is unavailable, stay fail-closed for controlled registration.
+    }
+
+    if (await _hasServerApprovedRegistrationSignal(studentId, eventId)) {
+      await cacheApprovedRegistrationAccess(studentId, eventId);
+      return {
+        'allowed': true,
+        'targetAllowed': true,
+        'approvalRequired': false,
+        'registrationOpenToAll': false,
+        'message': '',
+      };
+    }
+
+    if (await hasCachedApprovedRegistrationAccess(studentId, eventId)) {
+      return {
+        'allowed': true,
+        'targetAllowed': true,
+        'approvalRequired': false,
+        'registrationOpenToAll': false,
+        'message': '',
+      };
+    }
+
+    return {
+      'allowed': false,
+      'targetAllowed': true,
+      'approvalRequired': true,
+      'registrationOpenToAll': false,
+      'message': 'Registration requires payment approval first.',
+    };
+  }
+
   // Helper to generate a random 32-character hex token similar to PHP's bin2hex(random_bytes(16))
   String _generateToken() {
     final rand = Random.secure();
@@ -2280,32 +2541,23 @@ class EventService {
         return {'ok': true, 'already_registered': true};
       }
 
-      // 1.5 Validate event availability and student target eligibility.
-      final eventRes = await _supabase
-          .from('events')
-          .select('id,status,event_for')
-          .eq('id', eventId)
-          .maybeSingle();
-      if (eventRes == null) {
+      // 1.5 Validate event availability and approval-aware registration access.
+      final event = await _fetchRegistrationEvent(eventId);
+      if (event == null) {
         return {'ok': false, 'error': 'Event not found.'};
       }
 
-      final event = Map<String, dynamic>.from(eventRes);
-      final status = (event['status']?.toString() ?? '').toLowerCase();
-      if (status != 'published') {
-        return {'ok': false, 'error': 'Registration is currently closed.'};
-      }
-
-      final studentScope = await getStudentTargetScope(userId);
-      final canAccess = isStudentAllowedForEvent(
-        event,
-        yearLevel: studentScope['yearLevel'],
-        courseCode: studentScope['courseCode'],
+      final availability = await getStudentRegistrationAvailability(
+        eventId,
+        userId,
+        preloadedEvent: event,
       );
-      if (!canAccess) {
+      if (!(availability['allowed'] == true)) {
         return {
           'ok': false,
-          'error': 'This event is not available for your course/year level.',
+          'error':
+              availability['message'] as String? ??
+              'Registration is not allowed for this event.',
         };
       }
 

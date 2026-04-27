@@ -57,7 +57,21 @@ class NotificationService {
   String _shownInteractiveNotificationsKey(String userId) =>
       'shown_local_interactive_notifications_$userId';
 
+  String _shownApprovedRegistrationEventsKey(String userId) =>
+      'shown_reg_approved_events_$userId';
+
   String _passwordChangesKey(String userId) => 'pwd_changes_$userId';
+
+  String? _extractApprovedRegistrationEventId(String? notificationId) {
+    final trimmed = (notificationId ?? '').trim();
+    const prefix = 'reg_access_approved_';
+    if (!trimmed.startsWith(prefix) || trimmed.length <= prefix.length) {
+      return null;
+    }
+    return trimmed.substring(prefix.length).trim().isEmpty
+        ? null
+        : trimmed.substring(prefix.length).trim();
+  }
 
   void dispose() {
     _notifChannel?.unsubscribe();
@@ -109,6 +123,20 @@ class NotificationService {
         value: userId,
       ),
       callback: (payload) {
+        final record = payload.newRecord.isNotEmpty
+            ? payload.newRecord
+            : payload.oldRecord;
+        final approvedEventId = _extractApprovedRegistrationEventId(
+          record['notification_id']?.toString(),
+        );
+        if (approvedEventId != null && approvedEventId.isNotEmpty) {
+          unawaited(
+            _eventService.cacheApprovedRegistrationAccess(
+              userId,
+              approvedEventId,
+            ),
+          );
+        }
         scheduleRefresh();
       },
     );
@@ -231,6 +259,17 @@ class NotificationService {
       return _asStringMap(raw.first);
     }
     return _asStringMap(raw);
+  }
+
+  bool _registrationAccessRowAllows(Map<String, dynamic> row) {
+    if (row['approved'] == true) {
+      return true;
+    }
+
+    final status = (row['payment_status']?.toString() ?? '')
+        .trim()
+        .toLowerCase();
+    return status == 'paid' || status == 'waived';
   }
 
   String _sessionNotificationTitle(Map<String, dynamic> session) {
@@ -394,7 +433,15 @@ class NotificationService {
         ...(prefs.getStringList(_shownInteractiveNotificationsKey(activeUserId)) ??
             const <String>[]),
     };
+    final shownApprovedEvents = <String>{
+      if (activeUserId.isNotEmpty)
+        ...(prefs.getStringList(
+              _shownApprovedRegistrationEventsKey(activeUserId),
+            ) ??
+            const <String>[]),
+    };
     var didChange = false;
+    var didChangeApprovedEvents = false;
 
     for (final notification in nextNotifications) {
       final isEvalOpen = notification.id.startsWith('eval_open_');
@@ -402,6 +449,9 @@ class NotificationService {
       final isScannerAssigned = notification.id.startsWith('scan_assign_');
       final isPublishedEvent = notification.id.startsWith('pub_');
       final isRegistrationUpdate = notification.id.startsWith('reg_closed_');
+      final isRegistrationApproved = notification.id.startsWith(
+        'reg_approved_',
+      );
       final isTeacherAssigned = notification.id.startsWith('assign_');
       final isProposalApproved = notification.id.startsWith('approved_');
       final isProposalRejected = notification.id.startsWith('reject_');
@@ -410,6 +460,7 @@ class NotificationService {
           !isScannerAssigned &&
           !isPublishedEvent &&
           !isRegistrationUpdate &&
+          !isRegistrationApproved &&
           !isTeacherAssigned &&
           !isProposalApproved &&
           !isProposalRejected) {
@@ -428,7 +479,17 @@ class NotificationService {
           notification.isRead ||
           previousIds.contains(notification.id) ||
           shownIds.contains(notification.id);
+      final approvedEventAlreadyShown =
+          isRegistrationApproved &&
+          notification.eventId != null &&
+          notification.eventId!.trim().isNotEmpty &&
+          shownApprovedEvents.contains(notification.eventId!.trim());
       if (shouldSkip) {
+        continue;
+      }
+      if (approvedEventAlreadyShown) {
+        shownIds.add(notification.id);
+        didChange = true;
         continue;
       }
 
@@ -446,6 +507,12 @@ class NotificationService {
       }
       shownIds.add(notification.id);
       didChange = true;
+      if (isRegistrationApproved &&
+          notification.eventId != null &&
+          notification.eventId!.trim().isNotEmpty) {
+        shownApprovedEvents.add(notification.eventId!.trim());
+        didChangeApprovedEvents = true;
+      }
     }
 
     if (didChange) {
@@ -461,6 +528,13 @@ class NotificationService {
           shownList,
         );
       }
+    }
+
+    if (didChangeApprovedEvents && activeUserId.isNotEmpty) {
+      await prefs.setStringList(
+        _shownApprovedRegistrationEventsKey(activeUserId),
+        shownApprovedEvents.toList(),
+      );
     }
   }
 
@@ -514,6 +588,8 @@ class NotificationService {
               : (_activeUserId ?? '');
       final registeredEventIds = <String>{};
       final teacherAssignedEventIds = <String, DateTime?>{};
+      final approvedRegistrationRows = <Map<String, dynamic>>[];
+      final approvedSignalRows = <Map<String, dynamic>>[];
       String? studentYearLevel;
       String? studentCourseCode;
 
@@ -536,6 +612,52 @@ class NotificationService {
           }
         } catch (_) {
           // Keep notifications working even if registration lookup fails.
+        }
+
+        try {
+          final rows = await _supabase
+              .from('event_registration_access')
+              .select('event_id,approved,payment_status,payment_note,updated_at')
+              .eq('student_id', currentUserId)
+              .order('updated_at', ascending: false)
+              .limit(60);
+
+          for (final raw in List<Map<String, dynamic>>.from(rows)) {
+            final row = _asStringMap(raw);
+            if (_registrationAccessRowAllows(row)) {
+              approvedRegistrationRows.add(row);
+            }
+          }
+        } catch (_) {
+          // Keep notifications working even if approval lookup fails.
+        }
+
+        try {
+          final signalRows = await _supabase
+              .from('user_notification_reads')
+              .select('notification_id,read_at')
+              .eq('user_id', currentUserId)
+              .like('notification_id', 'reg_access_approved_%')
+              .limit(60);
+
+          for (final raw in List<Map<String, dynamic>>.from(signalRows)) {
+            final row = _asStringMap(raw);
+            final signalEventId = _extractApprovedRegistrationEventId(
+              row['notification_id']?.toString(),
+            );
+            if (signalEventId == null || signalEventId.isEmpty) {
+              continue;
+            }
+
+            approvedSignalRows.add({
+              'event_id': signalEventId,
+              'payment_status': 'paid',
+              'payment_note': '',
+              'updated_at': row['read_at'] ?? DateTime.now().toIso8601String(),
+            });
+          }
+        } catch (_) {
+          // Keep notifications working even if signal lookup fails.
         }
       }
 
@@ -567,6 +689,19 @@ class NotificationService {
             .order('start_at', ascending: true);
       } catch (e) {
         debugPrint('Notifications: failed to load events: $e');
+      }
+
+      final eventsById = <String, Map<String, dynamic>>{};
+      for (final rawEvent in events) {
+        try {
+          final event = Map<String, dynamic>.from(rawEvent as Map);
+          final eventId = event['id']?.toString().trim() ?? '';
+          if (eventId.isNotEmpty) {
+            eventsById[eventId] = event;
+          }
+        } catch (_) {
+          // Ignore malformed event rows in map construction.
+        }
       }
 
       for (final rawEvent in events) {
@@ -814,6 +949,89 @@ class NotificationService {
       }
 
       if (role == 'student' && currentUserId.isNotEmpty) {
+        final seenApprovedNotificationEvents = <String>{};
+        for (final row in approvedRegistrationRows) {
+          final eventId = row['event_id']?.toString().trim() ?? '';
+          if (eventId.isEmpty || registeredEventIds.contains(eventId)) {
+            continue;
+          }
+
+          final updatedAt = _tryParseLocalDate(row['updated_at']) ?? now;
+          if (now.difference(updatedAt).inDays > 7) {
+            continue;
+          }
+
+          final event = eventsById[eventId];
+          if (event == null) {
+            continue;
+          }
+
+          final status = event['status']?.toString().trim().toLowerCase() ?? '';
+          if (status != 'published') {
+            continue;
+          }
+
+          final title = event['title']?.toString().trim().isNotEmpty == true
+              ? event['title'].toString().trim()
+              : 'Event';
+          final paymentNote = row['payment_note']?.toString().trim() ?? '';
+          final noteSuffix = paymentNote.isNotEmpty
+              ? ' Note: $paymentNote'
+              : '';
+
+          notifications.add(
+            AppNotification(
+              id: 'reg_approved_${eventId}_${updatedAt.millisecondsSinceEpoch}',
+              title: 'Registration Approved',
+              message:
+                  'You are now approved to register for "$title".$noteSuffix',
+              timestamp: updatedAt,
+              type: NotificationType.success,
+              eventId: eventId,
+            ),
+          );
+          seenApprovedNotificationEvents.add(eventId);
+        }
+
+        for (final row in approvedSignalRows) {
+          final eventId = row['event_id']?.toString().trim() ?? '';
+          if (eventId.isEmpty ||
+              registeredEventIds.contains(eventId) ||
+              seenApprovedNotificationEvents.contains(eventId)) {
+            continue;
+          }
+
+          final updatedAt = _tryParseLocalDate(row['updated_at']) ?? now;
+          if (now.difference(updatedAt).inDays > 7) {
+            continue;
+          }
+
+          final event = eventsById[eventId];
+          if (event == null) {
+            continue;
+          }
+
+          final status = event['status']?.toString().trim().toLowerCase() ?? '';
+          if (status != 'published') {
+            continue;
+          }
+
+          final title = event['title']?.toString().trim().isNotEmpty == true
+              ? event['title'].toString().trim()
+              : 'Event';
+
+          notifications.add(
+            AppNotification(
+              id: 'reg_approved_signal_${eventId}_${updatedAt.millisecondsSinceEpoch}',
+              title: 'Registration Approved',
+              message: 'You are now approved to register for "$title".',
+              timestamp: updatedAt,
+              type: NotificationType.success,
+              eventId: eventId,
+            ),
+          );
+        }
+
         try {
           dynamic rows;
           try {
@@ -1010,6 +1228,8 @@ class NotificationService {
         // Priority for specific IDs if timestamps are within the same minute
         bool aIsManual = a.id.startsWith('pub_') || a.id.startsWith('reg_closed_') || a.id.startsWith('reject_') || a.id.startsWith('approved_');
         bool bIsManual = b.id.startsWith('pub_') || b.id.startsWith('reg_closed_') || b.id.startsWith('reject_') || b.id.startsWith('approved_');
+        aIsManual = aIsManual || a.id.startsWith('reg_approved_');
+        bIsManual = bIsManual || b.id.startsWith('reg_approved_');
         if (aIsManual && !bIsManual) return -1;
         if (!aIsManual && bIsManual) return 1;
         

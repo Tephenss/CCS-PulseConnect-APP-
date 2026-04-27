@@ -11,10 +11,57 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'auth_service.dart';
 import 'event_service.dart';
 
+Future<void> _cacheApprovedRegistrationFromPayload(
+  Map<String, dynamic> data,
+) async {
+  final type = (data['type']?.toString() ?? '').trim().toLowerCase();
+  if (type != 'reg_approved') {
+    return;
+  }
+
+  final eventId = (data['event_id']?.toString() ?? '').trim();
+  if (eventId.isEmpty) {
+    return;
+  }
+
+  final prefs = await SharedPreferences.getInstance();
+  final userId = (prefs.getString('user_id') ?? '').trim();
+  if (userId.isEmpty) {
+    return;
+  }
+
+  final key = 'approved_registration_events_$userId';
+  final values = <String>{
+    ...(prefs.getStringList(key) ?? const <String>[]),
+    eventId,
+  };
+  await prefs.setStringList(key, values.toList());
+}
+
+Future<void> _markApprovedRegistrationNotificationShown(
+  String userId,
+  String eventId,
+) async {
+  final trimmedUserId = userId.trim();
+  final trimmedEventId = eventId.trim();
+  if (trimmedUserId.isEmpty || trimmedEventId.isEmpty) {
+    return;
+  }
+
+  final prefs = await SharedPreferences.getInstance();
+  final key = 'shown_reg_approved_events_$trimmedUserId';
+  final values = <String>{
+    ...(prefs.getStringList(key) ?? const <String>[]),
+    trimmedEventId,
+  };
+  await prefs.setStringList(key, values.toList());
+}
+
 // Background message handler — must be top-level function
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
+  await _cacheApprovedRegistrationFromPayload(message.data);
 }
 
 class PushNotificationService {
@@ -27,6 +74,12 @@ class PushNotificationService {
 
   AuthService get _authService => AuthService();
   EventService get _eventService => EventService();
+
+  Future<void> _cacheRegistrationApprovalIfNeeded(
+    Map<String, dynamic> data,
+  ) async {
+    await _cacheApprovedRegistrationFromPayload(data);
+  }
 
   bool _isCertificatePayload(String payload) {
     return payload.trim().toLowerCase() == 'route:certificates';
@@ -112,10 +165,12 @@ class PushNotificationService {
           ?.createNotificationChannel(channel);
 
       // 4. Foreground message listener — show local notification popup
-      FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      FirebaseMessaging.onMessage.listen((RemoteMessage message) async {
+        await _cacheRegistrationApprovalIfNeeded(message.data);
         RemoteNotification? notification = message.notification;
         final route = (message.data['route']?.toString() ?? '').trim().toLowerCase();
         final eventId = (message.data['event_id']?.toString() ?? '').trim();
+        final type = (message.data['type']?.toString() ?? '').trim().toLowerCase();
         final payload = route == 'certificates'
             ? 'route:certificates'
             : (eventId.isNotEmpty ? eventId : null);
@@ -125,6 +180,14 @@ class PushNotificationService {
         final fallbackBody = route == 'certificates'
             ? 'Your certificate is now available. Open Certificates to view it.'
             : 'You have a new notification.';
+
+        if (type == 'reg_approved' && eventId.isNotEmpty) {
+          final prefs = await SharedPreferences.getInstance();
+          final userId = (prefs.getString('user_id') ?? '').trim();
+          if (userId.isNotEmpty) {
+            await _markApprovedRegistrationNotificationShown(userId, eventId);
+          }
+        }
 
         _localNotificationsPlugin.show(
           notification?.hashCode ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
@@ -288,6 +351,7 @@ class PushNotificationService {
   /// Navigate to a specific event if the notification contains an event_id.
   /// Teachers are routed to TeacherEventManage, students to StudentEventDetails.
   Future<void> _handleNotificationClick(RemoteMessage message) async {
+    await _cacheRegistrationApprovalIfNeeded(message.data);
     final route = (message.data['route']?.toString() ?? '').trim().toLowerCase();
     if (route == 'certificates') {
       _openCertificatesScreen();
@@ -325,3 +389,4 @@ class PushNotificationService {
     }
   }
 }
+
