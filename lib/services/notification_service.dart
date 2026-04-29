@@ -1165,7 +1165,7 @@ class NotificationService {
                   id: 'scan_assign_${eventId}_$revisionHash',
                   title: 'Scanner Assignment',
                   message:
-                      'You were assigned by the admin/teacher to help take attendance for "$eventTitle". Open the QR Scanner when instructed.',
+                      'You were assigned by your teacher to help take attendance for "$eventTitle". Open the QR Scanner when instructed.',
                   timestamp: assignedAt,
                   type: NotificationType.info,
                   eventId: eventId,

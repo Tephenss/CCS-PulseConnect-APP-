@@ -2011,11 +2011,14 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                                   ? null
                                   : _rejectPendingReview,
                               icon: const Icon(Icons.close_rounded, size: 18),
-                              label: const Text(
-                                'REJECT',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                  letterSpacing: 0.9,
+                              label: const FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(
+                                  'REJECT',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 0.7,
+                                  ),
                                 ),
                               ),
                               style: OutlinedButton.styleFrom(
@@ -2047,11 +2050,14 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                                       ),
                                     )
                                   : const Icon(Icons.check_rounded, size: 18),
-                              label: Text(
-                                _isSubmittingReview ? 'CONFIRMING' : 'CONFIRM',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: 1.0,
+                              label: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                child: Text(
+                                  _isSubmittingReview ? 'CONFIRMING' : 'CONFIRM',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w900,
+                                    letterSpacing: 0.7,
+                                  ),
                                 ),
                               ),
                               style: ElevatedButton.styleFrom(

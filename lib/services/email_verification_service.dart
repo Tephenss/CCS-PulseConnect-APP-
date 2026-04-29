@@ -285,6 +285,8 @@ Please wait for another email once your application is approved or rejected.
         .update({
           'email_verified': true,
           'email_verified_at': now.toIso8601String(),
+          // Only let the application enter admin review after email verification.
+          'account_status': 'pending',
         })
         .eq('id', userId)
         .select()

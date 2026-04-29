@@ -401,7 +401,7 @@ class AuthService {
         'email': normalizedEmail,
         'password': passwordHash,
         'email_verified': false,
-        'account_status': 'pending',
+        'account_status': 'preverify',
         'registration_source': 'app',
         'section_id': null, // Section is selected purely post-login
         'role': 'student',

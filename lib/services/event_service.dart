@@ -4118,14 +4118,28 @@ class EventService {
     String teacherId,
   ) async {
     try {
-      final response = await _supabase
+      final manageRows = await _supabase
           .from('event_teacher_assignments')
           .select('id')
           .eq('event_id', eventId)
           .eq('teacher_id', teacherId)
           .eq('can_manage_assistants', true)
           .limit(1);
-      return response.isNotEmpty;
+      if (manageRows.isNotEmpty) {
+        return true;
+      }
+
+      // Backward compatibility:
+      // Older assignment rows may have can_scan=true while can_manage_assistants
+      // remained false. Treat scanner-assigned teachers as assistant managers.
+      final scanRows = await _supabase
+          .from('event_teacher_assignments')
+          .select('id')
+          .eq('event_id', eventId)
+          .eq('teacher_id', teacherId)
+          .eq('can_scan', true)
+          .limit(1);
+      return scanRows.isNotEmpty;
     } catch (_) {
       return false;
     }
