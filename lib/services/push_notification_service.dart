@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../screens/student/student_certificates.dart';
 import '../screens/student/student_event_details.dart';
 import '../screens/teacher/teacher_event_manage.dart';
+import '../screens/teacher/teacher_proposal_requirements_page.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -57,6 +59,36 @@ Future<void> _markApprovedRegistrationNotificationShown(
   await prefs.setStringList(key, values.toList());
 }
 
+Future<void> _markProposalRequirementsNotificationShown(
+  String? userId,
+  String eventId,
+) async {
+  final trimmedEventId = eventId.trim();
+  if (trimmedEventId.isEmpty) {
+    return;
+  }
+
+  final prefs = await SharedPreferences.getInstance();
+  const genericKey = 'shown_local_interactive_notifications';
+  final genericValues = <String>{
+    ...(prefs.getStringList(genericKey) ?? const <String>[]),
+    'proposal_req_$trimmedEventId',
+  };
+  await prefs.setStringList(genericKey, genericValues.toList());
+
+  final trimmedUserId = (userId ?? '').trim();
+  if (trimmedUserId.isEmpty) {
+    return;
+  }
+
+  final userKey = 'shown_local_interactive_notifications_$trimmedUserId';
+  final userValues = <String>{
+    ...(prefs.getStringList(userKey) ?? const <String>[]),
+    'proposal_req_$trimmedEventId',
+  };
+  await prefs.setStringList(userKey, userValues.toList());
+}
+
 // Background message handler — must be top-level function
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
@@ -83,6 +115,21 @@ class PushNotificationService {
 
   bool _isCertificatePayload(String payload) {
     return payload.trim().toLowerCase() == 'route:certificates';
+  }
+
+  bool _isProposalRequirementsPayload(String payload) {
+    return payload.trim().toLowerCase().startsWith(
+      'proposal_requirements_requested:',
+    );
+  }
+
+  String _proposalRequirementsEventId(String payload) {
+    final trimmed = payload.trim();
+    const prefix = 'proposal_requirements_requested:';
+    if (!trimmed.toLowerCase().startsWith(prefix)) {
+      return '';
+    }
+    return trimmed.substring(prefix.length).trim();
   }
 
   void _openCertificatesScreen() {
@@ -137,15 +184,53 @@ class PushNotificationService {
         onDidReceiveNotificationResponse: (NotificationResponse response) {
           final payload = response.payload?.trim() ?? '';
           if (payload.isEmpty) return;
-          if (_isCertificatePayload(payload)) {
-            _openCertificatesScreen();
-            return;
-          }
-          PulseConnectApp.navigatorKey.currentState?.push(
-            MaterialPageRoute(
-              builder: (context) => StudentEventDetails(eventId: payload),
-            ),
-          );
+          unawaited(() async {
+            if (_isCertificatePayload(payload)) {
+              _openCertificatesScreen();
+              return;
+            }
+            if (_isProposalRequirementsPayload(payload)) {
+              final eventId = _proposalRequirementsEventId(payload);
+              if (eventId.isNotEmpty) {
+                final event = await _eventService.getEventById(eventId);
+                if (event != null) {
+                  PulseConnectApp.navigatorKey.currentState?.push(
+                    MaterialPageRoute(
+                      builder: (context) =>
+                          TeacherProposalRequirementsPage(event: event),
+                    ),
+                  );
+                  return;
+                }
+              }
+            }
+
+            // Local notifications (especially assignment-related) only carry
+            // the eventId as payload. Decide the destination based on the
+            // current user's role to avoid opening student-only pages.
+            final user = await _authService.getCurrentUser();
+            final role =
+                (user?['role']?.toString() ?? '').trim().toLowerCase();
+
+            if (role == 'teacher') {
+              final event = await _eventService.getEventById(payload);
+              if (event != null) {
+                PulseConnectApp.navigatorKey.currentState?.push(
+                  MaterialPageRoute(
+                    builder: (context) => TeacherEventManage(event: event),
+                  ),
+                );
+                return;
+              }
+            }
+
+            // Default fallback for students (or if teacher event fetch fails)
+            PulseConnectApp.navigatorKey.currentState?.push(
+              MaterialPageRoute(
+                builder: (context) => StudentEventDetails(eventId: payload),
+              ),
+            );
+          }());
         },
       );
 
@@ -173,7 +258,11 @@ class PushNotificationService {
         final type = (message.data['type']?.toString() ?? '').trim().toLowerCase();
         final payload = route == 'certificates'
             ? 'route:certificates'
-            : (eventId.isNotEmpty ? eventId : null);
+            : (eventId.isNotEmpty
+                  ? (type == 'proposal_requirements_requested'
+                        ? 'proposal_requirements_requested:$eventId'
+                        : eventId)
+                  : null);
 
         final fallbackTitle =
             route == 'certificates' ? 'Certificate Ready' : 'PulseConnect';
@@ -187,6 +276,11 @@ class PushNotificationService {
           if (userId.isNotEmpty) {
             await _markApprovedRegistrationNotificationShown(userId, eventId);
           }
+        }
+        if (type == 'proposal_requirements_requested' && eventId.isNotEmpty) {
+          final prefs = await SharedPreferences.getInstance();
+          final userId = (prefs.getString('user_id') ?? '').trim();
+          await _markProposalRequirementsNotificationShown(userId, eventId);
         }
 
         _localNotificationsPlugin.show(
@@ -229,6 +323,7 @@ class PushNotificationService {
     required String title,
     required String body,
     String? eventId,
+    String? payload,
   }) async {
     const AndroidNotificationChannel channel = AndroidNotificationChannel(
       'pulseconnect_events',
@@ -265,7 +360,7 @@ class PushNotificationService {
           presentSound: true,
         ),
       ),
-      payload: eventId,
+      payload: (payload?.trim().isNotEmpty ?? false) ? payload!.trim() : eventId,
     );
   }
 
@@ -358,6 +453,8 @@ class PushNotificationService {
       return;
     }
 
+    final type = (message.data['type']?.toString() ?? '').trim().toLowerCase();
+
     String? eventId = message.data['event_id'];
     if (eventId != null && eventId.isNotEmpty) {
       debugPrint('[FCM] Tapped notification for event_id: $eventId');
@@ -369,6 +466,15 @@ class PushNotificationService {
         if (role == 'teacher') {
           final event = await _eventService.getEventById(eventId);
           if (event != null) {
+            if (type == 'proposal_requirements_requested') {
+              PulseConnectApp.navigatorKey.currentState?.push(
+                MaterialPageRoute(
+                  builder: (context) =>
+                      TeacherProposalRequirementsPage(event: event),
+                ),
+              );
+              return;
+            }
             PulseConnectApp.navigatorKey.currentState?.push(
               MaterialPageRoute(
                 builder: (context) => TeacherEventManage(event: event),

@@ -90,15 +90,17 @@ class _StudentEventsState extends State<StudentEvents>
       // let's just use the AuthService helper because it's safer and up-to-date.
       final authService = AuthService();
       final user = await authService.getCurrentUser();
-      final userId =
-          user?['id']?.toString().trim().isNotEmpty == true
-              ? user!['id'].toString().trim()
-              : (prefs.getString('user_id') ?? '');
+      final userId = user?['id']?.toString().trim().isNotEmpty == true
+          ? user!['id'].toString().trim()
+          : (prefs.getString('user_id') ?? '');
       final yearLevel = await authService.getStudentYearLevel();
       final courseCode = await authService.getStudentCourseCode();
 
       final results = await Future.wait([
-        _eventService.getActiveEvents(yearLevel: yearLevel, courseCode: courseCode),
+        _eventService.getActiveEvents(
+          yearLevel: yearLevel,
+          courseCode: courseCode,
+        ),
         userId.isNotEmpty
             ? _eventService.getExpiredEventsOpenForEvaluation(
                 studentId: userId,
@@ -118,8 +120,8 @@ class _StudentEventsState extends State<StudentEvents>
           final bundle = rawBundle is Map<String, dynamic>
               ? rawBundle
               : (rawBundle is Map
-                  ? Map<String, dynamic>.from(rawBundle)
-                  : <String, dynamic>{});
+                    ? Map<String, dynamic>.from(rawBundle)
+                    : <String, dynamic>{});
           evaluatedMap[eventId] = bundle['is_complete'] == true;
         }
       }
@@ -158,10 +160,8 @@ class _StudentEventsState extends State<StudentEvents>
       await Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) => StudentResponseView(
-            eventId: eventId,
-            studentId: _userId,
-          ),
+          builder: (_) =>
+              StudentResponseView(eventId: eventId, studentId: _userId),
         ),
       );
       return;
@@ -170,10 +170,8 @@ class _StudentEventsState extends State<StudentEvents>
     final success = await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => StudentEventEvaluationScreen(
-          eventId: eventId,
-          studentId: _userId,
-        ),
+        builder: (_) =>
+            StudentEventEvaluationScreen(eventId: eventId, studentId: _userId),
       ),
     );
 
@@ -219,7 +217,8 @@ class _StudentEventsState extends State<StudentEvents>
                   // Handle bar
                   Center(
                     child: Container(
-                      width: 40, height: 4,
+                      width: 40,
+                      height: 4,
                       margin: const EdgeInsets.only(bottom: 20),
                       decoration: BoxDecoration(
                         color: Colors.grey.shade300,
@@ -229,32 +228,58 @@ class _StudentEventsState extends State<StudentEvents>
                   ),
                   const Text(
                     'Filter Events',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: Color(0xFF1F2937)),
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF1F2937),
+                    ),
                   ),
                   const SizedBox(height: 20),
 
                   // Event Type Section
-                  const Text('Event Type', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFF6B7280))),
+                  const Text(
+                    'Event Type',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF6B7280),
+                    ),
+                  ),
                   const SizedBox(height: 10),
                   Wrap(
                     spacing: 8,
                     runSpacing: 8,
-                    children: ['All', 'Seminar', 'Off-Campus Activity', 'Sports Event', 'Other'].map((type) {
-                      final selected = tempType == type;
-                      return ChoiceChip(
-                        label: Text(type, style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: selected ? Colors.white : const Color(0xFF374151),
-                        )),
-                        selected: selected,
-                        selectedColor: primaryDark,
-                        backgroundColor: Colors.grey.shade100,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                        side: BorderSide.none,
-                        onSelected: (_) => setSheetState(() => tempType = type),
-                      );
-                    }                  ).toList(),
+                    children:
+                        [
+                          'All',
+                          'Seminar',
+                          'Off-Campus Activity',
+                          'Sports Event',
+                          'Other',
+                        ].map((type) {
+                          final selected = tempType == type;
+                          return ChoiceChip(
+                            label: Text(
+                              type,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: selected
+                                    ? Colors.white
+                                    : const Color(0xFF374151),
+                              ),
+                            ),
+                            selected: selected,
+                            selectedColor: primaryDark,
+                            backgroundColor: Colors.grey.shade100,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            side: BorderSide.none,
+                            onSelected: (_) =>
+                                setSheetState(() => tempType = type),
+                          );
+                        }).toList(),
                   ),
                   const SizedBox(height: 28),
 
@@ -272,9 +297,14 @@ class _StudentEventsState extends State<StudentEvents>
                             foregroundColor: primaryDark,
                             side: BorderSide(color: primaryDark),
                             padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
                           ),
-                          child: const Text('Reset', style: TextStyle(fontWeight: FontWeight.w700)),
+                          child: const Text(
+                            'Reset',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -292,9 +322,14 @@ class _StudentEventsState extends State<StudentEvents>
                             backgroundColor: primaryDark,
                             foregroundColor: Colors.white,
                             padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                            ),
                           ),
-                          child: const Text('Apply Filters', style: TextStyle(fontWeight: FontWeight.w700)),
+                          child: const Text(
+                            'Apply Filters',
+                            style: TextStyle(fontWeight: FontWeight.w700),
+                          ),
                         ),
                       ),
                     ],
@@ -340,7 +375,10 @@ class _StudentEventsState extends State<StudentEvents>
             child: Stack(
               children: [
                 IconButton(
-                  icon: const Icon(Icons.tune_rounded, color: Color(0xFF4B5563)),
+                  icon: const Icon(
+                    Icons.tune_rounded,
+                    color: Color(0xFF4B5563),
+                  ),
                   onPressed: _showFilterSheet,
                   tooltip: 'Filter Events',
                 ),
@@ -387,8 +425,14 @@ class _StudentEventsState extends State<StudentEvents>
               ),
               labelColor: Colors.white,
               unselectedLabelColor: const Color(0xFF6B7280),
-              labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
-              unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+              labelStyle: const TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
+              ),
+              unselectedLabelStyle: const TextStyle(
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
               tabs: const [
                 Tab(text: 'Active'),
                 Tab(text: 'Evaluation'),
@@ -429,11 +473,19 @@ class _StudentEventsState extends State<StudentEvents>
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.event_busy_rounded, size: 64, color: Colors.grey.shade300),
+            Icon(
+              Icons.event_busy_rounded,
+              size: 64,
+              color: Colors.grey.shade300,
+            ),
             const SizedBox(height: 16),
             Text(
               emptyMessage,
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.grey.shade500),
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: Colors.grey.shade500,
+              ),
             ),
             if (_hasActiveFilter) ...[
               const SizedBox(height: 8),
@@ -446,7 +498,10 @@ class _StudentEventsState extends State<StudentEvents>
                 },
                 child: Text(
                   'Clear filters',
-                  style: TextStyle(color: primaryDark, fontWeight: FontWeight.w600),
+                  style: TextStyle(
+                    color: primaryDark,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
             ],
@@ -492,7 +547,9 @@ class _StudentEventsState extends State<StudentEvents>
     final endDate = parseStoredEventDateTime(endAt);
 
     // Event becomes expired only when it has already ended.
-    if (status != 'archived' && endDate != null && endDate.isBefore(DateTime.now())) {
+    if (status != 'archived' &&
+        endDate != null &&
+        endDate.isBefore(DateTime.now())) {
       status = 'expired';
     }
 
@@ -504,11 +561,14 @@ class _StudentEventsState extends State<StudentEvents>
       statusBg = const Color(0xFFEF4444);
     } else if (displayStatus == 'APPROVED') {
       statusBg = const Color(0xFF3B82F6);
-    } else if (displayStatus == 'ARCHIVED' || displayStatus == 'EXPIRED' || displayStatus == 'FINISHED') {
+    } else if (displayStatus == 'ARCHIVED' ||
+        displayStatus == 'EXPIRED' ||
+        displayStatus == 'FINISHED') {
       statusBg = const Color(0xFF6B7280);
     }
 
-    final hasEvaluated = eventId.isNotEmpty && (_expiredEvaluated[eventId] ?? false);
+    final hasEvaluated =
+        eventId.isNotEmpty && (_expiredEvaluated[eventId] ?? false);
 
     return GestureDetector(
       onTap: () async {
@@ -552,7 +612,8 @@ class _StudentEventsState extends State<StudentEvents>
                   child: Image.asset(
                     'assets/CCS.png',
                     width: 160,
-                    errorBuilder: (context, error, stackTrace) => const SizedBox(),
+                    errorBuilder: (context, error, stackTrace) =>
+                        const SizedBox(),
                   ),
                 ),
               ),
@@ -569,7 +630,9 @@ class _StudentEventsState extends State<StudentEvents>
                           end: Alignment.bottomCenter,
                           colors: [
                             primaryDark,
-                            CourseThemeUtils.studentDarkFromPrimary(primaryColor),
+                            CourseThemeUtils.studentDarkFromPrimary(
+                              primaryColor,
+                            ),
                           ],
                         ),
                       ),
@@ -577,7 +640,9 @@ class _StudentEventsState extends State<StudentEvents>
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Text(
-                            startDate != null ? DateFormat('dd').format(startDate) : '--',
+                            startDate != null
+                                ? DateFormat('dd').format(startDate)
+                                : '--',
                             style: const TextStyle(
                               color: Colors.white,
                               fontWeight: FontWeight.w900,
@@ -587,7 +652,11 @@ class _StudentEventsState extends State<StudentEvents>
                             ),
                           ),
                           Text(
-                            startDate != null ? DateFormat('MMM').format(startDate).toUpperCase() : '---',
+                            startDate != null
+                                ? DateFormat(
+                                    'MMM',
+                                  ).format(startDate).toUpperCase()
+                                : '---',
                             style: TextStyle(
                               color: Colors.white.withValues(alpha: 0.9),
                               fontWeight: FontWeight.w700,
@@ -617,7 +686,10 @@ class _StudentEventsState extends State<StudentEvents>
                           children: [
                             Container(
                               margin: const EdgeInsets.only(bottom: 10),
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 4,
+                              ),
                               decoration: BoxDecoration(
                                 color: statusBg.withValues(alpha: 0.1),
                                 borderRadius: BorderRadius.circular(8),
@@ -652,12 +724,24 @@ class _StudentEventsState extends State<StudentEvents>
                                     color: const Color(0xFFF3F4F6),
                                     borderRadius: BorderRadius.circular(6),
                                   ),
-                                  child: const Icon(Icons.people_rounded, size: 12, color: Color(0xFF4B5563)),
+                                  child: const Icon(
+                                    Icons.people_rounded,
+                                    size: 12,
+                                    color: Color(0xFF4B5563),
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
-                                Text(
-                                  'For: ${eventFor.isEmpty ? 'All' : eventFor}',
-                                  style: const TextStyle(color: Color(0xFF374151), fontSize: 12, fontWeight: FontWeight.w700),
+                                Expanded(
+                                  child: Text(
+                                    'For: ${eventFor.isEmpty ? 'All' : eventFor}',
+                                    style: const TextStyle(
+                                      color: Color(0xFF374151),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
                                 ),
                               ],
                             ),
@@ -670,12 +754,20 @@ class _StudentEventsState extends State<StudentEvents>
                                     color: const Color(0xFFF3F4F6),
                                     borderRadius: BorderRadius.circular(6),
                                   ),
-                                  child: const Icon(Icons.schedule_rounded, size: 12, color: Color(0xFF4B5563)),
+                                  child: const Icon(
+                                    Icons.schedule_rounded,
+                                    size: 12,
+                                    color: Color(0xFF4B5563),
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Text(
-                                    startDate != null ? DateFormat('MMM dd, yyyy  -  h:mm a').format(startDate) : 'TBA',
+                                    startDate != null
+                                        ? DateFormat(
+                                            'MMM dd, yyyy  -  h:mm a',
+                                          ).format(startDate)
+                                        : 'TBA',
                                     style: const TextStyle(
                                       color: Color(0xFF6B7280),
                                       fontSize: 11,
@@ -694,7 +786,10 @@ class _StudentEventsState extends State<StudentEvents>
                                 onTap: () => _openExpiredEvaluation(event),
                                 child: Container(
                                   width: double.infinity,
-                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 8,
+                                  ),
                                   decoration: BoxDecoration(
                                     color: hasEvaluated
                                         ? const Color(0xFFECFDF5)
@@ -702,8 +797,12 @@ class _StudentEventsState extends State<StudentEvents>
                                     borderRadius: BorderRadius.circular(10),
                                     border: Border.all(
                                       color: hasEvaluated
-                                          ? const Color(0xFF16A34A).withValues(alpha: 0.25)
-                                          : const Color(0xFFD4A843).withValues(alpha: 0.35),
+                                          ? const Color(
+                                              0xFF16A34A,
+                                            ).withValues(alpha: 0.25)
+                                          : const Color(
+                                              0xFFD4A843,
+                                            ).withValues(alpha: 0.35),
                                     ),
                                   ),
                                   child: Row(
@@ -761,6 +860,30 @@ class _StudentEventsState extends State<StudentEvents>
   String _getTargetLabel(String? val) {
     if (val == null || val.toLowerCase() == 'all') return 'All Year Levels';
     if (val.toLowerCase() == 'none') return 'No Target';
+    final rawUpper = val.trim().toUpperCase();
+    final multi = RegExp(
+      r'^COURSE\s*=\s*(ALL|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
+    ).firstMatch(rawUpper);
+    if (multi != null) {
+      final course = multi.group(1) == 'ALL'
+          ? 'All Courses'
+          : (multi.group(1) ?? 'All Courses');
+      final yearsRaw = (multi.group(2) ?? '')
+          .split(',')
+          .map((e) => e.trim().toUpperCase())
+          .where((e) => ['1', '2', '3', '4'].contains(e))
+          .toList();
+      const yearLabel = {
+        '1': '1st Year',
+        '2': '2nd Year',
+        '3': '3rd Year',
+        '4': '4th Year',
+      };
+      final years = yearsRaw.isEmpty
+          ? 'All Levels'
+          : yearsRaw.map((y) => yearLabel[y] ?? y).join(', ');
+      return '$course - $years';
+    }
     final map = {
       '1': '1st Year',
       '2': '2nd Year',
@@ -769,6 +892,4 @@ class _StudentEventsState extends State<StudentEvents>
     };
     return map[val] ?? val;
   }
-
 }
-

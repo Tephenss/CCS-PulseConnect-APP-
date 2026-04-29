@@ -6,6 +6,7 @@ import '../services/notification_service.dart';
 import '../screens/student/student_certificates.dart';
 import '../screens/student/student_event_details.dart';
 import '../screens/teacher/teacher_event_manage.dart';
+import '../screens/teacher/teacher_proposal_requirements_page.dart';
 import 'custom_loader.dart';
 import '../utils/teacher_theme_utils.dart';
 
@@ -384,6 +385,17 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
         Navigator.pop(context);
         await Future<void>.delayed(const Duration(milliseconds: 120));
         if (!mounted) return;
+        final opensProposalRequirements =
+            n.id.startsWith('proposal_req_') ||
+            n.id.startsWith('proposal_under_review_');
+        if (opensProposalRequirements) {
+          Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => TeacherProposalRequirementsPage(event: event!),
+            ),
+          );
+          return;
+        }
         Navigator.of(context).push(
           MaterialPageRoute(builder: (_) => TeacherEventManage(event: event!)),
         );

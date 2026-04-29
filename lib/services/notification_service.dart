@@ -462,6 +462,12 @@ class NotificationService {
         'reg_approved_',
       );
       final isTeacherAssigned = notification.id.startsWith('assign_');
+      final isProposalRequirementsRequested = notification.id.startsWith(
+        'proposal_req_',
+      );
+      final isProposalUnderReview = notification.id.startsWith(
+        'proposal_under_review_',
+      );
       final isProposalApproved = notification.id.startsWith('approved_');
       final isProposalRejected = notification.id.startsWith('reject_');
       if (!isEvalOpen &&
@@ -471,6 +477,8 @@ class NotificationService {
           !isRegistrationUpdate &&
           !isRegistrationApproved &&
           !isTeacherAssigned &&
+          !isProposalRequirementsRequested &&
+          !isProposalUnderReview &&
           !isProposalApproved &&
           !isProposalRejected) {
         continue;
@@ -482,6 +490,8 @@ class NotificationService {
           isRegistrationUpdate ||
           isRegistrationApproved ||
           isTeacherAssigned ||
+          isProposalRequirementsRequested ||
+          isProposalUnderReview ||
           isProposalApproved ||
           isProposalRejected;
 
@@ -525,10 +535,15 @@ class NotificationService {
           body: notification.message,
         );
       } else {
+        final payload =
+            isProposalRequirementsRequested && notification.eventId != null
+            ? 'proposal_requirements_requested:${notification.eventId!.trim()}'
+            : null;
         await _pushNotificationService.showLocalEventNotification(
           title: notification.title,
           body: notification.message,
           eventId: notification.eventId,
+          payload: payload,
         );
       }
       shownIds.add(notification.id);
@@ -761,6 +776,14 @@ class NotificationService {
               _tryParseLocalDate(event['updated_at']) ??
               _tryParseLocalDate(event['created_at']) ??
               startAt;
+          final proposalStage =
+              (event['proposal_stage']?.toString() ?? '').trim().toLowerCase();
+          final requirementsRequestedAt =
+              _tryParseLocalDate(event['requirements_requested_at']) ??
+              updatedAt;
+          final requirementsSubmittedAt =
+              _tryParseLocalDate(event['requirements_submitted_at']) ??
+              updatedAt;
           final allowsOpenRegistration = _eventAllowsOpenRegistration(event);
           final description = event['description'] ?? '';
 
@@ -794,6 +817,36 @@ class NotificationService {
           // Teacher: show proposal notifications only for own proposals.
           if (role == 'teacher') {
             if (isTeacherCreator &&
+                status == 'pending' &&
+                proposalStage == 'requirements_requested' &&
+                now.difference(requirementsRequestedAt).inDays <= 7) {
+              notifications.add(
+                AppNotification(
+                  id: 'proposal_req_$eventId',
+                  title: 'Proposal Documents Requested',
+                  message:
+                      'Admin listed the required documents for "$title". Open the Approval tab and upload them.',
+                  timestamp: requirementsRequestedAt,
+                  type: NotificationType.warning,
+                  eventId: eventId,
+                ),
+              );
+            } else if (isTeacherCreator &&
+                status == 'pending' &&
+                proposalStage == 'under_review' &&
+                now.difference(requirementsSubmittedAt).inDays <= 7) {
+              notifications.add(
+                AppNotification(
+                  id: 'proposal_under_review_$eventId',
+                  title: 'Proposal Under Review',
+                  message:
+                      'Your uploaded proposal documents for "$title" are now under admin review.',
+                  timestamp: requirementsSubmittedAt,
+                  type: NotificationType.info,
+                  eventId: eventId,
+                ),
+              );
+            } else if (isTeacherCreator &&
                 status == 'approved' &&
                 now.difference(updatedAt).inDays <= 7) {
               notifications.add(

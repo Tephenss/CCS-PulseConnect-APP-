@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import '../../widgets/custom_loader.dart';
 import 'teacher_create_event.dart';
 import 'teacher_event_manage.dart';
+import 'teacher_proposal_requirements_page.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/teacher_theme_utils.dart';
 
@@ -17,7 +18,8 @@ class TeacherEventsTab extends StatefulWidget {
   State<TeacherEventsTab> createState() => _TeacherEventsTabState();
 }
 
-class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerProviderStateMixin {
+class _TeacherEventsTabState extends State<TeacherEventsTab>
+    with SingleTickerProviderStateMixin {
   final _appCacheService = AppCacheService();
   final _eventService = EventService();
   final _authService = AuthService();
@@ -56,7 +58,9 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
         events = await _appCacheService.loadJsonList(cacheKey);
         usingCachedData = true;
       } else {
-        final fetched = await _eventService.getTeacherAccessibleEvents(teacherId);
+        final fetched = await _eventService.getTeacherAccessibleEvents(
+          teacherId,
+        );
         if (fetched.isEmpty) {
           final cached = await _appCacheService.loadJsonList(cacheKey);
           final lastUpdated = await _appCacheService.lastUpdatedAt(cacheKey);
@@ -78,7 +82,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
         }
       }
     }
-    
+
     if (mounted) {
       setState(() {
         _events = events;
@@ -104,20 +108,32 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
             padding: const EdgeInsets.fromLTRB(24, 20, 24, 16),
             child: Row(
               children: [
-                const Text('My Events', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800, color: Color(0xFF1F2937))),
+                const Text(
+                  'My Events',
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF1F2937),
+                  ),
+                ),
                 const Spacer(),
                 GestureDetector(
                   onTap: () async {
                     final refresh = await Navigator.push(
                       context,
-                      MaterialPageRoute(builder: (_) => const TeacherCreateEvent()),
+                      MaterialPageRoute(
+                        builder: (_) => const TeacherCreateEvent(),
+                      ),
                     );
                     if (refresh == true) {
                       _loadEvents();
                     }
                   },
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       color: TeacherThemeUtils.primary,
                       borderRadius: BorderRadius.circular(12),
@@ -126,7 +142,14 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
                       children: [
                         Icon(Icons.add, color: Colors.white, size: 18),
                         SizedBox(width: 4),
-                        Text('Create', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 13)),
+                        Text(
+                          'Create',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 13,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -160,8 +183,14 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
               ),
               labelColor: Colors.white,
               unselectedLabelColor: const Color(0xFF6B7280),
-              labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
-              unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+              labelStyle: const TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
+              ),
+              unselectedLabelStyle: const TextStyle(
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
               tabs: const [
                 Tab(text: 'Active'),
                 Tab(text: 'Approval'),
@@ -193,8 +222,9 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
     final now = DateTime.now().toUtc().add(kManilaOffset);
 
     var filteredEvents = _events.where((e) {
-      final status = (e['status'] as String? ?? 'pending').toLowerCase(); // Normalize string
-      
+      final status = (e['status'] as String? ?? 'pending')
+          .toLowerCase(); // Normalize string
+
       // Calculate if the event is truly expired based on event end time.
       final endAtStr = e['end_at'] as String?;
       final endDate = parseStoredEventDateTime(endAtStr);
@@ -203,13 +233,17 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
 
       if (statusFilter == 'expired') {
         // Shown in Expired if time naturally passed, excluding manually archived ones
-        return (status == 'expired' || status == 'finished' || isPast) && status != 'archived';
+        return (status == 'expired' || status == 'finished' || isPast) &&
+            status != 'archived';
       } else if (statusFilter == 'active') {
         // Shown in Active if published AND time has NOT passed
         return status == 'published' && !isPast;
       } else if (statusFilter == 'pending') {
         // Shown in Approval if pending, approved, or rejected AND time has NOT passed
-        return (status == 'pending' || status == 'approved' || status == 'rejected') && !isPast;
+        return (status == 'pending' ||
+                status == 'approved' ||
+                status == 'rejected') &&
+            !isPast;
       }
       return false;
     }).toList();
@@ -225,7 +259,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
       }
       return aDate.compareTo(bDate);
     });
-    
+
     return RefreshIndicator(
       onRefresh: _loadEvents,
       color: TeacherThemeUtils.primary,
@@ -262,7 +296,14 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
         children: [
           Icon(Icons.event_busy_rounded, size: 64, color: Colors.grey.shade300),
           const SizedBox(height: 16),
-          Text(message, style: TextStyle(color: Colors.grey.shade500, fontWeight: FontWeight.w600, fontSize: 15)),
+          Text(
+            message,
+            style: TextStyle(
+              color: Colors.grey.shade500,
+              fontWeight: FontWeight.w600,
+              fontSize: 15,
+            ),
+          ),
         ],
       ),
     );
@@ -274,6 +315,29 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
       return 'All Courses & Years';
     }
     if (raw == 'NONE') return 'No Target';
+
+    final multi = RegExp(
+      r'^COURSE\s*=\s*(ALL|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
+    ).firstMatch(raw);
+    if (multi != null) {
+      final courseRaw = multi.group(1) ?? 'ALL';
+      final course = courseRaw == 'ALL' ? 'All Courses' : courseRaw;
+      final yearsRaw = (multi.group(2) ?? '')
+          .split(',')
+          .map((e) => e.trim().toUpperCase())
+          .where((e) => ['1', '2', '3', '4'].contains(e))
+          .toList();
+      const yearMap = {
+        '1': '1st Year',
+        '2': '2nd Year',
+        '3': '3rd Year',
+        '4': '4th Year',
+      };
+      final yearLabel = yearsRaw.isEmpty
+          ? 'All Levels'
+          : yearsRaw.map((y) => yearMap[y] ?? y).join(', ');
+      return '$course - $yearLabel';
+    }
 
     final pair = RegExp(r'^(BSIT|BSCS)\s*[-_|]\s*([1-4])$').firstMatch(raw);
     if (pair != null) {
@@ -299,6 +363,9 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
     final startAt = event['start_at'] as String?;
     final endAt = event['end_at'] as String?;
     String status = event['status'] as String? ?? 'active';
+    final proposalStage =
+        event['proposal_stage']?.toString().trim().toLowerCase() ??
+        'pending_requirements';
     final target = _getTargetLabel(event['event_for']?.toString());
 
     final startDate = parseStoredEventDateTime(startAt);
@@ -316,21 +383,39 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
     if (displayStatus == 'PENDING') {
       statusBg = const Color(0xFFD97706);
     } else if (displayStatus == 'REJECTED') {
-      statusBg = const Color(0xFFFF0000); 
+      statusBg = const Color(0xFFFF0000);
     } else if (displayStatus == 'APPROVED') {
       statusBg = const Color(0xFF3B82F6);
-    } else if (displayStatus == 'ARCHIVED' || displayStatus == 'EXPIRED' || displayStatus == 'FINISHED') {
+    } else if (displayStatus == 'ARCHIVED' ||
+        displayStatus == 'EXPIRED' ||
+        displayStatus == 'FINISHED') {
       statusBg = const Color(0xFF6B7280);
     }
 
+    if (displayStatus == 'PENDING') {
+      if (proposalStage == 'requirements_requested') {
+        displayStatus = 'DOCS REQUESTED';
+        statusBg = const Color(0xFFD97706);
+      } else if (proposalStage == 'under_review') {
+        displayStatus = 'UNDER REVIEW';
+        statusBg = const Color(0xFF7C3AED);
+      }
+    }
+
     return GestureDetector(
-      onTap: () {
-        Navigator.push(
+      onTap: () async {
+        final isProposalFlow = status == 'pending';
+        final refresh = await Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => TeacherEventManage(event: event),
+            builder: (_) => isProposalFlow
+                ? TeacherProposalRequirementsPage(event: event)
+                : TeacherEventManage(event: event),
           ),
         );
+        if (refresh == true) {
+          _loadEvents();
+        }
       },
       child: Container(
         margin: const EdgeInsets.only(bottom: 20),
@@ -358,11 +443,12 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
                   child: Image.asset(
                     'assets/CCS.png',
                     width: 160,
-                    errorBuilder: (context, error, stackTrace) => const SizedBox(),
+                    errorBuilder: (context, error, stackTrace) =>
+                        const SizedBox(),
                   ),
                 ),
               ),
-              
+
               IntrinsicHeight(
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -381,19 +467,43 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Text(
-                            startDate != null ? DateFormat('dd').format(startDate) : '--',
-                            style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w900, height: 1.1, letterSpacing: -1),
+                            startDate != null
+                                ? DateFormat('dd').format(startDate)
+                                : '--',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 28,
+                              fontWeight: FontWeight.w900,
+                              height: 1.1,
+                              letterSpacing: -1,
+                            ),
                           ),
                           Text(
-                            startDate != null ? DateFormat('MMM').format(startDate).toUpperCase() : '---',
-                            style: TextStyle(color: Colors.white.withValues(alpha: 0.9), fontSize: 13, fontWeight: FontWeight.w700, letterSpacing: 1.5),
+                            startDate != null
+                                ? DateFormat(
+                                    'MMM',
+                                  ).format(startDate).toUpperCase()
+                                : '---',
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.9),
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 1.5,
+                            ),
                           ),
                           const SizedBox(height: 4),
-                          Container(height: 2, width: 12, decoration: BoxDecoration(color: const Color(0xFFD4A843), borderRadius: BorderRadius.circular(1))),
+                          Container(
+                            height: 2,
+                            width: 12,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFD4A843),
+                              borderRadius: BorderRadius.circular(1),
+                            ),
+                          ),
                         ],
                       ),
                     ),
-                    
+
                     // Right Details Area
                     Expanded(
                       child: Padding(
@@ -404,50 +514,100 @@ class _TeacherEventsTabState extends State<TeacherEventsTab> with SingleTickerPr
                             // Status Badge
                             Container(
                               margin: const EdgeInsets.only(bottom: 10),
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                              decoration: BoxDecoration(color: statusBg.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(8)),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 4,
+                              ),
+                              decoration: BoxDecoration(
+                                color: statusBg.withValues(alpha: 0.1),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
                               child: Text(
-                                displayStatus, 
-                                style: TextStyle(color: statusBg, fontSize: 10, fontWeight: FontWeight.w900, letterSpacing: 0.5)
+                                displayStatus,
+                                style: TextStyle(
+                                  color: statusBg,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 0.5,
+                                ),
                               ),
                             ),
-                            
+
                             Text(
                               title,
-                              style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: Color(0xFF111827), letterSpacing: -0.3),
-                              maxLines: 1, overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w900,
+                                fontSize: 16,
+                                color: Color(0xFF111827),
+                                letterSpacing: -0.3,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                             ),
-                            
+
                             const SizedBox(height: 12),
-                            
+
                             // Metadata Row
                             Row(
                               children: [
                                 Container(
                                   padding: const EdgeInsets.all(4),
-                                  decoration: BoxDecoration(color: const Color(0xFFF3F4F6), borderRadius: BorderRadius.circular(6)),
-                                  child: const Icon(Icons.people_rounded, size: 12, color: Color(0xFF4B5563)),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFF3F4F6),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: const Icon(
+                                    Icons.people_rounded,
+                                    size: 12,
+                                    color: Color(0xFF4B5563),
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
-                                Text('For: $target', style: const TextStyle(color: Color(0xFF374151), fontSize: 12, fontWeight: FontWeight.w700)),
+                                Expanded(
+                                  child: Text(
+                                    'For: $target',
+                                    style: const TextStyle(
+                                      color: Color(0xFF374151),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
                               ],
                             ),
-                            
+
                             const SizedBox(height: 8),
-                            
+
                             // Time Row
                             Row(
                               children: [
                                 Container(
                                   padding: const EdgeInsets.all(4),
-                                  decoration: BoxDecoration(color: const Color(0xFFF3F4F6), borderRadius: BorderRadius.circular(6)),
-                                  child: const Icon(Icons.schedule_rounded, size: 12, color: Color(0xFF4B5563)),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFF3F4F6),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: const Icon(
+                                    Icons.schedule_rounded,
+                                    size: 12,
+                                    color: Color(0xFF4B5563),
+                                  ),
                                 ),
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Text(
-                                    startDate != null ? DateFormat('MMM dd, yyyy  -  h:mm a').format(startDate) : 'TBA',
-                                    style: const TextStyle(color: Color(0xFF6B7280), fontSize: 11, fontWeight: FontWeight.w600),
+                                    startDate != null
+                                        ? DateFormat(
+                                            'MMM dd, yyyy  -  h:mm a',
+                                          ).format(startDate)
+                                        : 'TBA',
+                                    style: const TextStyle(
+                                      color: Color(0xFF6B7280),
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                    ),
                                   ),
                                 ),
                               ],

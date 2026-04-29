@@ -43,9 +43,8 @@ class EventService {
     if (trimmedUserId.isEmpty || trimmedEventId.isEmpty) return false;
 
     final prefs = await SharedPreferences.getInstance();
-    final values = prefs.getStringList(
-          _approvedRegistrationCacheKey(trimmedUserId),
-        ) ??
+    final values =
+        prefs.getStringList(_approvedRegistrationCacheKey(trimmedUserId)) ??
         const <String>[];
     return values.contains(trimmedEventId);
   }
@@ -170,7 +169,10 @@ class EventService {
     return _isCheckedInStatus(row['status']);
   }
 
-  String _normalizedScanTimestampIso(String? rawIso, {required String fallbackIso}) {
+  String _normalizedScanTimestampIso(
+    String? rawIso, {
+    required String fallbackIso,
+  }) {
     final parsed = _toUtcDate(rawIso);
     if (parsed == null) return fallbackIso;
     return parsed.toIso8601String();
@@ -320,9 +322,9 @@ class EventService {
     } catch (_) {}
 
     try {
-      final publicUrl = _supabase.storage.from('avatars').getPublicUrl(
-        avatarPath,
-      );
+      final publicUrl = _supabase.storage
+          .from('avatars')
+          .getPublicUrl(avatarPath);
       if (publicUrl.trim().isNotEmpty) {
         return publicUrl.trim();
       }
@@ -747,7 +749,9 @@ class EventService {
             .update({'status': 'absent', 'last_scanned_at': nowIso})
             .eq('id', existingId)
             .isFilter('check_in_at', null)
-            .select('id,ticket_id,session_id,status,check_in_at,last_scanned_at');
+            .select(
+              'id,ticket_id,session_id,status,check_in_at,last_scanned_at',
+            );
         if (rows.isNotEmpty) {
           updatedRow = Map<String, dynamic>.from(rows.first);
         }
@@ -762,7 +766,9 @@ class EventService {
             .eq('ticket_id', ticketId)
             .isFilter('session_id', null)
             .isFilter('check_in_at', null)
-            .select('id,ticket_id,session_id,status,check_in_at,last_scanned_at');
+            .select(
+              'id,ticket_id,session_id,status,check_in_at,last_scanned_at',
+            );
         if (rows.isNotEmpty) {
           updatedRow = Map<String, dynamic>.from(rows.first);
         }
@@ -778,7 +784,9 @@ class EventService {
               'status': 'absent',
               'last_scanned_at': nowIso,
             })
-            .select('id,ticket_id,session_id,status,check_in_at,last_scanned_at');
+            .select(
+              'id,ticket_id,session_id,status,check_in_at,last_scanned_at',
+            );
         if (rows.isNotEmpty) {
           updatedRow = Map<String, dynamic>.from(rows.first);
         }
@@ -795,14 +803,14 @@ class EventService {
     required Map<String, dynamic>? existingRow,
     required String nowIso,
   }) async {
-    final prefersSessionAttendance = await _supportsEventSessionAttendanceTable();
+    final prefersSessionAttendance =
+        await _supportsEventSessionAttendanceTable();
     final table = prefersSessionAttendance
         ? 'event_session_attendance'
         : 'attendance';
-    final selectColumns =
-        prefersSessionAttendance
-            ? 'id,session_id,registration_id,ticket_id,status,check_in_at,last_scanned_at'
-            : 'id,session_id,ticket_id,status,check_in_at,last_scanned_at';
+    final selectColumns = prefersSessionAttendance
+        ? 'id,session_id,registration_id,ticket_id,status,check_in_at,last_scanned_at'
+        : 'id,session_id,ticket_id,status,check_in_at,last_scanned_at';
     Map<String, dynamic>? updatedRow;
     final existingId = (existingRow?['id']?.toString() ?? '').trim();
 
@@ -852,21 +860,20 @@ class EventService {
 
     if (updatedRow == null) {
       try {
-        final payload =
-            prefersSessionAttendance
-                ? <String, dynamic>{
-                  'session_id': sessionId,
-                  'registration_id': registrationId,
-                  'ticket_id': ticketId,
-                  'status': 'absent',
-                  'last_scanned_at': nowIso,
-                }
-                : <String, dynamic>{
-                  'session_id': sessionId,
-                  'ticket_id': ticketId,
-                  'status': 'absent',
-                  'last_scanned_at': nowIso,
-                };
+        final payload = prefersSessionAttendance
+            ? <String, dynamic>{
+                'session_id': sessionId,
+                'registration_id': registrationId,
+                'ticket_id': ticketId,
+                'status': 'absent',
+                'last_scanned_at': nowIso,
+              }
+            : <String, dynamic>{
+                'session_id': sessionId,
+                'ticket_id': ticketId,
+                'status': 'absent',
+                'last_scanned_at': nowIso,
+              };
         final rows = await _supabase
             .from(table)
             .insert(payload)
@@ -930,7 +937,9 @@ class EventService {
     for (final ticketId in ticketIds) {
       final existing = existingByTicket[ticketId];
       if (_attendanceRecordCountsAsPresent(existing)) continue;
-      final status = (existing?['status']?.toString() ?? '').trim().toLowerCase();
+      final status = (existing?['status']?.toString() ?? '')
+          .trim()
+          .toLowerCase();
       if (status == 'absent') continue;
       final updated = await _patchSimpleAttendanceAbsent(
         ticketId: ticketId,
@@ -979,21 +988,17 @@ class EventService {
       for (final ticket in _ticketRowsFromParticipant(participant)) {
         final ticketId = (ticket['id']?.toString() ?? '').trim();
         if (ticketId.isEmpty) continue;
-        pairs.add({
-          'registration_id': registrationId,
-          'ticket_id': ticketId,
-        });
+        pairs.add({'registration_id': registrationId, 'ticket_id': ticketId});
         ticketIds.add(ticketId);
       }
     }
     if (pairs.isEmpty) return false;
 
     final existingByKey = <String, Map<String, dynamic>>{};
-    final closedSessionIds =
-        closedSessions
-            .map((session) => (session['id']?.toString() ?? '').trim())
-            .where((id) => id.isNotEmpty)
-            .toList();
+    final closedSessionIds = closedSessions
+        .map((session) => (session['id']?.toString() ?? '').trim())
+        .where((id) => id.isNotEmpty)
+        .toList();
     if (closedSessionIds.isEmpty) return false;
 
     if (await _supportsEventSessionAttendanceTable()) {
@@ -1007,8 +1012,8 @@ class EventService {
             .limit(2000);
         for (final raw in List<Map<String, dynamic>>.from(rows)) {
           final sessionId = (raw['session_id']?.toString() ?? '').trim();
-          final registrationId =
-              (raw['registration_id']?.toString() ?? '').trim();
+          final registrationId = (raw['registration_id']?.toString() ?? '')
+              .trim();
           final ticketId = (raw['ticket_id']?.toString() ?? '').trim();
           if (sessionId.isEmpty) continue;
           if (registrationId.isNotEmpty) {
@@ -1022,7 +1027,9 @@ class EventService {
       try {
         final rows = await _supabase
             .from('attendance')
-            .select('id,session_id,ticket_id,status,check_in_at,last_scanned_at')
+            .select(
+              'id,session_id,ticket_id,status,check_in_at,last_scanned_at',
+            )
             .inFilter('session_id', closedSessionIds)
             .limit(2000);
         for (final raw in List<Map<String, dynamic>>.from(rows)) {
@@ -1075,8 +1082,9 @@ class EventService {
       final event = await _loadEventForAttendanceMaterialization(eventId);
       if (event == null) return false;
 
-      final sourceParticipants =
-          participants.where((item) => item.isNotEmpty).toList();
+      final sourceParticipants = participants
+          .where((item) => item.isNotEmpty)
+          .toList();
       if (sourceParticipants.isEmpty) return false;
 
       if (_eventUsesSessions(event)) {
@@ -1507,10 +1515,15 @@ class EventService {
             for (final rawAttendance in nestedAttendance) {
               if (rawAttendance is! Map) continue;
               final attendanceItem = Map<String, dynamic>.from(rawAttendance);
-              if ((attendanceItem['ticket_id']?.toString().trim().isEmpty ?? true)) {
+              if ((attendanceItem['ticket_id']?.toString().trim().isEmpty ??
+                  true)) {
                 attendanceItem['ticket_id'] = ticketId;
               }
-              if ((attendanceItem['registration_id']?.toString().trim().isEmpty ?? true) &&
+              if ((attendanceItem['registration_id']
+                          ?.toString()
+                          .trim()
+                          .isEmpty ??
+                      true) &&
                   registrationId.isNotEmpty) {
                 attendanceItem['registration_id'] = registrationId;
               }
@@ -1672,7 +1685,8 @@ class EventService {
           rowsByRegistration.containsKey(registrationId)) {
         combined.addAll(
           List<Map<String, dynamic>>.from(
-            rowsByRegistration[registrationId] ?? const <Map<String, dynamic>>[],
+            rowsByRegistration[registrationId] ??
+                const <Map<String, dynamic>>[],
           ),
         );
       }
@@ -2060,7 +2074,7 @@ class EventService {
     return 'ALL';
   }
 
-  Map<String, String> _decodeEventTarget(dynamic rawTarget) {
+  Map<String, dynamic> _decodeEventTarget(dynamic rawTarget) {
     final raw = (rawTarget?.toString() ?? '').trim().toUpperCase();
     if (raw.isEmpty ||
         raw == 'ALL' ||
@@ -2069,22 +2083,47 @@ class EventService {
         raw == 'ALL YEAR LEVEL' ||
         raw == 'ALL YEAR LEVELS' ||
         raw == 'ALL COURSES') {
-      return {'course': 'ALL', 'year': 'ALL'};
+      return {
+        'course': 'ALL',
+        'years': const <String>['ALL'],
+      };
+    }
+
+    final multi = RegExp(
+      r'^COURSE\s*=\s*(ALL|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
+    ).firstMatch(raw);
+    if (multi != null) {
+      final course = _normalizeTargetCourse(multi.group(1));
+      final yearsRaw = (multi.group(2) ?? '')
+          .split(',')
+          .map((e) => e.trim().toUpperCase())
+          .where((e) => ['ALL', '1', '2', '3', '4'].contains(e))
+          .toList();
+      final years = yearsRaw.contains('ALL') || yearsRaw.isEmpty
+          ? const <String>['ALL']
+          : yearsRaw.toSet().toList();
+      return {'course': course, 'years': years};
     }
 
     final pair = RegExp(r'^([A-Z0-9]+)\s*[-_|]\s*([1-4])$').firstMatch(raw);
     if (pair != null) {
       return {
         'course': _normalizeTargetCourse(pair.group(1)),
-        'year': pair.group(2) ?? 'ALL',
+        'years': <String>[pair.group(2) ?? 'ALL'],
       };
     }
 
     if (['1', '2', '3', '4'].contains(raw)) {
-      return {'course': 'ALL', 'year': raw};
+      return {
+        'course': 'ALL',
+        'years': <String>[raw],
+      };
     }
 
-    return {'course': _normalizeTargetCourse(raw), 'year': 'ALL'};
+    return {
+      'course': _normalizeTargetCourse(raw),
+      'years': const <String>['ALL'],
+    };
   }
 
   bool _matchesEventTarget(
@@ -2093,8 +2132,11 @@ class EventService {
     String? courseCode,
   }) {
     final target = _decodeEventTarget(event['event_for']);
-    final targetCourse = target['course'] ?? 'ALL';
-    final targetYear = target['year'] ?? 'ALL';
+    final targetCourse = (target['course'] as String?) ?? 'ALL';
+    final targetYears = ((target['years'] as List?) ?? const <String>['ALL'])
+        .map((e) => e.toString().trim().toUpperCase())
+        .where((e) => e.isNotEmpty)
+        .toList();
 
     final studentCourse = _normalizeTargetCourse(courseCode);
     final studentYear = _normalizeTargetYear(yearLevel);
@@ -2102,9 +2144,9 @@ class EventService {
     final courseMatches = targetCourse == 'ALL'
         ? true
         : (studentCourse != 'ALL' && targetCourse == studentCourse);
-    final yearMatches = targetYear == 'ALL'
+    final yearMatches = (targetYears.length == 1 && targetYears.first == 'ALL')
         ? true
-        : (studentYear != 'ALL' && targetYear == studentYear);
+        : (studentYear != 'ALL' && targetYears.contains(studentYear));
 
     return courseMatches && yearMatches;
   }
@@ -2185,10 +2227,7 @@ class EventService {
       }
     }
 
-    return {
-      'courseCode': courseCode,
-      'yearLevel': yearLevel,
-    };
+    return {'courseCode': courseCode, 'yearLevel': yearLevel};
   }
 
   bool isStudentAllowedForEvent(
@@ -2460,12 +2499,12 @@ class EventService {
     try {
       final accessRows = List<Map<String, dynamic>>.from(
         await _supabase
-          .from('event_registration_access')
-          .select('approved,payment_status,payment_note,updated_at')
-          .eq('event_id', eventId)
-          .eq('student_id', studentId)
-          .order('updated_at', ascending: false)
-          .limit(1),
+            .from('event_registration_access')
+            .select('approved,payment_status,payment_note,updated_at')
+            .eq('event_id', eventId)
+            .eq('student_id', studentId)
+            .order('updated_at', ascending: false)
+            .limit(1),
       );
 
       if (accessRows.isNotEmpty) {
@@ -2644,8 +2683,8 @@ class EventService {
         final existingTicketId = ticketData is List && ticketData.isNotEmpty
             ? (ticketData.first['id'] ?? '').toString()
             : ticketData is Map
-                ? (ticketData['id'] ?? '').toString()
-                : '';
+            ? (ticketData['id'] ?? '').toString()
+            : '';
         if (existingTicketId.trim().isNotEmpty) continue;
 
         try {
@@ -3169,8 +3208,6 @@ class EventService {
   Future<List<Map<String, dynamic>>> getTeacherScanAccessibleEvents(
     String teacherId,
   ) async {
-    final now = DateTime.now().toUtc().toIso8601String();
-
     try {
       final assignmentRows = await _supabase
           .from('event_teacher_assignments')
@@ -3198,7 +3235,6 @@ class EventService {
           .select()
           .inFilter('id', eventIds)
           .eq('status', 'published')
-          .gte('end_at', now)
           .order('start_at', ascending: true);
 
       return List<Map<String, dynamic>>.from(eventRows);
@@ -3277,6 +3313,34 @@ class EventService {
         .where((ctx) => (ctx['status']?.toString() ?? '') == 'closed')
         .toList();
     if (closed.isNotEmpty) {
+      final activeClosed = closed.where((ctx) {
+        final rawEvent = ctx['event'];
+        final event = rawEvent is Map<String, dynamic>
+            ? rawEvent
+            : (rawEvent is Map ? Map<String, dynamic>.from(rawEvent) : null);
+        final eventEndAt = _toUtcDate(event?['end_at']);
+        return eventEndAt == null || !eventEndAt.isBefore(nowUtc);
+      }).toList();
+
+      if (activeClosed.isNotEmpty) {
+        activeClosed.sort(
+          (a, b) => (b['closes_at']?.toString() ?? '').compareTo(
+            a['closes_at']?.toString() ?? '',
+          ),
+        );
+        return {
+          'ok': true,
+          'status': 'closed',
+          'scanner_enabled': false,
+          'message':
+              activeClosed.first['message']?.toString() ??
+              'Scanner is currently closed for this assigned event.',
+          'context': activeClosed.first,
+          'assignments': events.length,
+          'server_time': nowUtc.toIso8601String(),
+        };
+      }
+
       closed.sort(
         (a, b) => (b['closes_at']?.toString() ?? '').compareTo(
           a['closes_at']?.toString() ?? '',
@@ -3536,7 +3600,9 @@ class EventService {
               .inFilter('teacher_id', teacherIds.toList())
               .eq('can_scan', true)
               .limit(500);
-          for (final raw in List<Map<String, dynamic>>.from(teacherAssignmentRows)) {
+          for (final raw in List<Map<String, dynamic>>.from(
+            teacherAssignmentRows,
+          )) {
             final eventId = raw['event_id']?.toString().trim() ?? '';
             final teacherId = raw['teacher_id']?.toString().trim() ?? '';
             if (eventId.isEmpty || teacherId.isEmpty) continue;
@@ -3568,7 +3634,8 @@ class EventService {
       final seenEventIds = <String>{};
       for (final row in candidateRows) {
         final eventId = row['event_id']?.toString().trim() ?? '';
-        final assignedBy = row['assigned_by_teacher_id']?.toString().trim() ?? '';
+        final assignedBy =
+            row['assigned_by_teacher_id']?.toString().trim() ?? '';
         if (eventId.isEmpty) continue;
         if (assignedBy.isEmpty) continue;
         if (!allowedTeacherEventPairs.contains('$eventId|$assignedBy')) {
@@ -3631,14 +3698,15 @@ class EventService {
       final rawSessions = work['sessions'];
       final sessions = rawSessions is List
           ? rawSessions
-              .map((row) => Map<String, dynamic>.from(row as Map))
-              .toList()
+                .map((row) => Map<String, dynamic>.from(row as Map))
+                .toList()
           : <Map<String, dynamic>>[];
       work.remove('sessions');
 
       // Event status should forcefully start as 'pending' for Admin approval
       work['status'] = 'pending';
-      work['event_for'] = (work['event_for']?.toString().trim().isNotEmpty ?? false)
+      work['event_for'] =
+          (work['event_for']?.toString().trim().isNotEmpty ?? false)
           ? work['event_for']
           : 'All';
 
@@ -3694,7 +3762,8 @@ class EventService {
       if (createdEvent == null) {
         return {
           'ok': false,
-          'error': 'Failed to create event: Unable to save event schema fields.',
+          'error':
+              'Failed to create event: Unable to save event schema fields.',
         };
       }
 
@@ -3766,7 +3835,8 @@ class EventService {
       if (description != null && description.isNotEmpty) {
         payload['description'] = description;
       }
-      if (location != null && location.isNotEmpty) payload['location'] = location;
+      if (location != null && location.isNotEmpty)
+        payload['location'] = location;
 
       final essentialColumns = {'event_id', 'title', 'start_at'};
       final working = <String, dynamic>{};
@@ -3844,7 +3914,9 @@ class EventService {
         }
       }
       if (!inserted) {
-        throw Exception('Unable to insert seminar ${i + 1} due to schema mismatch.');
+        throw Exception(
+          'Unable to insert seminar ${i + 1} due to schema mismatch.',
+        );
       }
     }
   }
@@ -3876,7 +3948,9 @@ class EventService {
         try {
           final base = await _supabase
               .from('event_registrations')
-              .select('id, registered_at, student_id, tickets(*, attendance(*))')
+              .select(
+                'id, registered_at, student_id, tickets(*, attendance(*))',
+              )
               .eq('event_id', eventId)
               .order('registered_at', ascending: false);
           final enriched = await _enrichParticipantsWithUsers(
@@ -3955,9 +4029,14 @@ class EventService {
 
         final ticketsRaw = participantRow['tickets'];
         final tickets = ticketsRaw is List
-            ? ticketsRaw.whereType<Map>().map(Map<String, dynamic>.from).toList()
+            ? ticketsRaw
+                  .whereType<Map>()
+                  .map(Map<String, dynamic>.from)
+                  .toList()
             : (ticketsRaw is Map
-                  ? <Map<String, dynamic>>[Map<String, dynamic>.from(ticketsRaw)]
+                  ? <Map<String, dynamic>>[
+                      Map<String, dynamic>.from(ticketsRaw),
+                    ]
                   : <Map<String, dynamic>>[]);
         if (tickets.isEmpty) continue;
         for (final rawTicket in tickets) {
@@ -3969,19 +4048,22 @@ class EventService {
           final attendanceRaw = ticket['attendance'];
           final attendance = attendanceRaw is List
               ? attendanceRaw
-                  .whereType<Map>()
-                  .map(Map<String, dynamic>.from)
-                  .toList()
+                    .whereType<Map>()
+                    .map(Map<String, dynamic>.from)
+                    .toList()
               : (attendanceRaw is Map
-                    ? <Map<String, dynamic>>[Map<String, dynamic>.from(attendanceRaw)]
+                    ? <Map<String, dynamic>>[
+                        Map<String, dynamic>.from(attendanceRaw),
+                      ]
                     : <Map<String, dynamic>>[]);
           if (attendance.isNotEmpty) {
             final row = Map<String, dynamic>.from(attendance.first);
             if (_attendanceRecordCountsAsPresent(row)) {
               attendanceStatus = 'present';
             } else {
-              final rawStatus =
-                  (row['status']?.toString() ?? '').trim().toLowerCase();
+              final rawStatus = (row['status']?.toString() ?? '')
+                  .trim()
+                  .toLowerCase();
               attendanceStatus = rawStatus.isEmpty ? 'unscanned' : rawStatus;
             }
           }
@@ -4050,14 +4132,17 @@ class EventService {
       final ticketIds = <String>[];
       for (final raw in List<Map<String, dynamic>>.from(ticketRows)) {
         final ticketId = (raw['id']?.toString() ?? '').trim();
-        final registrationId = (raw['registration_id']?.toString() ?? '').trim();
+        final registrationId = (raw['registration_id']?.toString() ?? '')
+            .trim();
         if (ticketId.isEmpty || registrationId.isEmpty) continue;
         ticketIds.add(ticketId);
-        ticketsByRegistration.putIfAbsent(registrationId, () => <Map<String, dynamic>>[]).add({
-          'id': ticketId,
-          'registration_id': registrationId,
-          'attendance': <Map<String, dynamic>>[],
-        });
+        ticketsByRegistration
+            .putIfAbsent(registrationId, () => <Map<String, dynamic>>[])
+            .add({
+              'id': ticketId,
+              'registration_id': registrationId,
+              'attendance': <Map<String, dynamic>>[],
+            });
       }
 
       if (ticketIds.isNotEmpty) {
@@ -4074,9 +4159,13 @@ class EventService {
                 (ticket) => (ticket['id']?.toString() ?? '').trim() == ticketId,
               );
               if (ticketIndex < 0) continue;
-              final ticket = Map<String, dynamic>.from(entry.value[ticketIndex]);
+              final ticket = Map<String, dynamic>.from(
+                entry.value[ticketIndex],
+              );
               final attendance = ticket['attendance'] is List
-                  ? List<Map<String, dynamic>>.from(ticket['attendance'] as List)
+                  ? List<Map<String, dynamic>>.from(
+                      ticket['attendance'] as List,
+                    )
                   : <Map<String, dynamic>>[];
               attendance.add(Map<String, dynamic>.from(raw));
               ticket['attendance'] = attendance;
@@ -4092,7 +4181,8 @@ class EventService {
         return {
           ...registration,
           'tickets': List<Map<String, dynamic>>.from(
-            ticketsByRegistration[registrationId] ?? const <Map<String, dynamic>>[],
+            ticketsByRegistration[registrationId] ??
+                const <Map<String, dynamic>>[],
           ),
         };
       }).toList();
@@ -4258,10 +4348,7 @@ class EventService {
       }
     }
 
-    return {
-      'registration_id': registrationId,
-      'event_id': eventId,
-    };
+    return {'registration_id': registrationId, 'event_id': eventId};
   }
 
   Future<Map<String, dynamic>?> _loadScannerReplayEvent(String eventId) async {
@@ -4352,7 +4439,9 @@ class EventService {
     }
 
     final context = await _resolveSingleEventScanContext(event, replayAt);
-    final status = (context['status']?.toString() ?? 'closed').trim().toLowerCase();
+    final status = (context['status']?.toString() ?? 'closed')
+        .trim()
+        .toLowerCase();
     if (status != 'open') {
       return {
         'ok': false,
@@ -4423,7 +4512,8 @@ class EventService {
       return {
         'ok': false,
         'status': 'no_assignment',
-        'message': 'Scanner assistant access for this event is no longer available.',
+        'message':
+            'Scanner assistant access for this event is no longer available.',
       };
     }
 
@@ -4437,7 +4527,9 @@ class EventService {
     }
 
     final context = await _resolveSingleEventScanContext(event, replayAt);
-    final status = (context['status']?.toString() ?? 'closed').trim().toLowerCase();
+    final status = (context['status']?.toString() ?? 'closed')
+        .trim()
+        .toLowerCase();
     if (status != 'open') {
       return {
         'ok': false,
@@ -4611,9 +4703,7 @@ class EventService {
       final normalizedBase = baseUrl.endsWith('/')
           ? baseUrl.substring(0, baseUrl.length - 1)
           : baseUrl;
-      final uri = Uri.tryParse(
-        '$normalizedBase/api/mobile_push_dispatch.php',
-      );
+      final uri = Uri.tryParse('$normalizedBase/api/mobile_push_dispatch.php');
       if (uri != null) {
         final headers = <String, String>{'Content-Type': 'application/json'};
         if (pushKey.isNotEmpty) {
@@ -4635,7 +4725,6 @@ class EventService {
         }
       }
     }
-
   }
 
   Future<void> _touchAssistantAssignmentTimestamp({
@@ -4924,9 +5013,10 @@ class EventService {
 
   Future<Map<String, dynamic>> checkInParticipantAsTeacher(
     String ticketPayload,
-    String teacherId,
-    {bool dryRun = false, String? scannedAtIso}
-  ) async {
+    String teacherId, {
+    bool dryRun = false,
+    String? scannedAtIso,
+  }) async {
     if (!ticketPayload.startsWith('PULSE-')) {
       return {
         'ok': false,
@@ -4941,8 +5031,8 @@ class EventService {
 
     try {
       var scanContext = await getTeacherScanContext(teacherId);
-      var contextStatus =
-          (scanContext['status']?.toString() ?? '').toLowerCase();
+      var contextStatus = (scanContext['status']?.toString() ?? '')
+          .toLowerCase();
       if (scanContext['ok'] != true || contextStatus != 'open') {
         if (!replayRequested) {
           return {
@@ -4950,10 +5040,9 @@ class EventService {
             'error':
                 scanContext['message']?.toString() ??
                 'Scanner is not open for this schedule.',
-            'status':
-                contextStatus.isEmpty
-                    ? (scanContext['status']?.toString() ?? 'error')
-                    : contextStatus,
+            'status': contextStatus.isEmpty
+                ? (scanContext['status']?.toString() ?? 'error')
+                : contextStatus,
           };
         }
 
@@ -5029,15 +5118,13 @@ class EventService {
         scannedAtIso,
         fallbackIso: nowIso,
       );
-      final participantIdentity = await _resolveParticipantIdentityForRegistration(
-        registrationId,
-      );
-      final participantName =
-          (participantIdentity['name'] ?? '').trim();
-      final participantPhotoUrl =
-          (participantIdentity['photo_url'] ?? '').trim();
-      final participantStudentId =
-          (participantIdentity['student_id'] ?? '').trim();
+      final participantIdentity =
+          await _resolveParticipantIdentityForRegistration(registrationId);
+      final participantName = (participantIdentity['name'] ?? '').trim();
+      final participantPhotoUrl = (participantIdentity['photo_url'] ?? '')
+          .trim();
+      final participantStudentId = (participantIdentity['student_id'] ?? '')
+          .trim();
       final source = contextMap?['source']?.toString().toLowerCase() ?? 'event';
 
       if (source == 'session') {
@@ -5096,10 +5183,7 @@ class EventService {
             )) {
           await _supabase
               .from('attendance')
-              .update({
-                'status': 'present',
-                'check_in_at': effectiveScanAtIso,
-              })
+              .update({'status': 'present', 'check_in_at': effectiveScanAtIso})
               .eq('ticket_id', ticketId);
 
           return {
@@ -5109,7 +5193,8 @@ class EventService {
             'participant_name': participantName,
             'participant_photo_url': participantPhotoUrl,
             'participant_student_id': participantStudentId,
-            'message': 'Check-in synchronized using the earliest recorded scan time.',
+            'message':
+                'Check-in synchronized using the earliest recorded scan time.',
           };
         }
         return {
@@ -5194,9 +5279,10 @@ class EventService {
 
   Future<Map<String, dynamic>> checkInParticipantAsAssistant(
     String ticketPayload,
-    String studentId,
-    {bool dryRun = false, String? scannedAtIso}
-  ) async {
+    String studentId, {
+    bool dryRun = false,
+    String? scannedAtIso,
+  }) async {
     if (!ticketPayload.startsWith('PULSE-')) {
       return {
         'ok': false,
@@ -5211,8 +5297,8 @@ class EventService {
 
     try {
       var scanContext = await getStudentScanContext(studentId);
-      var contextStatus =
-          (scanContext['status']?.toString() ?? '').toLowerCase();
+      var contextStatus = (scanContext['status']?.toString() ?? '')
+          .toLowerCase();
       if (scanContext['ok'] != true || contextStatus != 'open') {
         if (!replayRequested) {
           return {
@@ -5220,10 +5306,9 @@ class EventService {
             'error':
                 scanContext['message']?.toString() ??
                 'Scanner is not open for this schedule.',
-            'status':
-                contextStatus.isEmpty
-                    ? (scanContext['status']?.toString() ?? 'error')
-                    : contextStatus,
+            'status': contextStatus.isEmpty
+                ? (scanContext['status']?.toString() ?? 'error')
+                : contextStatus,
           };
         }
 
@@ -5299,15 +5384,13 @@ class EventService {
         scannedAtIso,
         fallbackIso: nowIso,
       );
-      final participantIdentity = await _resolveParticipantIdentityForRegistration(
-        registrationId,
-      );
-      final participantName =
-          (participantIdentity['name'] ?? '').trim();
-      final participantPhotoUrl =
-          (participantIdentity['photo_url'] ?? '').trim();
-      final participantStudentId =
-          (participantIdentity['student_id'] ?? '').trim();
+      final participantIdentity =
+          await _resolveParticipantIdentityForRegistration(registrationId);
+      final participantName = (participantIdentity['name'] ?? '').trim();
+      final participantPhotoUrl = (participantIdentity['photo_url'] ?? '')
+          .trim();
+      final participantStudentId = (participantIdentity['student_id'] ?? '')
+          .trim();
       final source = contextMap?['source']?.toString().toLowerCase() ?? 'event';
 
       if (source == 'session') {
@@ -5366,10 +5449,7 @@ class EventService {
             )) {
           await _supabase
               .from('attendance')
-              .update({
-                'status': 'present',
-                'check_in_at': effectiveScanAtIso,
-              })
+              .update({'status': 'present', 'check_in_at': effectiveScanAtIso})
               .eq('ticket_id', ticketId);
 
           return {
@@ -5379,7 +5459,8 @@ class EventService {
             'participant_name': participantName,
             'participant_photo_url': participantPhotoUrl,
             'participant_student_id': participantStudentId,
-            'message': 'Check-in synchronized using the earliest recorded scan time.',
+            'message':
+                'Check-in synchronized using the earliest recorded scan time.',
           };
         }
         return {
@@ -6306,9 +6387,7 @@ class EventService {
   }
 
   Future<({Map<String, Map<String, dynamic>> map, bool resolved})>
-  _loadStudentAbsenceReasonMap(
-    String studentId,
-  ) async {
+  _loadStudentAbsenceReasonMap(String studentId) async {
     final mapped = <String, Map<String, dynamic>>{};
 
     try {
@@ -6435,7 +6514,8 @@ class EventService {
           // Fallback to direct table reads for deployments without RPC.
         }
 
-        if (!loadedFromSnapshot && await _supportsEventSessionAttendanceTable()) {
+        if (!loadedFromSnapshot &&
+            await _supportsEventSessionAttendanceTable()) {
           try {
             final attendanceRows = await _supabase
                 .from('event_session_attendance')
@@ -6546,7 +6626,10 @@ class EventService {
         // Seminar-based lock should trigger once seminar scan windows are done.
         // Using event.end_at here can delay lock incorrectly when admins set a
         // much later end time than actual seminar attendance windows.
-        final lockAt = latestWindowClose ?? latestSessionEnd ?? _toUtcDate(event['end_at']);
+        final lockAt =
+            latestWindowClose ??
+            latestSessionEnd ??
+            _toUtcDate(event['end_at']);
         if (lockAt != null && !nowUtc.isAfter(lockAt)) {
           continue;
         }

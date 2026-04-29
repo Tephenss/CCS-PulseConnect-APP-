@@ -93,8 +93,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
   bool _payloadAllowsRegistration(Map<String, dynamic> payload) {
     final approved = payload['approved'];
-    final paymentStatus =
-        (payload['payment_status']?.toString() ?? '').trim().toLowerCase();
+    final paymentStatus = (payload['payment_status']?.toString() ?? '')
+        .trim()
+        .toLowerCase();
 
     final approvedBool =
         approved == true ||
@@ -152,8 +153,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         final record = payload.newRecord.isNotEmpty
             ? payload.newRecord
             : payload.oldRecord;
-        final notificationId =
-            (record['notification_id']?.toString() ?? '').trim();
+        final notificationId = (record['notification_id']?.toString() ?? '')
+            .trim();
         if (notificationId == signalId) {
           _applyApprovedRegistrationState(trimmedUserId);
         }
@@ -197,60 +198,64 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     }
 
     try {
-    final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString('user_id') ?? '';
-    _bindApprovalRealtime(userId);
-    final results = await Future.wait([
-      _eventService.getEventById(widget.eventId),
-      _eventService.isRegistered(widget.eventId, userId),
-      _eventService.getParticipantCount(widget.eventId),
-      _eventService.getEventSessions(widget.eventId),
-    ]);
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id') ?? '';
+      _bindApprovalRealtime(userId);
+      final results = await Future.wait([
+        _eventService.getEventById(widget.eventId),
+        _eventService.isRegistered(widget.eventId, userId),
+        _eventService.getParticipantCount(widget.eventId),
+        _eventService.getEventSessions(widget.eventId),
+      ]);
 
-    final event = results[0] as Map<String, dynamic>?;
-    var isReg = results[1] as bool;
-    final count = results[2] as int;
-    final sessions = results[3] as List<Map<String, dynamic>>;
-    var accessDenied = false;
-    var canRegisterNow = false;
-    var approvalRequired = false;
-    var registrationMessage = '';
+      final event = results[0] as Map<String, dynamic>?;
+      var isReg = results[1] as bool;
+      final count = results[2] as int;
+      final sessions = results[3] as List<Map<String, dynamic>>;
+      var accessDenied = false;
+      var canRegisterNow = false;
+      var approvalRequired = false;
+      var registrationMessage = '';
 
-    if (!isReg) {
-      // Fallback: if registration row check misses, verify by ticket existence.
-      final ticket = await _eventService.getTicketForEvent(widget.eventId, userId);
-      if (ticket.isNotEmpty) {
-        isReg = true;
+      if (!isReg) {
+        // Fallback: if registration row check misses, verify by ticket existence.
+        final ticket = await _eventService.getTicketForEvent(
+          widget.eventId,
+          userId,
+        );
+        if (ticket.isNotEmpty) {
+          isReg = true;
+        }
       }
-    }
 
-    if (event != null && !isReg) {
-      final availability = await _eventService.getStudentRegistrationAvailability(
-        widget.eventId,
-        userId,
-        preloadedEvent: Map<String, dynamic>.from(event),
-      );
-      accessDenied = availability['targetAllowed'] == false;
-      canRegisterNow = availability['allowed'] == true;
-      approvalRequired = availability['approvalRequired'] == true;
-      registrationMessage = (availability['message'] as String? ?? '').trim();
-    }
+      if (event != null && !isReg) {
+        final availability = await _eventService
+            .getStudentRegistrationAvailability(
+              widget.eventId,
+              userId,
+              preloadedEvent: Map<String, dynamic>.from(event),
+            );
+        accessDenied = availability['targetAllowed'] == false;
+        canRegisterNow = availability['allowed'] == true;
+        approvalRequired = availability['approvalRequired'] == true;
+        registrationMessage = (availability['message'] as String? ?? '').trim();
+      }
 
-    if (mounted) {
-      setState(() {
-        _event = event ?? _event;
-        _isRegistered = isReg;
-        _isAccessDenied = accessDenied;
-        _canRegisterNow = canRegisterNow;
-        _approvalRequired = approvalRequired;
-        _registrationMessage = registrationMessage;
-        _participantCount = count;
-        _eventSessions = sessions;
-        _isRegistrationResolved = true;
-        _isLoading = false;
-      });
-      _scheduleApprovalRefresh();
-    }
+      if (mounted) {
+        setState(() {
+          _event = event ?? _event;
+          _isRegistered = isReg;
+          _isAccessDenied = accessDenied;
+          _canRegisterNow = canRegisterNow;
+          _approvalRequired = approvalRequired;
+          _registrationMessage = registrationMessage;
+          _participantCount = count;
+          _eventSessions = sessions;
+          _isRegistrationResolved = true;
+          _isLoading = false;
+        });
+        _scheduleApprovalRefresh();
+      }
     } finally {
       _isRefreshingEvent = false;
     }
@@ -335,7 +340,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         }
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Could not load ticket details. Please check your network connection.')),
+            const SnackBar(
+              content: Text(
+                'Could not load ticket details. Please check your network connection.',
+              ),
+            ),
           );
         }
       }
@@ -343,7 +352,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       if (mounted) {
         setState(() => _isRegistering = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Connection timeout or error. Please try again.')),
+          SnackBar(
+            content: Text('Connection timeout or error. Please try again.'),
+          ),
         );
       }
     }
@@ -354,9 +365,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     if (_isLoading) {
       return const Scaffold(
         backgroundColor: Colors.white,
-        body: Center(
-          child: PulseConnectLoader(),
-        ),
+        body: Center(child: PulseConnectLoader()),
       );
     }
 
@@ -365,10 +374,18 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         backgroundColor: Colors.white,
         appBar: AppBar(
           backgroundColor: _studentPrimary(context),
-          title: const Text('Event Details', style: TextStyle(color: Colors.white)),
+          title: const Text(
+            'Event Details',
+            style: TextStyle(color: Colors.white),
+          ),
           iconTheme: const IconThemeData(color: Colors.white),
         ),
-        body: Center(child: Text('Event not found', style: TextStyle(color: Colors.grey.shade600))),
+        body: Center(
+          child: Text(
+            'Event not found',
+            style: TextStyle(color: Colors.grey.shade600),
+          ),
+        ),
       );
     }
 
@@ -377,7 +394,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         backgroundColor: Colors.white,
         appBar: AppBar(
           backgroundColor: _studentPrimary(context),
-          title: const Text('Event Details', style: TextStyle(color: Colors.white)),
+          title: const Text(
+            'Event Details',
+            style: TextStyle(color: Colors.white),
+          ),
           iconTheme: const IconThemeData(color: Colors.white),
         ),
         body: Center(
@@ -424,9 +444,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final registrationStatusLabel = _isRegistered
         ? 'Registered'
         : (_canRegisterNow
-            ? 'Open'
-            : (_approvalRequired ? 'Approval Required' : 'Closed'));
-    final usesSessions = usesEventSessions(_event!) || _eventSessions.isNotEmpty;
+              ? 'Open'
+              : (_approvalRequired ? 'Approval Required' : 'Closed'));
+    final usesSessions =
+        usesEventSessions(_event!) || _eventSessions.isNotEmpty;
     final canTapAction =
         _isRegistrationResolved &&
         !_isAccessDenied &&
@@ -464,12 +485,17 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                           shape: BoxShape.circle,
                           color: Colors.white.withValues(alpha: 0.1),
                           border: Border.all(
-                            color: const Color(0xFFD4A843).withValues(alpha: 0.5),
+                            color: const Color(
+                              0xFFD4A843,
+                            ).withValues(alpha: 0.5),
                             width: 2,
                           ),
                         ),
-                        child: const Icon(Icons.event_rounded,
-                            color: Color(0xFFD4A843), size: 32),
+                        child: const Icon(
+                          Icons.event_rounded,
+                          color: Color(0xFFD4A843),
+                          size: 32,
+                        ),
                       ),
                       const SizedBox(height: 12),
                       Padding(
@@ -498,7 +524,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                   color: Colors.white.withValues(alpha: 0.15),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Icon(Icons.arrow_back_ios_rounded, size: 18, color: Colors.white),
+                child: const Icon(
+                  Icons.arrow_back_ios_rounded,
+                  size: 18,
+                  color: Colors.white,
+                ),
               ),
               onPressed: () => Navigator.pop(context),
             ),
@@ -513,18 +543,34 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                   // Event Type Badge
                   if (eventType.isNotEmpty)
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
                       margin: const EdgeInsets.only(bottom: 16),
                       decoration: BoxDecoration(
-                        color: _getEventTypeColor(eventType).withValues(alpha: 0.12),
+                        color: _getEventTypeColor(
+                          eventType,
+                        ).withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(_getEventTypeIcon(eventType), size: 16, color: _getEventTypeColor(eventType)),
+                          Icon(
+                            _getEventTypeIcon(eventType),
+                            size: 16,
+                            color: _getEventTypeColor(eventType),
+                          ),
                           const SizedBox(width: 6),
-                          Text(eventType, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: _getEventTypeColor(eventType))),
+                          Text(
+                            eventType,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: _getEventTypeColor(eventType),
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -620,7 +666,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
               Container(
                 width: double.infinity,
                 margin: const EdgeInsets.only(bottom: 12),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
                 decoration: BoxDecoration(
                   color: _approvalRequired
                       ? const Color(0xFFFFF7ED)
@@ -670,17 +719,21 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                     colors: _isRegistered
                         ? [const Color(0xFFD4A843), const Color(0xFFB8942F)]
                         : (isActionDisabled
-                            ? const [Color(0xFFE5E7EB), Color(0xFFD1D5DB)]
-                            : [_studentDark(context), _studentPrimary(context)]),
+                              ? const [Color(0xFFE5E7EB), Color(0xFFD1D5DB)]
+                              : [
+                                  _studentDark(context),
+                                  _studentPrimary(context),
+                                ]),
                   ),
                   boxShadow: [
                     BoxShadow(
-                      color: (_isRegistered
-                              ? const Color(0xFFD4A843)
-                              : (isActionDisabled
-                                  ? const Color(0xFF9CA3AF)
-                                  : _studentPrimary(context)))
-                          .withValues(alpha: 0.3),
+                      color:
+                          (_isRegistered
+                                  ? const Color(0xFFD4A843)
+                                  : (isActionDisabled
+                                        ? const Color(0xFF9CA3AF)
+                                        : _studentPrimary(context)))
+                              .withValues(alpha: 0.3),
                       blurRadius: 15,
                       offset: const Offset(0, 4),
                     ),
@@ -701,10 +754,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                     ),
                   ),
                   child: (_isRegistering || !_isRegistrationResolved)
-                      ? const PulseConnectLoader(
-                          size: 14,
-                          color: Colors.white,
-                        )
+                      ? const PulseConnectLoader(size: 14, color: Colors.white)
                       : Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
@@ -712,8 +762,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                               _isRegistered
                                   ? Icons.confirmation_num_rounded
                                   : (_approvalRequired
-                                      ? Icons.lock_clock_rounded
-                                      : Icons.how_to_reg_rounded),
+                                        ? Icons.lock_clock_rounded
+                                        : Icons.how_to_reg_rounded),
                               size: 20,
                             ),
                             const SizedBox(width: 10),
@@ -721,10 +771,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                               _isRegistered
                                   ? 'See Ticket'
                                   : (_canRegisterNow
-                                      ? 'Register'
-                                      : (_approvalRequired
-                                          ? 'Approval Required'
-                                          : 'Registration Closed')),
+                                        ? 'Register'
+                                        : (_approvalRequired
+                                              ? 'Approval Required'
+                                              : 'Registration Closed')),
                               style: const TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.w800,
@@ -764,10 +814,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         _isRegistered
             ? Icons.confirmation_num_rounded
             : (_canRegisterNow
-                ? Icons.check_circle_rounded
-                : (_approvalRequired
-                    ? Icons.lock_clock_rounded
-                    : Icons.info_outline_rounded)),
+                  ? Icons.check_circle_rounded
+                  : (_approvalRequired
+                        ? Icons.lock_clock_rounded
+                        : Icons.info_outline_rounded)),
         registrationStatusLabel,
         'Status',
         itemWidth,
@@ -787,11 +837,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       );
     }
 
-    return Wrap(
-      spacing: spacing,
-      runSpacing: spacing,
-      children: items,
-    );
+    return Wrap(spacing: spacing, runSpacing: spacing, children: items);
   }
 
   Widget _buildInfoChip(
@@ -829,10 +875,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             Text(
               label,
               textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 10,
-                color: Colors.grey.shade600,
-              ),
+              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -876,7 +919,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
         return Container(
           width: double.infinity,
-          margin: EdgeInsets.only(bottom: index == _eventSessions.length - 1 ? 0 : 12),
+          margin: EdgeInsets.only(
+            bottom: index == _eventSessions.length - 1 ? 0 : 12,
+          ),
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
             color: Colors.white,
@@ -977,11 +1022,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       );
     }
 
-    return Wrap(
-      spacing: 12,
-      runSpacing: 12,
-      children: cards,
-    );
+    return Wrap(spacing: 12, runSpacing: 12, children: cards);
   }
 
   Widget _buildScheduleInfoCard({
@@ -1103,6 +1144,30 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final normalized = value.toLowerCase();
     if (normalized.isEmpty || normalized == 'all') return 'All Year Levels';
     if (normalized == 'none') return 'No Target';
+    final rawUpper = value.trim().toUpperCase();
+    final multi = RegExp(
+      r'^COURSE\s*=\s*(ALL|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
+    ).firstMatch(rawUpper);
+    if (multi != null) {
+      final course = multi.group(1) == 'ALL'
+          ? 'All Courses'
+          : (multi.group(1) ?? 'All Courses');
+      final yearsRaw = (multi.group(2) ?? '')
+          .split(',')
+          .map((e) => e.trim().toUpperCase())
+          .where((e) => ['1', '2', '3', '4'].contains(e))
+          .toList();
+      const yearLabel = {
+        '1': '1st Year',
+        '2': '2nd Year',
+        '3': '3rd Year',
+        '4': '4th Year',
+      };
+      final years = yearsRaw.isEmpty
+          ? 'All Levels'
+          : yearsRaw.map((y) => yearLabel[y] ?? y).join(', ');
+      return '$course - $years';
+    }
     switch (normalized) {
       case '1':
         return '1st Year Students';
@@ -1119,22 +1184,31 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
   Color _getEventTypeColor(String type) {
     switch (type.toLowerCase()) {
-      case 'seminar': return const Color(0xFF1D4ED8);
-      case 'off-campus activity': return const Color(0xFF059669);
-      case 'sports event': return const Color(0xFFD97706);
-      case 'other': return const Color(0xFF7C3AED);
-      default: return const Color(0xFF6B7280);
+      case 'seminar':
+        return const Color(0xFF1D4ED8);
+      case 'off-campus activity':
+        return const Color(0xFF059669);
+      case 'sports event':
+        return const Color(0xFFD97706);
+      case 'other':
+        return const Color(0xFF7C3AED);
+      default:
+        return const Color(0xFF6B7280);
     }
   }
 
   IconData _getEventTypeIcon(String type) {
     switch (type.toLowerCase()) {
-      case 'seminar': return Icons.school_rounded;
-      case 'off-campus activity': return Icons.directions_bus_rounded;
-      case 'sports event': return Icons.sports_basketball_rounded;
-      case 'other': return Icons.category_rounded;
-      default: return Icons.event_rounded;
+      case 'seminar':
+        return Icons.school_rounded;
+      case 'off-campus activity':
+        return Icons.directions_bus_rounded;
+      case 'sports event':
+        return Icons.sports_basketball_rounded;
+      case 'other':
+        return Icons.category_rounded;
+      default:
+        return Icons.event_rounded;
     }
   }
 }
-

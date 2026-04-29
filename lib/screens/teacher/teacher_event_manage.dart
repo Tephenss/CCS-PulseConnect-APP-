@@ -22,7 +22,8 @@ class TeacherEventManage extends StatefulWidget {
   State<TeacherEventManage> createState() => _TeacherEventManageState();
 }
 
-class _TeacherEventManageState extends State<TeacherEventManage> with SingleTickerProviderStateMixin {
+class _TeacherEventManageState extends State<TeacherEventManage>
+    with SingleTickerProviderStateMixin {
   late TabController _tabController;
   final _eventService = EventService();
   final _authService = AuthService();
@@ -48,10 +49,14 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
   @override
   void initState() {
     super.initState();
-    final status = (widget.event['status']?.toString() ?? 'pending').toLowerCase();
+    final status = (widget.event['status']?.toString() ?? 'pending')
+        .toLowerCase();
     // Only show Participants and Assistants tabs for Published or Expired events
     _isApprovalPhase = status != 'published' && status != 'expired';
-    _tabController = TabController(length: _isApprovalPhase ? 1 : 3, vsync: this);
+    _tabController = TabController(
+      length: _isApprovalPhase ? 1 : 3,
+      vsync: this,
+    );
     unawaited(_initConnectivityMonitoring());
     _loadData();
   }
@@ -140,7 +145,9 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     if (studentId.isNotEmpty) return 'student:$studentId';
 
     final fallbackName = _getName(participant).trim().toLowerCase();
-    return fallbackName.isNotEmpty ? 'name:$fallbackName' : 'participant:unknown';
+    return fallbackName.isNotEmpty
+        ? 'name:$fallbackName'
+        : 'participant:unknown';
   }
 
   bool _participantHasPendingSync(Map<String, dynamic> participant) {
@@ -194,14 +201,14 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
         next['id'] = offlineId;
       }
 
-      final offlineStudentId =
-          (offlineCopy['student_id']?.toString() ?? '').trim();
+      final offlineStudentId = (offlineCopy['student_id']?.toString() ?? '')
+          .trim();
       if (offlineStudentId.isNotEmpty) {
         next['student_id'] = offlineStudentId;
       }
 
-      final offlineDisplayName =
-          (offlineCopy['display_name']?.toString() ?? '').trim();
+      final offlineDisplayName = (offlineCopy['display_name']?.toString() ?? '')
+          .trim();
       if (offlineDisplayName.isNotEmpty) {
         next['display_name'] = offlineDisplayName;
       }
@@ -260,7 +267,9 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       if (offlineCopy['offline_pending'] == true) {
         next['offline_pending'] = true;
       }
-      if ((offlineCopy['offline_updated_at']?.toString() ?? '').trim().isNotEmpty) {
+      if ((offlineCopy['offline_updated_at']?.toString() ?? '')
+          .trim()
+          .isNotEmpty) {
         next['offline_updated_at'] = offlineCopy['offline_updated_at'];
       }
       if (offlineCopy['offline_cached'] == true) {
@@ -272,7 +281,8 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
 
     final rows = merged.values.toList()
       ..sort(
-        (a, b) => _getName(a).toLowerCase().compareTo(_getName(b).toLowerCase()),
+        (a, b) =>
+            _getName(a).toLowerCase().compareTo(_getName(b).toLowerCase()),
       );
     return rows;
   }
@@ -393,8 +403,14 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
         _participantsCacheKey(eventId),
         mergedParticipants,
       );
-      await _appCacheService.saveJsonList(_assistantsCacheKey(eventId), assistants);
-      await _appCacheService.saveJsonList(_sessionsCacheKey(eventId), eventSessions);
+      await _appCacheService.saveJsonList(
+        _assistantsCacheKey(eventId),
+        assistants,
+      );
+      await _appCacheService.saveJsonList(
+        _sessionsCacheKey(eventId),
+        eventSessions,
+      );
 
       if (mounted) {
         setState(() {
@@ -428,26 +444,37 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
             .where((id) => id.isNotEmpty)
             .toSet();
         final keepCurrentParticipants =
-            _participants.isNotEmpty && fallbackParticipants.length <= _participants.length;
+            _participants.isNotEmpty &&
+            fallbackParticipants.length <= _participants.length;
         final keepCurrentAssistants =
-            _assistants.isNotEmpty && fallbackAssistants.length <= _assistants.length;
+            _assistants.isNotEmpty &&
+            fallbackAssistants.length <= _assistants.length;
         final keepCurrentSessions =
-            _eventSessions.isNotEmpty && fallbackSessions.length <= _eventSessions.length;
+            _eventSessions.isNotEmpty &&
+            fallbackSessions.length <= _eventSessions.length;
         setState(() {
           _isLoading = false;
-          _participants =
-              keepCurrentParticipants ? _participants : fallbackParticipants;
-          _assistants = keepCurrentAssistants ? _assistants : fallbackAssistants;
-          _eventSessions = keepCurrentSessions ? _eventSessions : fallbackSessions;
-          _eventSessionIds =
-              keepCurrentSessions ? _eventSessionIds : fallbackEventSessionIds;
+          _participants = keepCurrentParticipants
+              ? _participants
+              : fallbackParticipants;
+          _assistants = keepCurrentAssistants
+              ? _assistants
+              : fallbackAssistants;
+          _eventSessions = keepCurrentSessions
+              ? _eventSessions
+              : fallbackSessions;
+          _eventSessionIds = keepCurrentSessions
+              ? _eventSessionIds
+              : fallbackEventSessionIds;
           _currentTeacherId = teacherId;
           _canManageAssistants = false;
           _pendingOfflineParticipantCount = _participants
               .where(_participantHasPendingSync)
               .length;
           _usingCachedParticipants =
-              _isOfflineMode || cachedData['has_any'] == true || _usingCachedParticipants;
+              _isOfflineMode ||
+              cachedData['has_any'] == true ||
+              _usingCachedParticipants;
         });
       }
     }
@@ -513,15 +540,19 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
         cachedData['participants'] as List,
       );
       final keepCurrentParticipants =
-          _participants.isNotEmpty && fallbackParticipants.length <= _participants.length;
+          _participants.isNotEmpty &&
+          fallbackParticipants.length <= _participants.length;
       setState(() {
-        _participants =
-            keepCurrentParticipants ? _participants : fallbackParticipants;
+        _participants = keepCurrentParticipants
+            ? _participants
+            : fallbackParticipants;
         _pendingOfflineParticipantCount = _participants
             .where(_participantHasPendingSync)
             .length;
         _usingCachedParticipants =
-            _isOfflineMode || cachedData['has_any'] == true || _usingCachedParticipants;
+            _isOfflineMode ||
+            cachedData['has_any'] == true ||
+            _usingCachedParticipants;
       });
     }
   }
@@ -645,11 +676,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
         }
       }
 
-      candidates.add({
-        'student_id': sid,
-        'name': name,
-        'id_number': idNum,
-      });
+      candidates.add({'student_id': sid, 'name': name, 'id_number': idNum});
     }
 
     candidates.sort((a, b) => (a['name'] ?? '').compareTo(b['name'] ?? ''));
@@ -664,11 +691,13 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
         (usesSessionsRaw?.toString().toLowerCase().trim() == 'true')) {
       return true;
     }
-    final eventMode =
-        (widget.event['event_mode']?.toString() ?? '').toLowerCase().trim();
+    final eventMode = (widget.event['event_mode']?.toString() ?? '')
+        .toLowerCase()
+        .trim();
     if (eventMode == 'seminar_based') return true;
-    final eventStructure =
-        (widget.event['event_structure']?.toString() ?? '').toLowerCase().trim();
+    final eventStructure = (widget.event['event_structure']?.toString() ?? '')
+        .toLowerCase()
+        .trim();
     return eventStructure == 'one_seminar' || eventStructure == 'two_seminars';
   }
 
@@ -707,10 +736,11 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
   }
 
   int _sessionWindowMinutes(Map<String, dynamic> session) {
-    final raw = (session['scan_window_minutes'] ??
-            session['attendance_window_minutes'] ??
-            30)
-        .toString();
+    final raw =
+        (session['scan_window_minutes'] ??
+                session['attendance_window_minutes'] ??
+                30)
+            .toString();
     final parsed = int.tryParse(raw) ?? 30;
     return parsed < 1 ? 30 : parsed;
   }
@@ -775,9 +805,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     return _getSessionAttendance(p).where(_sessionRowIsPresent).toList();
   }
 
-  List<Map<String, dynamic>> _visibleSessionIndicators(
-    Map<String, dynamic> p,
-  ) {
+  List<Map<String, dynamic>> _visibleSessionIndicators(Map<String, dynamic> p) {
     final present = _getPresentSessionAttendance(p);
     if (present.isNotEmpty) return present;
     final absent = _getSessionAttendance(p).where(_sessionRowIsAbsent).toList();
@@ -797,6 +825,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       return 'unscanned';
     }
   }
+
   String _getAttStatus(Map<String, dynamic> p) {
     if (_isSeminarBasedEvent()) {
       final sessionAttendance = _getSessionAttendance(p);
@@ -864,7 +893,9 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     return DateFormat('hh:mm a').format(local);
   }
 
-  Map<String, dynamic>? _canonicalTicketAttendance(Map<String, dynamic> participant) {
+  Map<String, dynamic>? _canonicalTicketAttendance(
+    Map<String, dynamic> participant,
+  ) {
     try {
       final tickets = participant['tickets'];
       if (tickets == null || (tickets is List && tickets.isEmpty)) return null;
@@ -873,17 +904,25 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
 
       final attendanceRaw = ticket['attendance'];
       final attendance = attendanceRaw is List
-          ? attendanceRaw.whereType<Map>().map(Map<String, dynamic>.from).toList()
+          ? attendanceRaw
+                .whereType<Map>()
+                .map(Map<String, dynamic>.from)
+                .toList()
           : (attendanceRaw is Map
-              ? <Map<String, dynamic>>[Map<String, dynamic>.from(attendanceRaw)]
-              : <Map<String, dynamic>>[]);
+                ? <Map<String, dynamic>>[
+                    Map<String, dynamic>.from(attendanceRaw),
+                  ]
+                : <Map<String, dynamic>>[]);
       if (attendance.isEmpty) return null;
 
       int rank(Map<String, dynamic> row) {
         final checkIn = (row['check_in_at']?.toString() ?? '').trim();
         final status = (row['status']?.toString() ?? '').trim().toLowerCase();
         if (checkIn.isNotEmpty) return 0;
-        if (status == 'present' || status == 'late' || status == 'early' || status == 'scanned') {
+        if (status == 'present' ||
+            status == 'late' ||
+            status == 'early' ||
+            status == 'scanned') {
           return 1;
         }
         if (status == 'absent') return 3;
@@ -924,8 +963,10 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       if (presentRows.isEmpty) return '-';
 
       presentRows.sort((a, b) {
-        final aSessionNo = int.tryParse(a['session_no']?.toString() ?? '') ?? 999;
-        final bSessionNo = int.tryParse(b['session_no']?.toString() ?? '') ?? 999;
+        final aSessionNo =
+            int.tryParse(a['session_no']?.toString() ?? '') ?? 999;
+        final bSessionNo =
+            int.tryParse(b['session_no']?.toString() ?? '') ?? 999;
         final bySessionNo = aSessionNo.compareTo(bSessionNo);
         if (bySessionNo != 0) return bySessionNo;
 
@@ -946,7 +987,9 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       });
 
       final primary = presentRows.first;
-      return _formatStoredTime(primary['check_in_at'] ?? primary['last_scanned_at']);
+      return _formatStoredTime(
+        primary['check_in_at'] ?? primary['last_scanned_at'],
+      );
     }
 
     try {
@@ -958,6 +1001,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       return '-';
     }
   }
+
   int _getSessionCount(Map<String, dynamic> p) {
     return _getPresentSessionAttendance(p).length;
   }
@@ -982,6 +1026,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     if (title.isNotEmpty) return title;
     return 'Seminar';
   }
+
   String _sessionStatusForParticipant(
     Map<String, dynamic> participant,
     Map<String, dynamic> session,
@@ -1032,12 +1077,18 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     }
   }
 
-
-  Future<void> _toggleAssistant(Map<String, dynamic> assistant, bool val) async {
+  Future<void> _toggleAssistant(
+    Map<String, dynamic> assistant,
+    bool val,
+  ) async {
     if (!_canManageAssistants || _currentTeacherId.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Only assigned teachers can manage assistants for this event.')),
+          const SnackBar(
+            content: Text(
+              'Only assigned teachers can manage assistants for this event.',
+            ),
+          ),
         );
       }
       return;
@@ -1058,7 +1109,11 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       setState(() => assistant['allow_scan'] = oldVal);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(result['error'] ?? 'Failed to update assistant access.')),
+          SnackBar(
+            content: Text(
+              result['error'] ?? 'Failed to update assistant access.',
+            ),
+          ),
         );
       }
     }
@@ -1070,7 +1125,11 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     if (!_canManageAssistants || _currentTeacherId.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Only assigned teachers can add assistants for this event.')),
+        const SnackBar(
+          content: Text(
+            'Only assigned teachers can add assistants for this event.',
+          ),
+        ),
       );
       return;
     }
@@ -1079,7 +1138,11 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     if (baseCandidates.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No eligible participants available for assistant assignment.')),
+        const SnackBar(
+          content: Text(
+            'No eligible participants available for assistant assignment.',
+          ),
+        ),
       );
       return;
     }
@@ -1125,7 +1188,11 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                   ),
                   const Text(
                     'Assign Assistant',
-                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: Color(0xFF111827)),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w800,
+                      fontSize: 18,
+                      color: Color(0xFF111827),
+                    ),
                   ),
                   const SizedBox(height: 4),
                   const Text(
@@ -1144,7 +1211,11 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                       decoration: const InputDecoration(
                         hintText: 'Search name or ID number...',
                         border: InputBorder.none,
-                        prefixIcon: Icon(Icons.search_rounded, size: 20, color: Color(0xFF9CA3AF)),
+                        prefixIcon: Icon(
+                          Icons.search_rounded,
+                          size: 20,
+                          color: Color(0xFF9CA3AF),
+                        ),
                         contentPadding: EdgeInsets.symmetric(vertical: 10),
                       ),
                     ),
@@ -1155,12 +1226,16 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                         ? const Center(
                             child: Text(
                               'No matching students.',
-                              style: TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.w600),
+                              style: TextStyle(
+                                color: Color(0xFF6B7280),
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           )
                         : ListView.separated(
                             itemCount: filtered.length,
-                            separatorBuilder: (_, _) => const SizedBox(height: 8),
+                            separatorBuilder: (_, _) =>
+                                const SizedBox(height: 8),
                             itemBuilder: (listContext, index) {
                               final c = filtered[index];
                               final name = c['name'] ?? 'Student';
@@ -1175,7 +1250,8 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                                 Color(0xFF1E40AF),
                                 Color(0xFFB45309),
                               ];
-                              final avatarColor = avatarColors[index % avatarColors.length];
+                              final avatarColor =
+                                  avatarColors[index % avatarColors.length];
 
                               return InkWell(
                                 borderRadius: BorderRadius.circular(16),
@@ -1183,20 +1259,29 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                                     ? null
                                     : () async {
                                         if (sid.isEmpty) return;
-                                        final messenger = ScaffoldMessenger.of(context);
-                                        final navigator = Navigator.of(listContext);
-
-                                        setSheetState(() => isSubmitting = true);
-
-                                        final res = await _eventService.assignEventAssistant(
-                                          eventId: eventId,
-                                          studentId: sid,
-                                          teacherId: _currentTeacherId,
-                                          allowScan: true,
+                                        final messenger = ScaffoldMessenger.of(
+                                          context,
+                                        );
+                                        final navigator = Navigator.of(
+                                          listContext,
                                         );
 
+                                        setSheetState(
+                                          () => isSubmitting = true,
+                                        );
+
+                                        final res = await _eventService
+                                            .assignEventAssistant(
+                                              eventId: eventId,
+                                              studentId: sid,
+                                              teacherId: _currentTeacherId,
+                                              allowScan: true,
+                                            );
+
                                         if (!mounted) return;
-                                        setSheetState(() => isSubmitting = false);
+                                        setSheetState(
+                                          () => isSubmitting = false,
+                                        );
 
                                         if (res['ok'] == true) {
                                           if (navigator.canPop()) {
@@ -1205,11 +1290,20 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                                           await _loadData(true);
                                           if (!mounted) return;
                                           messenger.showSnackBar(
-                                            SnackBar(content: Text('$name assigned as assistant.')),
+                                            SnackBar(
+                                              content: Text(
+                                                '$name assigned as assistant.',
+                                              ),
+                                            ),
                                           );
                                         } else {
                                           messenger.showSnackBar(
-                                            SnackBar(content: Text(res['error'] ?? 'Failed to assign assistant.')),
+                                            SnackBar(
+                                              content: Text(
+                                                res['error'] ??
+                                                    'Failed to assign assistant.',
+                                              ),
+                                            ),
                                           );
                                         }
                                       },
@@ -1220,55 +1314,93 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                                     borderRadius: BorderRadius.circular(16),
                                     boxShadow: [
                                       BoxShadow(
-                                        color: Colors.black.withValues(alpha: 0.04),
+                                        color: Colors.black.withValues(
+                                          alpha: 0.04,
+                                        ),
                                         blurRadius: 12,
                                         offset: const Offset(0, 2),
-                                      )
+                                      ),
                                     ],
-                                    border: Border.all(color: const Color(0xFFF3F4F6)),
+                                    border: Border.all(
+                                      color: const Color(0xFFF3F4F6),
+                                    ),
                                   ),
                                   child: Row(
                                     children: [
                                       Container(
                                         width: 46,
                                         height: 46,
-                                        decoration: BoxDecoration(color: avatarColor, shape: BoxShape.circle),
+                                        decoration: BoxDecoration(
+                                          color: avatarColor,
+                                          shape: BoxShape.circle,
+                                        ),
                                         child: Center(
                                           child: Text(
                                             initials,
-                                            style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16),
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w800,
+                                              fontSize: 16,
+                                            ),
                                           ),
                                         ),
                                       ),
                                       const SizedBox(width: 14),
                                       Expanded(
                                         child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
                                           children: [
                                             Text(
                                               name,
-                                              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF111827)),
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w800,
+                                                fontSize: 15,
+                                                color: Color(0xFF111827),
+                                              ),
                                             ),
                                             const SizedBox(height: 2),
                                             Text(
                                               'Student ID: $idNum',
-                                              style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280), fontWeight: FontWeight.w500),
+                                              style: const TextStyle(
+                                                fontSize: 12,
+                                                color: Color(0xFF6B7280),
+                                                fontWeight: FontWeight.w500,
+                                              ),
                                             ),
                                           ],
                                         ),
                                       ),
                                       Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 8,
+                                        ),
                                         decoration: BoxDecoration(
-                                          color: TeacherThemeUtils.primary.withValues(alpha: 0.1),
-                                          borderRadius: BorderRadius.circular(10),
+                                          color: TeacherThemeUtils.primary
+                                              .withValues(alpha: 0.1),
+                                          borderRadius: BorderRadius.circular(
+                                            10,
+                                          ),
                                         ),
                                         child: const Row(
                                           mainAxisSize: MainAxisSize.min,
                                           children: [
-                                            Icon(Icons.add_rounded, color: TeacherThemeUtils.primary, size: 16),
+                                            Icon(
+                                              Icons.add_rounded,
+                                              color: TeacherThemeUtils.primary,
+                                              size: 16,
+                                            ),
                                             SizedBox(width: 6),
-                                            Text('Assign', style: TextStyle(color: TeacherThemeUtils.primary, fontWeight: FontWeight.w700, fontSize: 13)),
+                                            Text(
+                                              'Assign',
+                                              style: TextStyle(
+                                                color:
+                                                    TeacherThemeUtils.primary,
+                                                fontWeight: FontWeight.w700,
+                                                fontSize: 13,
+                                              ),
+                                            ),
                                           ],
                                         ),
                                       ),
@@ -1292,13 +1424,23 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     if (participants.isEmpty) return;
 
     final rows = <List<dynamic>>[];
-    rows.add(['Name', 'Email', 'ID Number', 'Course', 'Year Level', 'Status', 'Check-in Time']);
+    rows.add([
+      'Name',
+      'Email',
+      'ID Number',
+      'Course',
+      'Year Level',
+      'Status',
+      'Check-in Time',
+    ]);
 
     for (final p in participants) {
       final name = _getName(p);
       final u = p['users'];
       final email = (u is Map ? u['email'] : null)?.toString() ?? '';
-      final idNum = (u is Map ? (u['id_number'] ?? u['student_id']) : null)?.toString() ?? '';
+      final idNum =
+          (u is Map ? (u['id_number'] ?? u['student_id']) : null)?.toString() ??
+          '';
       final course = (u is Map ? u['course'] : null)?.toString() ?? '';
       final yearLevel = (u is Map ? u['year_level'] : null)?.toString() ?? '';
       final attStatus = _getAttStatus(p);
@@ -1307,15 +1449,20 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       rows.add([name, email, idNum, course, yearLevel, attStatus, checkIn]);
     }
 
-    final csvData = rows.map((row) {
-      return row.map((cell) {
-        final s = cell.toString().replaceAll('"', '""');
-        return '"$s"';
-      }).join(',');
-    }).join('\n');
+    final csvData = rows
+        .map((row) {
+          return row
+              .map((cell) {
+                final s = cell.toString().replaceAll('"', '""');
+                return '"$s"';
+              })
+              .join(',');
+        })
+        .join('\n');
 
     final directory = await getTemporaryDirectory();
-    final path = '${directory.path}/PulseConnect_Participants_${DateTime.now().millisecondsSinceEpoch}.csv';
+    final path =
+        '${directory.path}/PulseConnect_Participants_${DateTime.now().millisecondsSinceEpoch}.csv';
     final file = File(path);
     await file.writeAsString(csvData);
 
@@ -1357,10 +1504,14 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                   Icon(
                     isApproved
                         ? Icons.check_circle_outline_rounded
-                        : (isPending ? Icons.hourglass_top_rounded : Icons.cancel_rounded),
+                        : (isPending
+                              ? Icons.hourglass_top_rounded
+                              : Icons.cancel_rounded),
                     color: isApproved
                         ? Colors.blue.shade700
-                        : (isPending ? Colors.orange.shade700 : Colors.red.shade700),
+                        : (isPending
+                              ? Colors.orange.shade700
+                              : Colors.red.shade700),
                     size: 18,
                   ),
                   const SizedBox(width: 10),
@@ -1369,12 +1520,14 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                       isApproved
                           ? 'Event is approved! It will be visible to students once published.'
                           : (isPending
-                              ? 'This event is pending admin approval.'
-                              : 'This event was rejected. Reason: Conflict with schedule.'),
+                                ? 'This event is pending admin approval.'
+                                : 'This event was rejected. Reason: Conflict with schedule.'),
                       style: TextStyle(
                         color: isApproved
                             ? Colors.blue.shade900
-                            : (isPending ? Colors.orange.shade900 : Colors.red.shade900),
+                            : (isPending
+                                  ? Colors.orange.shade900
+                                  : Colors.red.shade900),
                         fontWeight: FontWeight.w600,
                         fontSize: 13,
                       ),
@@ -1392,8 +1545,14 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                 indicatorWeight: 3,
                 labelColor: TeacherThemeUtils.primary,
                 unselectedLabelColor: Colors.grey.shade500,
-                labelStyle: const TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
-                unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                labelStyle: const TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 13,
+                ),
+                unselectedLabelStyle: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
                 tabs: const [
                   Tab(text: 'Details'),
                   Tab(text: 'Participants'),
@@ -1421,6 +1580,30 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
   String _getTargetLabel(String? val) {
     if (val == null || val.toLowerCase() == 'all') return 'All Year Levels';
     if (val.toLowerCase() == 'none') return 'No Target';
+    final rawUpper = val.trim().toUpperCase();
+    final multi = RegExp(
+      r'^COURSE\s*=\s*(ALL|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
+    ).firstMatch(rawUpper);
+    if (multi != null) {
+      final course = multi.group(1) == 'ALL'
+          ? 'All Courses'
+          : (multi.group(1) ?? 'All Courses');
+      final yearsRaw = (multi.group(2) ?? '')
+          .split(',')
+          .map((e) => e.trim().toUpperCase())
+          .where((e) => ['1', '2', '3', '4'].contains(e))
+          .toList();
+      const yearLabel = {
+        '1': '1st Year',
+        '2': '2nd Year',
+        '3': '3rd Year',
+        '4': '4th Year',
+      };
+      final years = yearsRaw.isEmpty
+          ? 'All Levels'
+          : yearsRaw.map((y) => yearLabel[y] ?? y).join(', ');
+      return '$course - $years';
+    }
     final map = {
       '1': '1st Year',
       '2': '2nd Year',
@@ -1437,7 +1620,8 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     final eventType = (widget.event['event_type'] ?? '').toString().trim();
     final graceTime = (widget.event['grace_time']?.toString() ?? '').trim();
     final target = _getTargetLabel(widget.event['event_for']?.toString());
-    final description = (widget.event['description'] ?? 'No description provided.').toString();
+    final description =
+        (widget.event['description'] ?? 'No description provided.').toString();
     final isSeminarBased = _isSeminarBasedEvent();
 
     return ListView(
@@ -1462,7 +1646,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                 color: Colors.black.withValues(alpha: 0.02),
                 blurRadius: 15,
                 offset: const Offset(0, 4),
-              )
+              ),
             ],
             border: Border.all(color: const Color(0xFFF3F4F6)),
           ),
@@ -1485,7 +1669,11 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
                   child: Row(
                     children: const [
-                      Icon(Icons.auto_stories_rounded, size: 16, color: TeacherThemeUtils.primary),
+                      Icon(
+                        Icons.auto_stories_rounded,
+                        size: 16,
+                        color: TeacherThemeUtils.primary,
+                      ),
                       SizedBox(width: 8),
                       Text(
                         'Seminar Sessions',
@@ -1528,7 +1716,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                 color: Colors.black.withValues(alpha: 0.02),
                 blurRadius: 15,
                 offset: const Offset(0, 4),
-              )
+              ),
             ],
             border: Border.all(color: const Color(0xFFF3F4F6)),
           ),
@@ -1545,6 +1733,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       ],
     );
   }
+
   Widget _buildSessionScheduleSection() {
     if (_eventSessions.isEmpty) {
       return Container(
@@ -1571,16 +1760,21 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
         final index = entry.key;
         final session = entry.value;
         final rawTitle = (session['title']?.toString() ?? '').trim();
-        final title = rawTitle.isNotEmpty ? rawTitle : buildSessionDisplayName(session);
+        final title = rawTitle.isNotEmpty
+            ? rawTitle
+            : buildSessionDisplayName(session);
         final start = parseStoredEventDateTime(session['start_at']);
         final end = parseStoredEventDateTime(session['end_at']);
         final topic = (session['topic']?.toString() ?? '').trim();
         final showTopic =
-            topic.isNotEmpty && !title.toLowerCase().contains(topic.toLowerCase());
+            topic.isNotEmpty &&
+            !title.toLowerCase().contains(topic.toLowerCase());
 
         return Container(
           width: double.infinity,
-          margin: EdgeInsets.only(bottom: index == _eventSessions.length - 1 ? 0 : 12),
+          margin: EdgeInsets.only(
+            bottom: index == _eventSessions.length - 1 ? 0 : 12,
+          ),
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
             color: const Color(0xFFF8FAFC),
@@ -1702,11 +1896,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       );
     }
 
-    return Wrap(
-      spacing: spacing,
-      runSpacing: spacing,
-      children: cards,
-    );
+    return Wrap(spacing: spacing, runSpacing: spacing, children: cards);
   }
 
   Widget _buildTeacherScheduleInfoCard({
@@ -1767,7 +1957,11 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
     );
   }
 
-  Widget _buildTeacherSessionMetaRow(IconData icon, String label, String value) {
+  Widget _buildTeacherSessionMetaRow(
+    IconData icon,
+    String label,
+    String value,
+  ) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -1828,7 +2022,9 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
         ? const Color(0xFFD97706)
         : const Color(0xFF2563EB);
     final title = hasPending
-        ? (_isOfflineMode ? 'Offline monitoring active' : 'Pending offline sync')
+        ? (_isOfflineMode
+              ? 'Offline monitoring active'
+              : 'Pending offline sync')
         : 'Showing saved participant data';
     final message = hasPending
         ? '$_pendingOfflineParticipantCount participant check-in${_pendingOfflineParticipantCount == 1 ? '' : 's'} still pending sync.'
@@ -1885,33 +2081,40 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
         ? _participants
         : _participants.where((p) {
             final name = _getName(p).toLowerCase();
-            final email = ((p['users'] is Map ? p['users']['email'] : null) ?? '')
-                .toString()
-                .toLowerCase();
+            final email =
+                ((p['users'] is Map ? p['users']['email'] : null) ?? '')
+                    .toString()
+                    .toLowerCase();
             return name.contains(_searchQuery.toLowerCase()) ||
                 email.contains(_searchQuery.toLowerCase());
           }).toList();
 
     final isSeminarBased = _isSeminarBasedEvent();
-    final presentCount =
-        _participants.where((p) => _getAttStatus(p) == 'present').length;
-    final absentCount =
-        _participants.where((p) => _getAttStatus(p) == 'absent').length;
+    final presentCount = _participants
+        .where((p) => _getAttStatus(p) == 'present')
+        .length;
+    final absentCount = _participants
+        .where((p) => _getAttStatus(p) == 'absent')
+        .length;
     final seminarOneCount = _eventSessions.isNotEmpty
         ? _participants
-            .where((p) => _hasSessionScan(
+              .where(
+                (p) => _hasSessionScan(
                   p,
                   _eventSessions.first['id']?.toString() ?? '',
-                ))
-            .length
+                ),
+              )
+              .length
         : 0;
     final seminarTwoCount = _eventSessions.length > 1
         ? _participants
-            .where((p) => _hasSessionScan(
+              .where(
+                (p) => _hasSessionScan(
                   p,
                   _eventSessions[1]['id']?.toString() ?? '',
-                ))
-            .length
+                ),
+              )
+              .length
         : 0;
 
     return Column(
@@ -2045,7 +2248,13 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       ],
     );
   }
-  Widget _buildStatChip(String label, String value, Color color, IconData icon) {
+
+  Widget _buildStatChip(
+    String label,
+    String value,
+    Color color,
+    IconData icon,
+  ) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
       decoration: BoxDecoration(
@@ -2057,9 +2266,26 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
         children: [
           Icon(icon, color: color, size: 18),
           const SizedBox(height: 6),
-          Text(value, style: TextStyle(color: color, fontWeight: FontWeight.w800, fontSize: 20, height: 1.0)),
+          Text(
+            value,
+            style: TextStyle(
+              color: color,
+              fontWeight: FontWeight.w800,
+              fontSize: 20,
+              height: 1.0,
+            ),
+          ),
           const SizedBox(height: 2),
-          Text(label, style: TextStyle(color: color.withValues(alpha: 0.75), fontWeight: FontWeight.w600, fontSize: 10), maxLines: 1, overflow: TextOverflow.ellipsis),
+          Text(
+            label,
+            style: TextStyle(
+              color: color.withValues(alpha: 0.75),
+              fontWeight: FontWeight.w600,
+              fontSize: 10,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
         ],
       ),
     );
@@ -2215,8 +2441,10 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                         ),
                       if (isSeminarBased)
                         ..._eventSessions.map((session) {
-                          final status =
-                              _sessionStatusForParticipant(p, session);
+                          final status = _sessionStatusForParticipant(
+                            p,
+                            session,
+                          );
                           final label = _sessionIndicatorLabel(session);
                           return Container(
                             padding: const EdgeInsets.symmetric(
@@ -2244,8 +2472,8 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                           final status = _sessionRowIsPresent(scan)
                               ? 'present'
                               : (_sessionRowIsAbsent(scan)
-                                  ? 'absent'
-                                  : 'unscanned');
+                                    ? 'absent'
+                                    : 'unscanned');
                           return Container(
                             padding: const EdgeInsets.symmetric(
                               horizontal: 8,
@@ -2274,8 +2502,10 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
                 Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
                   decoration: BoxDecoration(
                     color: statusBg,
                     borderRadius: BorderRadius.circular(8),
@@ -2335,6 +2565,7 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
       ),
     );
   }
+
   Widget _buildEmptyState(String message, IconData icon) {
     return Center(
       child: Column(
@@ -2342,13 +2573,26 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
         children: [
           Container(
             padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(color: const Color(0xFFF3F4F6), shape: BoxShape.circle),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF3F4F6),
+              shape: BoxShape.circle,
+            ),
             child: Icon(icon, size: 40, color: Colors.grey.shade400),
           ),
           const SizedBox(height: 16),
-          Text(message, style: const TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.w600, fontSize: 14)),
+          Text(
+            message,
+            style: const TextStyle(
+              color: Color(0xFF6B7280),
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+            ),
+          ),
           const SizedBox(height: 8),
-          const Text('Pull down to refresh', style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12)),
+          const Text(
+            'Pull down to refresh',
+            style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12),
+          ),
         ],
       ),
     );
@@ -2369,29 +2613,49 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Authorized Scanners', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16, color: Color(0xFF111827))),
+                    const Text(
+                      'Authorized Scanners',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 16,
+                        color: Color(0xFF111827),
+                      ),
+                    ),
                     Text(
                       isExpired
                           ? 'This event is completed. Assistant management is disabled.'
                           : _canManageAssistants
-                              ? 'These students can scan tickets on your behalf.'
-                              : 'Assistant management is limited to teachers assigned by admin.',
-                      style: const TextStyle(color: Color(0xFF6B7280), fontSize: 12),
+                          ? 'These students can scan tickets on your behalf.'
+                          : 'Assistant management is limited to teachers assigned by admin.',
+                      style: const TextStyle(
+                        color: Color(0xFF6B7280),
+                        fontSize: 12,
+                      ),
                     ),
                   ],
                 ),
               ),
               ElevatedButton.icon(
-                onPressed: (_canManageAssistants && !isExpired) ? _showAssignAssistantSheet : null,
+                onPressed: (_canManageAssistants && !isExpired)
+                    ? _showAssignAssistantSheet
+                    : null,
                 icon: const Icon(Icons.person_add_rounded, size: 16),
                 label: const Text('Assign'),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: TeacherThemeUtils.primary,
                   foregroundColor: Colors.white,
                   elevation: 0,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  textStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 10,
+                  ),
+                  textStyle: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 13,
+                  ),
                 ),
               ),
             ],
@@ -2409,16 +2673,16 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                       height: MediaQuery.of(context).size.height * 0.5,
                       alignment: Alignment.center,
                       child: _buildEmptyState(
-                        isExpired 
+                        isExpired
                             ? 'No assistants were assigned to this event.'
                             : _canManageAssistants
-                                ? 'No assistants assigned yet.'
-                                : 'Only assigned teachers can manage assistants.',
+                            ? 'No assistants assigned yet.'
+                            : 'Only assigned teachers can manage assistants.',
                         isExpired
                             ? Icons.person_off_rounded
                             : _canManageAssistants
-                                ? Icons.person_off_rounded
-                                : Icons.lock_outline_rounded,
+                            ? Icons.person_off_rounded
+                            : Icons.lock_outline_rounded,
                       ),
                     ),
                   ),
@@ -2426,13 +2690,14 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
               : ListView.separated(
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
                   itemCount: _assistants.length,
-                  separatorBuilder: (context, index) => const SizedBox(height: 10),
+                  separatorBuilder: (context, index) =>
+                      const SizedBox(height: 10),
                   itemBuilder: (context, i) {
                     final a = _assistants[i];
                     final assistantName = _getAssistantName(a);
                     final assistantIdNumber = _getAssistantStudentNumber(a);
                     final initials = _getInitials(assistantName);
-                    
+
                     const avatarColors = [
                       TeacherThemeUtils.primary,
                       Color(0xFF1D4ED8),
@@ -2447,7 +2712,13 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                       decoration: BoxDecoration(
                         color: Colors.white,
                         borderRadius: BorderRadius.circular(16),
-                        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 12, offset: const Offset(0, 2))],
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.04),
+                            blurRadius: 12,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
                         border: Border.all(color: const Color(0xFFF3F4F6)),
                       ),
                       child: Row(
@@ -2455,11 +2726,18 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                           Container(
                             width: 46,
                             height: 46,
-                            decoration: BoxDecoration(color: avatarColor, shape: BoxShape.circle),
+                            decoration: BoxDecoration(
+                              color: avatarColor,
+                              shape: BoxShape.circle,
+                            ),
                             child: Center(
                               child: Text(
                                 initials,
-                                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 16),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 16,
+                                ),
                               ),
                             ),
                           ),
@@ -2470,12 +2748,20 @@ class _TeacherEventManageState extends State<TeacherEventManage> with SingleTick
                               children: [
                                 Text(
                                   assistantName,
-                                  style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 15, color: Color(0xFF111827)),
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 15,
+                                    color: Color(0xFF111827),
+                                  ),
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
                                   'Student ID: $assistantIdNumber',
-                                  style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280), fontWeight: FontWeight.w500),
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFF6B7280),
+                                    fontWeight: FontWeight.w500,
+                                  ),
                                 ),
                               ],
                             ),

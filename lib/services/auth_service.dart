@@ -70,7 +70,9 @@ class AuthService {
       }
 
       final cachedRole =
-          (parsed['role']?.toString() ?? prefs.getString('user_role') ?? 'student')
+          (parsed['role']?.toString() ??
+                  prefs.getString('user_role') ??
+                  'student')
               .trim();
       if (cachedRole.isNotEmpty) {
         parsed['role'] = cachedRole;
@@ -307,26 +309,22 @@ class AuthService {
         try {
           final offlineSyncService = OfflineSyncService();
           final isTeacher = role.toLowerCase() == 'teacher';
-          restoredOfflineQueueCount = await offlineSyncService.pendingQueueCount(
-            actorId: userId,
-            isTeacher: isTeacher,
-          );
-          await offlineSyncService.syncPendingQueue(
-            actorId: userId,
-            isTeacher: isTeacher,
-          ).then((result) {
-            syncedOfflineQueueCount =
-                (result['synced'] is num)
+          restoredOfflineQueueCount = await offlineSyncService
+              .pendingQueueCount(actorId: userId, isTeacher: isTeacher);
+          await offlineSyncService
+              .syncPendingQueue(actorId: userId, isTeacher: isTeacher)
+              .then((result) {
+                syncedOfflineQueueCount = (result['synced'] is num)
                     ? (result['synced'] as num).toInt()
                     : int.tryParse(result['synced']?.toString() ?? '') ?? 0;
-            reconciledOfflineQueueCount =
-                (result['conflict_resolved'] is num)
+                reconciledOfflineQueueCount =
+                    (result['conflict_resolved'] is num)
                     ? (result['conflict_resolved'] as num).toInt()
                     : int.tryParse(
                             result['conflict_resolved']?.toString() ?? '',
                           ) ??
-                        0;
-          });
+                          0;
+              });
           await offlineSyncService.refreshSnapshotForCurrentScanner(
             actorId: userId,
             isTeacher: isTeacher,
@@ -407,11 +405,32 @@ class AuthService {
         'role': 'student',
       };
 
-      final response = await _supabase
-          .from('users')
-          .insert(payload)
-          .select()
-          .single();
+      dynamic response;
+      try {
+        response = await _supabase
+            .from('users')
+            .insert(payload)
+            .select()
+            .single();
+      } catch (e) {
+        final message = e.toString().toLowerCase();
+        final preverifyConstraintError =
+            message.contains('users_account_status_check') &&
+            message.contains('preverify');
+        if (!preverifyConstraintError) {
+          rethrow;
+        }
+
+        // Compatibility fallback for environments where DB constraint
+        // was not migrated yet to include "preverify".
+        final fallbackPayload = Map<String, dynamic>.from(payload);
+        fallbackPayload['account_status'] = 'pending';
+        response = await _supabase
+            .from('users')
+            .insert(fallbackPayload)
+            .select()
+            .single();
+      }
 
       return {'ok': true, 'user': response};
     } catch (e) {
@@ -633,10 +652,7 @@ class AuthService {
         photoUrl,
         photoPath: photoPath ?? _extractStoragePathFromUrl(photoUrl),
       );
-      final response = <String, dynamic>{
-        'ok': true,
-        'user': userData,
-      };
+      final response = <String, dynamic>{'ok': true, 'user': userData};
       if (warning != null) {
         response['warning'] = warning;
       }

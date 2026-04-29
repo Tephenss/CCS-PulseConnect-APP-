@@ -31,10 +31,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   final _seminar2TitleCtrl = TextEditingController();
   final _seminar2StartCtrl = TextEditingController();
   final _seminar2EndCtrl = TextEditingController();
-  
+
   String _eventType = 'Event';
   String _targetCourse = 'ALL';
-  String _targetYear = 'ALL';
+  List<String> _targetYears = ['ALL'];
   String _eventMode = 'simple';
   int _seminarCount = 1;
   final _graceTimeCtrl = TextEditingController(text: '15');
@@ -64,7 +64,13 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       final parsed = _dateTimeFormat.parseStrict(text.trim());
       // Keep wall-clock components stable so event times stay Manila-based
       // even if the device/emulator timezone is changed.
-      return DateTime(parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute);
+      return DateTime(
+        parsed.year,
+        parsed.month,
+        parsed.day,
+        parsed.hour,
+        parsed.minute,
+      );
     } catch (_) {
       return null;
     }
@@ -112,7 +118,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       if (_eventMode == 'seminar_based') {
         DateTime? s1 = _parseDateTime(_seminar1StartCtrl.text);
         DateTime? e1 = _parseDateTime(_seminar1EndCtrl.text);
-        if (_seminar1TitleCtrl.text.trim().isEmpty || s1 == null || e1 == null) {
+        if (_seminar1TitleCtrl.text.trim().isEmpty ||
+            s1 == null ||
+            e1 == null) {
           setState(
             () => _validationError =
                 'Seminar 1 title, start, and end are required.',
@@ -121,7 +129,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         }
         if (e1.isBefore(s1) || e1.isAtSameMomentAs(s1)) {
           setState(
-            () => _validationError = 'Seminar 1 end time must be after start time.',
+            () => _validationError =
+                'Seminar 1 end time must be after start time.',
           );
           return false;
         }
@@ -129,7 +138,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         if (_seminarCount >= 2) {
           DateTime? s2 = _parseDateTime(_seminar2StartCtrl.text);
           DateTime? e2 = _parseDateTime(_seminar2EndCtrl.text);
-          if (_seminar2TitleCtrl.text.trim().isEmpty || s2 == null || e2 == null) {
+          if (_seminar2TitleCtrl.text.trim().isEmpty ||
+              s2 == null ||
+              e2 == null) {
             setState(
               () => _validationError =
                   'Seminar 2 title, start, and end are required.',
@@ -138,8 +149,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           }
           if (e2.isBefore(s2) || e2.isAtSameMomentAs(s2)) {
             setState(
-              () =>
-                  _validationError = 'Seminar 2 end time must be after start time.',
+              () => _validationError =
+                  'Seminar 2 end time must be after start time.',
             );
             return false;
           }
@@ -154,7 +165,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         DateTime? s1 = _parseDateTime(_startDateCtrl.text);
         DateTime? e1 = _parseDateTime(_endDateCtrl.text);
         if (s1 == null || e1 == null) {
-          setState(() => _validationError = 'Start and end dates are required.');
+          setState(
+            () => _validationError = 'Start and end dates are required.',
+          );
           return false;
         }
         final sameDay =
@@ -174,14 +187,15 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           return false;
         }
         if (e1.isBefore(s1) || e1.isAtSameMomentAs(s1)) {
-          setState(() => _validationError = 'End time must be after start time.');
+          setState(
+            () => _validationError = 'End time must be after start time.',
+          );
           return false;
         }
       }
     }
     return true;
   }
-
 
   @override
   void initState() {
@@ -225,7 +239,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     final user = await _authService.getCurrentUser();
     final teacherId = user?['id'];
 
-    final eventFor = _encodeTargetParticipant(_targetCourse, _targetYear);
+    final eventFor = _encodeTargetParticipant(_targetCourse, _targetYears);
     final graceTime = int.tryParse(_graceTimeCtrl.text) ?? 15;
 
     Map<String, dynamic> payload;
@@ -233,7 +247,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       final sessions = <Map<String, dynamic>>[
         {
           'title': _seminar1TitleCtrl.text.trim(),
-          'start_at': _toUtcIsoFromManila(_parseDateTime(_seminar1StartCtrl.text)!),
+          'start_at': _toUtcIsoFromManila(
+            _parseDateTime(_seminar1StartCtrl.text)!,
+          ),
           'end_at': _toUtcIsoFromManila(_parseDateTime(_seminar1EndCtrl.text)!),
           'location': _locationCtrl.text.trim(),
           'scan_window_minutes': graceTime,
@@ -243,7 +259,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       if (_seminarCount >= 2) {
         sessions.add({
           'title': _seminar2TitleCtrl.text.trim(),
-          'start_at': _toUtcIsoFromManila(_parseDateTime(_seminar2StartCtrl.text)!),
+          'start_at': _toUtcIsoFromManila(
+            _parseDateTime(_seminar2StartCtrl.text)!,
+          ),
           'end_at': _toUtcIsoFromManila(_parseDateTime(_seminar2EndCtrl.text)!),
           'location': _locationCtrl.text.trim(),
           'scan_window_minutes': graceTime,
@@ -251,14 +269,16 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         });
       }
 
-      final starts = sessions
-          .map((s) => DateTime.parse(s['start_at'] as String).toUtc())
-          .toList()
-        ..sort();
-      final ends = sessions
-          .map((s) => DateTime.parse(s['end_at'] as String).toUtc())
-          .toList()
-        ..sort();
+      final starts =
+          sessions
+              .map((s) => DateTime.parse(s['start_at'] as String).toUtc())
+              .toList()
+            ..sort();
+      final ends =
+          sessions
+              .map((s) => DateTime.parse(s['end_at'] as String).toUtc())
+              .toList()
+            ..sort();
       final firstStart = starts.first;
       final lastEnd = ends.last;
 
@@ -273,7 +293,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         'grace_time': graceTime,
         'created_by': teacherId,
         'event_mode': 'seminar_based',
-        'event_span': (firstStart.year == lastEnd.year &&
+        'event_span':
+            (firstStart.year == lastEnd.year &&
                 firstStart.month == lastEnd.month &&
                 firstStart.day == lastEnd.day)
             ? 'single_day'
@@ -294,7 +315,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         'grace_time': graceTime,
         'created_by': teacherId,
         'event_mode': 'simple',
-        'event_span': (s1.year == e1.year && s1.month == e1.month && s1.day == e1.day)
+        'event_span':
+            (s1.year == e1.year && s1.month == e1.month && s1.day == e1.day)
             ? 'single_day'
             : 'multi_day',
         'sessions': const [],
@@ -312,33 +334,77 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     }
   }
 
-  String _encodeTargetParticipant(String courseValue, String yearValue) {
+  List<String> _normalizeTargetYears(List<String> values) {
+    final cleaned = values
+        .map((v) => v.trim().toUpperCase())
+        .where((v) => ['ALL', '1', '2', '3', '4'].contains(v))
+        .toList();
+    if (cleaned.contains('ALL') || cleaned.isEmpty) {
+      return ['ALL'];
+    }
+    return cleaned.toSet().toList();
+  }
+
+  void _toggleTargetYear(String value, bool selected) {
+    final normalizedValue = value.trim().toUpperCase();
+    final current = List<String>.from(_targetYears);
+
+    if (normalizedValue == 'ALL') {
+      setState(() {
+        _targetYears = selected ? ['ALL'] : ['ALL'];
+      });
+      return;
+    }
+
+    if (selected) {
+      current.remove('ALL');
+      current.add(normalizedValue);
+    } else {
+      current.remove(normalizedValue);
+    }
+
+    setState(() {
+      _targetYears = _normalizeTargetYears(current);
+    });
+  }
+
+  String _encodeTargetParticipant(String courseValue, List<String> yearValues) {
     final course = courseValue.trim().toUpperCase();
-    final year = yearValue.trim().toUpperCase();
+    final years = _normalizeTargetYears(yearValues);
     final normalizedCourse = ['ALL', 'BSIT', 'BSCS'].contains(course)
         ? course
         : 'ALL';
-    final normalizedYear = ['ALL', '1', '2', '3', '4'].contains(year)
-        ? year
-        : 'ALL';
 
-    if (normalizedCourse == 'ALL' && normalizedYear == 'ALL') return 'All';
-    if (normalizedCourse == 'ALL') return normalizedYear;
-    if (normalizedYear == 'ALL') return normalizedCourse;
-    return '$normalizedCourse-$normalizedYear';
+    if (normalizedCourse == 'ALL' &&
+        years.length == 1 &&
+        years.first == 'ALL') {
+      return 'All';
+    }
+    if (normalizedCourse == 'ALL' && years.length == 1) {
+      return years.first;
+    }
+    if (years.length == 1 && years.first == 'ALL') {
+      return normalizedCourse;
+    }
+    return 'COURSE=$normalizedCourse;YEARS=${years.join(',')}';
   }
-
 
   void _handleSuccess() {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Event(s) saved successfully!'), backgroundColor: Color(0xFF60A5FA)),
+      const SnackBar(
+        content: Text('Event(s) saved successfully!'),
+        backgroundColor: Color(0xFF60A5FA),
+      ),
     );
     Navigator.pop(context, true);
   }
 
   void _handleError(dynamic error) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Failed to save: $error'), backgroundColor: Colors.red),
+      SnackBar(
+        content: Text('Failed to save: $error'),
+        backgroundColor: Colors.red,
+      ),
     );
   }
 
@@ -347,7 +413,6 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     if (_currentStep < 3) setState(() => _currentStep++);
   }
 
-
   void _back() {
     if (_currentStep > 1) setState(() => _currentStep--);
   }
@@ -355,7 +420,11 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   // --- Voice Control Logic ---
   void _listenToggle() async {
     if (!_speechEnabled) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Speech recognition not available on this device.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Speech recognition not available on this device.'),
+        ),
+      );
       return;
     }
 
@@ -365,9 +434,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       await _speechToText.listen(
         onResult: (result) {
           setState(() {
-            _descCtrl.text = _lastWords.isEmpty 
-              ? result.recognizedWords 
-              : '$_lastWords ${result.recognizedWords}';
+            _descCtrl.text = _lastWords.isEmpty
+                ? result.recognizedWords
+                : '$_lastWords ${result.recognizedWords}';
           });
         },
       );
@@ -381,14 +450,18 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   // --- AI Improve Logic ---
   void _improveWithAi() async {
     if (_descCtrl.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please add some description text first.')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Please add some description text first.'),
+        ),
+      );
       return;
     }
 
     setState(() => _isAiProcessing = true);
-    
+
     final aiResult = await _aiService.improveText(_descCtrl.text);
-    
+
     if (mounted) {
       setState(() => _isAiProcessing = false);
       if (aiResult['ok'] == true) {
@@ -398,11 +471,17 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           _canUndo = true;
         });
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Description improved by AI!'), backgroundColor: Color(0xFFD4A843)),
+          const SnackBar(
+            content: Text('Description improved by AI!'),
+            backgroundColor: Color(0xFFD4A843),
+          ),
         );
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(aiResult['error'].toString()), backgroundColor: Colors.red),
+          SnackBar(
+            content: Text(aiResult['error'].toString()),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     }
@@ -453,7 +532,11 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                       ),
                       const Spacer(),
                       IconButton(
-                        icon: const Icon(Icons.close_rounded, size: 20, color: Color(0xFF9CA3AF)),
+                        icon: const Icon(
+                          Icons.close_rounded,
+                          size: 20,
+                          color: Color(0xFF9CA3AF),
+                        ),
                         onPressed: () => Navigator.pop(context),
                       ),
                     ],
@@ -466,10 +549,19 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                         controller: _descCtrl,
                         maxLines: null,
                         keyboardType: TextInputType.multiline,
-                        style: const TextStyle(fontSize: 15, color: Color(0xFF111827), height: 1.5),
+                        style: const TextStyle(
+                          fontSize: 15,
+                          color: Color(0xFF111827),
+                          height: 1.5,
+                        ),
                         decoration: const InputDecoration(
-                          hintText: 'Tell attendees what this event is about...\n\nBe descriptive and exciting!',
-                          hintStyle: TextStyle(color: Color(0xFF9CA3AF), fontSize: 15, height: 1.5),
+                          hintText:
+                              'Tell attendees what this event is about...\n\nBe descriptive and exciting!',
+                          hintStyle: TextStyle(
+                            color: Color(0xFF9CA3AF),
+                            fontSize: 15,
+                            height: 1.5,
+                          ),
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.all(Radius.circular(20)),
                           ),
@@ -495,11 +587,17 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         child: Column(
           children: [
             _buildHeader(),
-            Container(color: const Color(0xFFF3F4F6), height: 1), // Soft subtle divider
+            Container(
+              color: const Color(0xFFF3F4F6),
+              height: 1,
+            ), // Soft subtle divider
             _buildStepperRow(),
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 20,
+                ),
                 child: _buildStepContent(),
               ),
             ),
@@ -507,8 +605,12 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
               decoration: BoxDecoration(
                 color: Colors.white,
                 boxShadow: [
-                  BoxShadow(color: Colors.black.withValues(alpha: 0.03), blurRadius: 10, offset: const Offset(0, -2))
-                ]
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.03),
+                    blurRadius: 10,
+                    offset: const Offset(0, -2),
+                  ),
+                ],
               ),
               child: _buildBottomNav(),
             ),
@@ -534,15 +636,34 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
               color: TeacherThemeUtils.primary.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(12),
             ),
-            child: const Icon(Icons.event_available_rounded, color: TeacherThemeUtils.primary, size: 22),
+            child: const Icon(
+              Icons.event_available_rounded,
+              color: TeacherThemeUtils.primary,
+              size: 22,
+            ),
           ),
           const SizedBox(width: 16),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Create Event', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 20, color: Color(0xFF111827), letterSpacing: -0.3)),
-                Text(subtitle, style: const TextStyle(color: Color(0xFF6B7280), fontSize: 13, fontWeight: FontWeight.w500)),
+                const Text(
+                  'Create Event',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 20,
+                    color: Color(0xFF111827),
+                    letterSpacing: -0.3,
+                  ),
+                ),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    color: Color(0xFF6B7280),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
               ],
             ),
           ),
@@ -574,8 +695,12 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     bool isActiveOrPassed = _currentStep >= stepNum;
     bool isActive = _currentStep == stepNum;
 
-    Color color = isActiveOrPassed ? TeacherThemeUtils.primary : const Color(0xFFD1D5DB);
-    Color textColor = isActiveOrPassed ? TeacherThemeUtils.primary : const Color(0xFF9CA3AF);
+    Color color = isActiveOrPassed
+        ? TeacherThemeUtils.primary
+        : const Color(0xFFD1D5DB);
+    Color textColor = isActiveOrPassed
+        ? TeacherThemeUtils.primary
+        : const Color(0xFF9CA3AF);
 
     return Row(
       children: [
@@ -584,7 +709,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           width: 30,
           height: 30,
           decoration: BoxDecoration(
-            color: isActive ? color.withValues(alpha: 0.15) : (isActiveOrPassed ? color : Colors.transparent),
+            color: isActive
+                ? color.withValues(alpha: 0.15)
+                : (isActiveOrPassed ? color : Colors.transparent),
             shape: BoxShape.circle,
             border: Border.all(color: color, width: 2),
           ),
@@ -592,9 +719,11 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             child: Text(
               '$stepNum',
               style: TextStyle(
-                color: isActive ? color : (isActiveOrPassed ? Colors.white : color),
-                fontWeight: FontWeight.w800, 
-                fontSize: 13
+                color: isActive
+                    ? color
+                    : (isActiveOrPassed ? Colors.white : color),
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
               ),
             ),
           ),
@@ -602,7 +731,11 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         const SizedBox(width: 8),
         Text(
           title,
-          style: TextStyle(color: textColor, fontWeight: isActive ? FontWeight.w800 : FontWeight.w600, fontSize: 13),
+          style: TextStyle(
+            color: textColor,
+            fontWeight: isActive ? FontWeight.w800 : FontWeight.w600,
+            fontSize: 13,
+          ),
         ),
       ],
     );
@@ -610,12 +743,16 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
 
   Widget _buildLine(int stepNum) {
     bool isPassed = _currentStep > stepNum;
-    Color color = isPassed ? const Color(0xFFD4A843) : const Color(0xFFF3F4F6); // Gold when pass, soft bare grey when pending
+    Color color = isPassed
+        ? const Color(0xFFD4A843)
+        : const Color(
+            0xFFF3F4F6,
+          ); // Gold when pass, soft bare grey when pending
     return Expanded(
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 300),
-        height: 2, 
-        margin: const EdgeInsets.symmetric(horizontal: 10), 
+        height: 2,
+        margin: const EdgeInsets.symmetric(horizontal: 10),
         color: color,
         curve: Curves.easeInOut,
       ),
@@ -645,12 +782,20 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       ),
       child: Row(
         children: [
-          Icon(Icons.error_outline_rounded, color: Colors.red.shade700, size: 20),
+          Icon(
+            Icons.error_outline_rounded,
+            color: Colors.red.shade700,
+            size: 20,
+          ),
           const SizedBox(width: 12),
           Expanded(
             child: Text(
               _validationError!,
-              style: TextStyle(color: Colors.red.shade700, fontWeight: FontWeight.w600, fontSize: 13),
+              style: TextStyle(
+                color: Colors.red.shade700,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
             ),
           ),
         ],
@@ -658,20 +803,27 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     );
   }
 
-
   // --- STEP 1: INFO ---
   Widget _buildStep1() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _buildLabel('Event Title'),
-        _buildTextField(controller: _titleCtrl, hint: 'e.g. CCS Summit 2026', prefixIcon: Icons.edit_outlined),
+        _buildTextField(
+          controller: _titleCtrl,
+          hint: 'e.g. CCS Summit 2026',
+          prefixIcon: Icons.edit_outlined,
+        ),
         const SizedBox(height: 24),
 
         _buildLabel('Location'),
-        _buildTextField(controller: _locationCtrl, hint: 'e.g. Laguna University', prefixIcon: Icons.location_on_outlined),
+        _buildTextField(
+          controller: _locationCtrl,
+          hint: 'e.g. Laguna University',
+          prefixIcon: Icons.location_on_outlined,
+        ),
         const SizedBox(height: 24),
-        
+
         Row(
           children: [
             Expanded(
@@ -681,7 +833,13 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                   _buildLabel('Event Type'),
                   _buildDropdown(
                     value: _eventType,
-                    items: ['Event', 'Seminar', 'Off-Campus Activity', 'Sports Event', 'Other'],
+                    items: [
+                      'Event',
+                      'Seminar',
+                      'Off-Campus Activity',
+                      'Sports Event',
+                      'Other',
+                    ],
                     onChanged: (v) => setState(() => _eventType = v!),
                     prefixIcon: Icons.category_outlined,
                   ),
@@ -712,26 +870,14 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         ),
         const SizedBox(height: 16),
         _buildLabel('Target Year'),
-        _buildDropdown(
-          value: _targetYear,
-          items: ['ALL', '1', '2', '3', '4'],
-          itemLabels: {
-            'ALL': 'All Years',
-            '1': '1st Year',
-            '2': '2nd Year',
-            '3': '3rd Year',
-            '4': '4th Year',
-          },
-          onChanged: (v) => setState(() => _targetYear = v!),
-          prefixIcon: Icons.school_outlined,
-        ),
+        _buildTargetYearChips(),
         const SizedBox(height: 32),
 
         Container(
           decoration: BoxDecoration(
             color: const Color(0xFFF9FAFB),
-            border: Border.all(color: const Color(0xFFF3F4F6)), 
-            borderRadius: BorderRadius.circular(16)
+            border: Border.all(color: const Color(0xFFF3F4F6)),
+            borderRadius: BorderRadius.circular(16),
           ),
           child: Column(
             children: [
@@ -756,12 +902,16 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                   style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
                 ),
                 activeColor: TeacherThemeUtils.primary,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 2,
+                ),
               ),
               RadioListTile<String>(
                 value: 'seminar_based',
                 groupValue: _eventMode,
-                onChanged: (v) => setState(() => _eventMode = v ?? 'seminar_based'),
+                onChanged: (v) =>
+                    setState(() => _eventMode = v ?? 'seminar_based'),
                 title: const Text(
                   'Seminar Based',
                   style: TextStyle(
@@ -775,7 +925,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                   style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
                 ),
                 activeColor: TeacherThemeUtils.primary,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 2,
+                ),
               ),
               if (_eventMode == 'seminar_based')
                 Padding(
@@ -825,14 +978,21 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             IconButton(
               tooltip: 'Expand view',
               onPressed: _openDescriptionFullScreen,
-              icon: const Icon(Icons.open_in_full_rounded, size: 18, color: Color(0xFF6B7280)),
+              icon: const Icon(
+                Icons.open_in_full_rounded,
+                size: 18,
+                color: Color(0xFF6B7280),
+              ),
             ),
           ],
         ),
         AnimatedContainer(
           duration: const Duration(milliseconds: 300),
           decoration: BoxDecoration(
-            border: Border.all(color: _isListening ? Colors.red.shade200 : Colors.transparent, width: 1.5),
+            border: Border.all(
+              color: _isListening ? Colors.red.shade200 : Colors.transparent,
+              width: 1.5,
+            ),
             borderRadius: BorderRadius.circular(20),
             color: _isListening ? Colors.red.shade50 : const Color(0xFFF3F4F6),
           ),
@@ -842,10 +1002,19 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                 controller: _descCtrl,
                 maxLines: 9,
                 keyboardType: TextInputType.multiline,
-                style: const TextStyle(fontSize: 15, color: Color(0xFF111827), height: 1.5),
+                style: const TextStyle(
+                  fontSize: 15,
+                  color: Color(0xFF111827),
+                  height: 1.5,
+                ),
                 decoration: const InputDecoration(
-                  hintText: 'Tell attendees what this event is about...\n\nBe descriptive and exciting!',
-                  hintStyle: TextStyle(color: Color(0xFF9CA3AF), fontSize: 15, height: 1.5),
+                  hintText:
+                      'Tell attendees what this event is about...\n\nBe descriptive and exciting!',
+                  hintStyle: TextStyle(
+                    color: Color(0xFF9CA3AF),
+                    fontSize: 15,
+                    height: 1.5,
+                  ),
                   border: InputBorder.none,
                   contentPadding: EdgeInsets.fromLTRB(20, 20, 50, 20),
                 ),
@@ -855,7 +1024,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         ),
         // --- Step 2 Controls ---
         const SizedBox(height: 32),
-        
+
         // --- AI ENHANCE SECTION (Now on top) ---
         Center(
           child: Container(
@@ -865,15 +1034,17 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(16),
               gradient: LinearGradient(
-                colors: _isAiProcessing 
-                  ? [Colors.grey.shade300, Colors.grey.shade400]
-                  : [const Color(0xFFD4A843), const Color(0xFFB8942F)],
+                colors: _isAiProcessing
+                    ? [Colors.grey.shade300, Colors.grey.shade400]
+                    : [const Color(0xFFD4A843), const Color(0xFFB8942F)],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               ),
               boxShadow: [
                 BoxShadow(
-                  color: const Color(0xFFD4A843).withValues(alpha: _isAiProcessing ? 0 : 0.4),
+                  color: const Color(
+                    0xFFD4A843,
+                  ).withValues(alpha: _isAiProcessing ? 0 : 0.4),
                   blurRadius: 12,
                   offset: const Offset(0, 4),
                 ),
@@ -885,24 +1056,34 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                 onTap: _isAiProcessing ? null : _improveWithAi,
                 borderRadius: BorderRadius.circular(16),
                 child: Center(
-                  child: _isAiProcessing 
-                    ? const PulseConnectLoader(size: 20, color: Colors.white)
-                    : Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.auto_awesome_rounded, color: Colors.white, size: 20),
-                          const SizedBox(width: 10),
-                          Text(
-                            'AI Enhance Description', 
-                            style: TextStyle(
-                              color: Colors.white, 
-                              fontWeight: FontWeight.w800, 
-                              fontSize: 14,
-                              shadows: [Shadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 4, offset: const Offset(0, 1))]
+                  child: _isAiProcessing
+                      ? const PulseConnectLoader(size: 20, color: Colors.white)
+                      : Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(
+                              Icons.auto_awesome_rounded,
+                              color: Colors.white,
+                              size: 20,
                             ),
-                          ),
-                        ],
-                      ),
+                            const SizedBox(width: 10),
+                            Text(
+                              'AI Enhance Description',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 14,
+                                shadows: [
+                                  Shadow(
+                                    color: Colors.black.withValues(alpha: 0.1),
+                                    blurRadius: 4,
+                                    offset: const Offset(0, 1),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
                 ),
               ),
             ),
@@ -951,10 +1132,14 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
               ),
               const SizedBox(height: 12),
               Text(
-                _isListening ? 'Listening… tap to stop' : 'Tap the mic to dictate',
+                _isListening
+                    ? 'Listening… tap to stop'
+                    : 'Tap the mic to dictate',
                 style: TextStyle(
                   fontSize: 13,
-                  color: _isListening ? Colors.red.shade600 : const Color(0xFF6B7280),
+                  color: _isListening
+                      ? Colors.red.shade600
+                      : const Color(0xFF6B7280),
                   fontWeight: _isListening ? FontWeight.w800 : FontWeight.w600,
                   letterSpacing: 0.2,
                 ),
@@ -962,14 +1147,25 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             ],
           ),
         ),
-        
+
         if (_canUndo) ...[
           const SizedBox(height: 16),
           Center(
             child: TextButton.icon(
               onPressed: _undoAiImprove,
-              icon: const Icon(Icons.undo_rounded, size: 16, color: Color(0xFF6B7280)),
-              label: const Text('Undo AI changes', style: TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.w700, fontSize: 13)),
+              icon: const Icon(
+                Icons.undo_rounded,
+                size: 16,
+                color: Color(0xFF6B7280),
+              ),
+              label: const Text(
+                'Undo AI changes',
+                style: TextStyle(
+                  color: Color(0xFF6B7280),
+                  fontWeight: FontWeight.w700,
+                  fontSize: 13,
+                ),
+              ),
             ),
           ),
         ],
@@ -983,7 +1179,11 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _buildLabel('Grace Time (Minutes)'),
-        _buildNumberField(controller: _graceTimeCtrl, hint: '15', prefixIcon: Icons.timer_outlined),
+        _buildNumberField(
+          controller: _graceTimeCtrl,
+          hint: '15',
+          prefixIcon: Icons.timer_outlined,
+        ),
         const SizedBox(height: 24),
       ],
     );
@@ -1027,7 +1227,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             Icons.access_time_rounded,
             isEnabled: _seminar1StartCtrl.text.isNotEmpty,
           ),
-          
+
           if (_seminarCount >= 2) ...[
             const SizedBox(height: 32),
             Row(
@@ -1042,7 +1242,15 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                         mainAxisSize: MainAxisSize.max,
                         children: List.generate(
                           (constraints.constrainWidth() / 8).floor(),
-                          (index) => SizedBox(width: 4, height: 1, child: DecoratedBox(decoration: BoxDecoration(color: Colors.grey.shade300))),
+                          (index) => SizedBox(
+                            width: 4,
+                            height: 1,
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: Colors.grey.shade300,
+                              ),
+                            ),
+                          ),
                         ),
                       );
                     },
@@ -1061,7 +1269,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             ),
             const SizedBox(height: 24),
             _buildLabel('Start Date & Time'),
-            _buildDateTimeInput(_seminar2StartCtrl, Icons.calendar_today_rounded),
+            _buildDateTimeInput(
+              _seminar2StartCtrl,
+              Icons.calendar_today_rounded,
+            ),
             const SizedBox(height: 24),
             _buildLabel('End Date & Time'),
             _buildDateTimeInput(
@@ -1081,6 +1292,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     Map<String, String>? itemLabels,
     required void Function(String?) onChanged,
     required IconData prefixIcon,
+    bool enabled = true,
+    String? hintText,
   }) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -1096,17 +1309,25 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             child: DropdownButtonHideUnderline(
               child: DropdownButton<String>(
                 value: value,
+                hint: hintText == null ? null : Text(hintText),
                 items: items.map((String val) {
                   return DropdownMenuItem<String>(
                     value: val,
                     child: Text(
                       itemLabels?[val] ?? val,
-                      style: const TextStyle(fontSize: 14, color: Color(0xFF111827), fontWeight: FontWeight.w500),
+                      style: const TextStyle(
+                        fontSize: 14,
+                        color: Color(0xFF111827),
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
                   );
                 }).toList(),
-                onChanged: onChanged,
-                icon: const Icon(Icons.keyboard_arrow_down_rounded, color: Color(0xFF6B7280)),
+                onChanged: enabled ? onChanged : null,
+                icon: const Icon(
+                  Icons.keyboard_arrow_down_rounded,
+                  color: Color(0xFF6B7280),
+                ),
                 dropdownColor: Colors.white,
                 borderRadius: BorderRadius.circular(16),
                 isExpanded: true,
@@ -1118,21 +1339,111 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     );
   }
 
-  Widget _buildNumberField({required TextEditingController controller, required String hint, required IconData prefixIcon}) {
+  Widget _buildTargetYearChips() {
+    final options = const {
+      'ALL': 'All Levels',
+      '1': '1st Year',
+      '2': '2nd Year',
+      '3': '3rd Year',
+      '4': '4th Year',
+    };
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF3F4F6),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: GridView.count(
+        crossAxisCount: 3,
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        crossAxisSpacing: 6,
+        mainAxisSpacing: 6,
+        childAspectRatio: 2.4,
+        children: options.entries.map((entry) {
+          final key = entry.key;
+          final selected = _targetYears.contains(key);
+          return FilterChip(
+            label: Center(
+              child: Text(
+                entry.value,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: selected ? Colors.white : const Color(0xFF374151),
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            labelPadding: EdgeInsets.zero,
+            padding: EdgeInsets.zero,
+            selected: selected,
+            onSelected: (v) => _toggleTargetYear(key, v),
+            showCheckmark: false,
+            backgroundColor: Colors.white,
+            selectedColor: TeacherThemeUtils.primary,
+            side: BorderSide(
+              color: selected
+                  ? TeacherThemeUtils.primary
+                  : const Color(0xFFD1D5DB),
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(999),
+            ),
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            visualDensity: const VisualDensity(horizontal: -1, vertical: -1),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildNumberField({
+    required TextEditingController controller,
+    required String hint,
+    required IconData prefixIcon,
+  }) {
     return TextFormField(
       controller: controller,
       keyboardType: TextInputType.number,
-      style: const TextStyle(fontSize: 15, color: Color(0xFF111827), fontWeight: FontWeight.w500),
+      style: const TextStyle(
+        fontSize: 15,
+        color: Color(0xFF111827),
+        fontWeight: FontWeight.w500,
+      ),
       decoration: InputDecoration(
         hintText: hint,
-        hintStyle: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 15, fontWeight: FontWeight.normal),
+        hintStyle: const TextStyle(
+          color: Color(0xFF9CA3AF),
+          fontSize: 15,
+          fontWeight: FontWeight.normal,
+        ),
         prefixIcon: Icon(prefixIcon, color: const Color(0xFF9CA3AF), size: 20),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: TeacherThemeUtils.primary, width: 1.5)),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: Colors.transparent),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: Colors.transparent),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(
+            color: TeacherThemeUtils.primary,
+            width: 1.5,
+          ),
+        ),
         filled: true,
         fillColor: const Color(0xFFF3F4F6),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 20,
+          vertical: 18,
+        ),
       ),
     );
   }
@@ -1144,36 +1455,82 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         color: TeacherThemeUtils.primary.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(8),
       ),
-      child: Text(text, style: const TextStyle(color: TeacherThemeUtils.primary, fontWeight: FontWeight.w800, fontSize: 11, letterSpacing: 0.8)),
+      child: Text(
+        text,
+        style: const TextStyle(
+          color: TeacherThemeUtils.primary,
+          fontWeight: FontWeight.w800,
+          fontSize: 11,
+          letterSpacing: 0.8,
+        ),
+      ),
     );
   }
 
   Widget _buildLabel(String text) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8, left: 4),
-      child: Text(text, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13, color: Color(0xFF4B5563))),
-    );
-  }
-
-  Widget _buildTextField({required TextEditingController controller, required String hint, required IconData prefixIcon}) {
-    return TextFormField(
-      controller: controller,
-      style: const TextStyle(fontSize: 15, color: Color(0xFF111827), fontWeight: FontWeight.w500),
-      decoration: InputDecoration(
-        hintText: hint,
-        hintStyle: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 15, fontWeight: FontWeight.normal),
-        prefixIcon: Icon(prefixIcon, color: const Color(0xFF9CA3AF), size: 20),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: TeacherThemeUtils.primary, width: 1.5)),
-        filled: true,
-        fillColor: const Color(0xFFF3F4F6),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+      child: Text(
+        text,
+        style: const TextStyle(
+          fontWeight: FontWeight.w700,
+          fontSize: 13,
+          color: Color(0xFF4B5563),
+        ),
       ),
     );
   }
 
-  Widget _buildDateTimeInput(TextEditingController controller, IconData prefixIcon, {bool isEnabled = true}) {
+  Widget _buildTextField({
+    required TextEditingController controller,
+    required String hint,
+    required IconData prefixIcon,
+  }) {
+    return TextFormField(
+      controller: controller,
+      style: const TextStyle(
+        fontSize: 15,
+        color: Color(0xFF111827),
+        fontWeight: FontWeight.w500,
+      ),
+      decoration: InputDecoration(
+        hintText: hint,
+        hintStyle: const TextStyle(
+          color: Color(0xFF9CA3AF),
+          fontSize: 15,
+          fontWeight: FontWeight.normal,
+        ),
+        prefixIcon: Icon(prefixIcon, color: const Color(0xFF9CA3AF), size: 20),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: Colors.transparent),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: Colors.transparent),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(
+            color: TeacherThemeUtils.primary,
+            width: 1.5,
+          ),
+        ),
+        filled: true,
+        fillColor: const Color(0xFFF3F4F6),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 20,
+          vertical: 18,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDateTimeInput(
+    TextEditingController controller,
+    IconData prefixIcon, {
+    bool isEnabled = true,
+  }) {
     return Opacity(
       opacity: isEnabled ? 1.0 : 0.5,
       child: AbsorbPointer(
@@ -1182,18 +1539,52 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           controller: controller,
           readOnly: true,
           onTap: () => _selectDateTime(controller),
-          style: const TextStyle(fontSize: 15, color: Color(0xFF111827), fontWeight: FontWeight.w500),
+          style: const TextStyle(
+            fontSize: 15,
+            color: Color(0xFF111827),
+            fontWeight: FontWeight.w500,
+          ),
           decoration: InputDecoration(
             hintText: 'mm/dd/yyyy  --:-- --',
-            hintStyle: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 15, letterSpacing: 1.2, fontWeight: FontWeight.normal),
-            prefixIcon: Icon(prefixIcon, color: const Color(0xFF9CA3AF), size: 20),
-            suffixIcon: const Icon(Icons.calendar_month_rounded, color: Color(0xFF6B7280), size: 20),
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
-            enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: Colors.transparent)),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(16), borderSide: const BorderSide(color: TeacherThemeUtils.primary, width: 1.5)),
+            hintStyle: const TextStyle(
+              color: Color(0xFF9CA3AF),
+              fontSize: 15,
+              letterSpacing: 1.2,
+              fontWeight: FontWeight.normal,
+            ),
+            prefixIcon: Icon(
+              prefixIcon,
+              color: const Color(0xFF9CA3AF),
+              size: 20,
+            ),
+            suffixIcon: const Icon(
+              Icons.calendar_month_rounded,
+              color: Color(0xFF6B7280),
+              size: 20,
+            ),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: const BorderSide(color: Colors.transparent),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: const BorderSide(color: Colors.transparent),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(16),
+              borderSide: const BorderSide(
+                color: TeacherThemeUtils.primary,
+                width: 1.5,
+              ),
+            ),
             filled: true,
-            fillColor: isEnabled ? const Color(0xFFF3F4F6) : const Color(0xFFE5E7EB),
-            contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+            fillColor: isEnabled
+                ? const Color(0xFFF3F4F6)
+                : const Color(0xFFE5E7EB),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 20,
+              vertical: 18,
+            ),
           ),
         ),
       ),
@@ -1217,8 +1608,12 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
 
     // Tomorrow Only Restriction - Normalized to Start of Day (00:00:00)
     final DateTime now = DateTime.now();
-    final DateTime tomorrow = DateTime(now.year, now.month, now.day).add(const Duration(days: 1));
-    
+    final DateTime tomorrow = DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).add(const Duration(days: 1));
+
     final DateTime firstDate = isSimpleEndPicker && simpleStart != null
         ? DateTime(simpleStart.year, simpleStart.month, simpleStart.day)
         : tomorrow;
@@ -1234,12 +1629,11 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       firstDate: firstDate,
       lastDate: lastDate,
 
-
       builder: (context, child) {
         return Theme(
           data: Theme.of(context).copyWith(
             colorScheme: const ColorScheme.light(
-              primary: TeacherThemeUtils.primary, 
+              primary: TeacherThemeUtils.primary,
               onPrimary: Colors.white,
               onSurface: Color(0xFF111827),
             ),
@@ -1258,7 +1652,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           return Theme(
             data: Theme.of(context).copyWith(
               colorScheme: const ColorScheme.light(
-                primary: TeacherThemeUtils.primary, 
+                primary: TeacherThemeUtils.primary,
                 onPrimary: Colors.white,
                 onSurface: Color(0xFF111827),
               ),
@@ -1296,8 +1690,13 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                 identical(controller, _endDateCtrl)) {
               final start = _parseDateTime(_startDateCtrl.text);
               if (start != null) {
-                final fixedEnd =
-                    DateTime(start.year, start.month, start.day, 17, 0);
+                final fixedEnd = DateTime(
+                  start.year,
+                  start.month,
+                  start.day,
+                  17,
+                  0,
+                );
                 controller.text = _dateTimeFormat.format(fixedEnd);
               } else {
                 controller.text = _dateTimeFormat.format(fullDateTime);
@@ -1316,7 +1715,6 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     }
   }
 
-
   Widget _buildBottomNav() {
     bool isLast = _currentStep == 3;
     bool isFirst = _currentStep == 1;
@@ -1329,22 +1727,32 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           OutlinedButton.icon(
             onPressed: isFirst ? null : _back,
             icon: const Icon(Icons.chevron_left_rounded, size: 20),
-            label: const Text('Back', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+            label: const Text(
+              'Back',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+            ),
             style: OutlinedButton.styleFrom(
               foregroundColor: const Color(0xFF4B5563),
-              side: BorderSide(color: isFirst ? Colors.transparent : const Color(0xFFE5E7EB), width: 1.5),
+              side: BorderSide(
+                color: isFirst ? Colors.transparent : const Color(0xFFE5E7EB),
+                width: 1.5,
+              ),
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
             ),
           ),
-          
+
           ElevatedButton(
             onPressed: _isSubmitting ? null : (isLast ? _submit : _next),
             style: ElevatedButton.styleFrom(
               backgroundColor: TeacherThemeUtils.primary,
               foregroundColor: Colors.white,
               padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
               elevation: 4,
               shadowColor: TeacherThemeUtils.dark.withValues(alpha: 0.4),
             ),
@@ -1355,9 +1763,16 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                     children: [
                       if (isLast) const Icon(Icons.check_rounded, size: 18),
                       if (isLast) const SizedBox(width: 8),
-                      Text(isLast ? 'Save Event' : 'Next', style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14)),
+                      Text(
+                        isLast ? 'Save Event' : 'Next',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 14,
+                        ),
+                      ),
                       if (!isLast) const SizedBox(width: 8),
-                      if (!isLast) const Icon(Icons.chevron_right_rounded, size: 18),
+                      if (!isLast)
+                        const Icon(Icons.chevron_right_rounded, size: 18),
                     ],
                   ),
           ),
