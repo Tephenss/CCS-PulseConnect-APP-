@@ -121,6 +121,14 @@ class EventService {
         msg.contains('schema cache');
   }
 
+  bool _isMissingAssistantAssignedByTeacherColumnError(Object error) {
+    return _isMissingColumnError(
+      error,
+      relation: 'event_assistants',
+      column: 'assigned_by_teacher_id',
+    );
+  }
+
   bool _isUniqueViolationError(Object error) {
     final msg = error.toString().toLowerCase();
     return msg.contains('23505') ||
@@ -428,16 +436,25 @@ class EventService {
   Future<List<Map<String, dynamic>>> _fetchTeacherScanAssignmentRows(
     String teacherId,
   ) async {
+    List<Map<String, dynamic>> filterAssignments(
+      List<Map<String, dynamic>> rows,
+    ) {
+      return rows.where((row) {
+        final scan = row['can_scan'] == true;
+        final manage = row['can_manage_assistants'] == true;
+        return scan || manage;
+      }).toList();
+    }
+
     try {
       final rows = await _supabase
           .from('event_teacher_assignments')
           .select(
-            'event_id, can_scan, events(id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time)',
+            'event_id, can_scan, can_manage_assistants, events(id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time)',
           )
           .eq('teacher_id', teacherId)
-          .eq('can_scan', true)
           .limit(200);
-      return List<Map<String, dynamic>>.from(rows);
+      return filterAssignments(List<Map<String, dynamic>>.from(rows));
     } catch (_) {
       try {
         final rows = await _supabase
@@ -3209,18 +3226,37 @@ class EventService {
     String teacherId,
   ) async {
     try {
-      final assignmentRows = await _supabase
-          .from('event_teacher_assignments')
-          .select('event_id')
-          .eq('teacher_id', teacherId)
-          .eq('can_scan', true)
-          .limit(200);
+      List<Map<String, dynamic>> assignmentRows;
+      try {
+        assignmentRows = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('event_teacher_assignments')
+              .select('event_id,can_scan,can_manage_assistants')
+              .eq('teacher_id', teacherId)
+              .limit(200),
+        );
+      } catch (_) {
+        assignmentRows = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('event_teacher_assignments')
+              .select('event_id,can_scan')
+              .eq('teacher_id', teacherId)
+              .eq('can_scan', true)
+              .limit(200),
+        );
+      }
 
-      if (assignmentRows.isEmpty) {
+      final filtered = assignmentRows.where((row) {
+        final scan = row['can_scan'] == true;
+        final manage = row['can_manage_assistants'] == true;
+        return scan || manage;
+      }).toList();
+
+      if (filtered.isEmpty) {
         return [];
       }
 
-      final eventIds = assignmentRows
+      final eventIds = filtered
           .map((row) => row['event_id']?.toString() ?? '')
           .where((id) => id.isNotEmpty)
           .toSet()
@@ -3230,11 +3266,13 @@ class EventService {
         return [];
       }
 
+      // Do not filter by end_at here — null/incorrect end_at was excluding live
+      // assignments; scan windows are enforced in _resolveSingleEventScanContext.
       final eventRows = await _supabase
           .from('events')
           .select()
           .inFilter('id', eventIds)
-          .eq('status', 'published')
+          .inFilter('status', ['published', 'approved'])
           .order('start_at', ascending: true);
 
       return List<Map<String, dynamic>>.from(eventRows);
@@ -3313,34 +3351,6 @@ class EventService {
         .where((ctx) => (ctx['status']?.toString() ?? '') == 'closed')
         .toList();
     if (closed.isNotEmpty) {
-      final activeClosed = closed.where((ctx) {
-        final rawEvent = ctx['event'];
-        final event = rawEvent is Map<String, dynamic>
-            ? rawEvent
-            : (rawEvent is Map ? Map<String, dynamic>.from(rawEvent) : null);
-        final eventEndAt = _toUtcDate(event?['end_at']);
-        return eventEndAt == null || !eventEndAt.isBefore(nowUtc);
-      }).toList();
-
-      if (activeClosed.isNotEmpty) {
-        activeClosed.sort(
-          (a, b) => (b['closes_at']?.toString() ?? '').compareTo(
-            a['closes_at']?.toString() ?? '',
-          ),
-        );
-        return {
-          'ok': true,
-          'status': 'closed',
-          'scanner_enabled': false,
-          'message':
-              activeClosed.first['message']?.toString() ??
-              'Scanner is currently closed for this assigned event.',
-          'context': activeClosed.first,
-          'assignments': events.length,
-          'server_time': nowUtc.toIso8601String(),
-        };
-      }
-
       closed.sort(
         (a, b) => (b['closes_at']?.toString() ?? '').compareTo(
           a['closes_at']?.toString() ?? '',
@@ -3348,11 +3358,11 @@ class EventService {
       );
       return {
         'ok': true,
-        'status': 'no_assignment',
+        'status': 'closed',
         'scanner_enabled': false,
         'message': 'Assigned scanner event has already ended.',
-        'context': null,
-        'assignments': 0,
+        'context': closed.first,
+        'assignments': events.length,
         'server_time': nowUtc.toIso8601String(),
       };
     }
@@ -3424,7 +3434,7 @@ class EventService {
           }
           if (event == null) continue;
           final status = (event['status']?.toString() ?? '').toLowerCase();
-          if (status != 'published') continue;
+          if (status != 'published' && status != 'approved') continue;
           final eventId = event['id']?.toString() ?? '';
           if (eventId.isEmpty) continue;
           events.add(event);
@@ -3510,22 +3520,17 @@ class EventService {
     try {
       final rows = await _fetchStudentAssistantScanRows(studentId);
       final candidateRows = <Map<String, dynamic>>[];
-      final teacherIds = <String>{};
       final eventIds = <String>{};
 
       for (final row in List<Map<String, dynamic>>.from(rows)) {
         final assignedBy =
             row['assigned_by_teacher_id']?.toString().trim() ?? '';
         final eventId = row['event_id']?.toString() ?? '';
-        // Only accept rows explicitly assigned by a teacher.
-        // This prevents legacy rows (without assigning teacher) from
-        // accidentally granting scanner context.
-        if (eventId.isEmpty || assignedBy.isEmpty) continue;
+        if (eventId.isEmpty) continue;
         candidateRows.add({
           'assigned_by_teacher_id': assignedBy,
           'event_id': eventId,
         });
-        teacherIds.add(assignedBy);
         eventIds.add(eventId);
       }
 
@@ -3547,7 +3552,7 @@ class EventService {
                 'id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time',
               )
               .inFilter('id', eventIds.toList())
-              .eq('status', 'published')
+              .inFilter('status', ['published', 'approved'])
               .limit(500);
         } catch (_) {
           try {
@@ -3557,7 +3562,7 @@ class EventService {
                   'id,title,status,start_at,end_at,location,uses_sessions,grace_time',
                 )
                 .inFilter('id', eventIds.toList())
-                .eq('status', 'published')
+                .inFilter('status', ['published', 'approved'])
                 .limit(500);
           } catch (_) {
             // Last-resort backward compatible schema (no uses_sessions).
@@ -3565,7 +3570,7 @@ class EventService {
                 .from('events')
                 .select('id,title,status,start_at,end_at,location,grace_time')
                 .inFilter('id', eventIds.toList())
-                .eq('status', 'published')
+                .inFilter('status', ['published', 'approved'])
                 .limit(500);
           }
         }
@@ -3587,49 +3592,11 @@ class EventService {
         };
       }
 
-      // Strict verification:
-      // Assistant access is valid only when the assigning teacher still has
-      // active scanner permission for the same event.
-      final allowedTeacherEventPairs = <String>{};
-      if (teacherIds.isNotEmpty) {
-        try {
-          final teacherAssignmentRows = await _supabase
-              .from('event_teacher_assignments')
-              .select('event_id,teacher_id')
-              .inFilter('event_id', eventIds.toList())
-              .inFilter('teacher_id', teacherIds.toList())
-              .eq('can_scan', true)
-              .limit(500);
-          for (final raw in List<Map<String, dynamic>>.from(
-            teacherAssignmentRows,
-          )) {
-            final eventId = raw['event_id']?.toString().trim() ?? '';
-            final teacherId = raw['teacher_id']?.toString().trim() ?? '';
-            if (eventId.isEmpty || teacherId.isEmpty) continue;
-            allowedTeacherEventPairs.add('$eventId|$teacherId');
-          }
-        } catch (e) {
-          // Fail closed for security: if we cannot verify admin -> teacher
-          // scanner access, assistant scanner access should not be granted.
-          if (_isMissingTeacherAssignmentsTableError(e)) {
-            return _finalizeTeacherScanContext(
-              events: const [],
-              contexts: const [],
-              nowUtc: DateTime.now().toUtc(),
-            );
-          }
-          return {
-            'ok': false,
-            'status': 'error',
-            'scanner_enabled': false,
-            'message': 'Unable to load scanner context right now.',
-            'context': null,
-            'assignments': 0,
-            'server_time': DateTime.now().toUtc().toIso8601String(),
-          };
-        }
-      }
-
+      // Do not require a follow-up SELECT on event_teacher_assignments here.
+      // Assist rows are inserted only via assignEventAssistant()/teacher session,
+      // where canTeacherManageAssistants already applied. Reading that table **as the
+      // student often returns zero rows under RLS**, which made canTeacherManageAssistants()
+      // false for every candidate and yielded "no assignment" permanently.
       final events = <Map<String, dynamic>>[];
       final seenEventIds = <String>{};
       for (final row in candidateRows) {
@@ -3638,9 +3605,6 @@ class EventService {
             row['assigned_by_teacher_id']?.toString().trim() ?? '';
         if (eventId.isEmpty) continue;
         if (assignedBy.isEmpty) continue;
-        if (!allowedTeacherEventPairs.contains('$eventId|$assignedBy')) {
-          continue;
-        }
         final event = eventsById[eventId];
         if (event == null) continue;
         if (!seenEventIds.add(eventId)) continue;
@@ -4240,14 +4204,7 @@ class EventService {
     String teacherId,
   ) async {
     try {
-      final response = await _supabase
-          .from('event_teacher_assignments')
-          .select('id')
-          .eq('event_id', eventId)
-          .eq('teacher_id', teacherId)
-          .eq('can_scan', true)
-          .limit(1);
-      return response.isNotEmpty;
+      return await canTeacherManageAssistants(eventId, teacherId);
     } catch (_) {
       return null;
     }
@@ -4260,12 +4217,29 @@ class EventService {
 
   Future<bool> hasTeacherAnyScanAccess(String teacherId) async {
     try {
-      final assignmentRows = await _supabase
-          .from('event_teacher_assignments')
-          .select('event_id')
-          .eq('teacher_id', teacherId)
-          .eq('can_scan', true)
-          .limit(50);
+      List<Map<String, dynamic>> rows;
+      try {
+        rows = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('event_teacher_assignments')
+              .select('event_id,can_scan,can_manage_assistants')
+              .eq('teacher_id', teacherId)
+              .limit(50),
+        );
+      } catch (_) {
+        rows = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('event_teacher_assignments')
+              .select('event_id,can_scan')
+              .eq('teacher_id', teacherId)
+              .eq('can_scan', true)
+              .limit(50),
+        );
+      }
+
+      final assignmentRows = rows.where((row) {
+        return row['can_scan'] == true || row['can_manage_assistants'] == true;
+      }).toList();
 
       if (assignmentRows.isEmpty) {
         return false;
@@ -4285,7 +4259,7 @@ class EventService {
           .from('events')
           .select('id')
           .inFilter('id', eventIds)
-          .eq('status', 'published')
+          .inFilter('status', ['published', 'approved'])
           .limit(1);
       return eventRows.isNotEmpty;
     } catch (_) {
@@ -4507,8 +4481,7 @@ class EventService {
       };
     }
 
-    if (assignedByTeacherId.isEmpty ||
-        !await canTeacherScanEvent(eventId, assignedByTeacherId)) {
+    if (assignedByTeacherId.isEmpty) {
       return {
         'ok': false,
         'status': 'no_assignment',
@@ -4810,47 +4783,39 @@ class EventService {
       'allow_scan': allowScan,
       'assigned_by_teacher_id': teacherId,
     };
+    final legacyPayload = {
+      'event_id': eventId,
+      'student_id': studentId,
+      'allow_scan': allowScan,
+    };
 
     try {
-      final res = await _supabase
-          .from('event_assistants')
-          .upsert(payload, onConflict: 'event_id,student_id')
-          .select(
-            'id, event_id, student_id, allow_scan, assigned_by_teacher_id',
-          );
-
-      final list = List<Map<String, dynamic>>.from(res);
-      await _touchAssistantAssignmentTimestamp(
-        eventId: eventId,
-        studentId: studentId,
-      );
-      await _dispatchAssistantAssignmentPush(
-        eventId: eventId,
-        studentId: studentId,
-        teacherId: teacherId,
-        allowScan: allowScan,
-      );
-      return {'ok': true, 'assistant': list.isNotEmpty ? list.first : payload};
-    } catch (e) {
-      if (_isMissingAssistantsTableError(e)) {
-        return {
-          'ok': false,
-          'error':
-              'Assistant feature is not set up yet in your database. Please apply the latest Supabase migration first.',
-        };
-      }
-      // Fallback when unique constraint for onConflict is unavailable.
+      List<Map<String, dynamic>> existing;
       try {
-        final existing = await _supabase
-            .from('event_assistants')
-            .select(
-              'id, event_id, student_id, allow_scan, assigned_by_teacher_id',
-            )
-            .eq('event_id', eventId)
-            .eq('student_id', studentId)
-            .limit(1);
+        existing = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('event_assistants')
+              .select('id, event_id, student_id, allow_scan, assigned_by_teacher_id')
+              .eq('event_id', eventId)
+              .eq('student_id', studentId)
+              .limit(1),
+        );
+      } catch (existingErr) {
+        if (!_isMissingAssistantAssignedByTeacherColumnError(existingErr)) {
+          rethrow;
+        }
+        existing = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('event_assistants')
+              .select('id, event_id, student_id, allow_scan')
+              .eq('event_id', eventId)
+              .eq('student_id', studentId)
+              .limit(1),
+        );
+      }
 
-        if (existing.isNotEmpty) {
+      if (existing.isNotEmpty) {
+        try {
           await _supabase
               .from('event_assistants')
               .update({
@@ -4859,28 +4824,17 @@ class EventService {
               })
               .eq('event_id', eventId)
               .eq('student_id', studentId);
-          await _touchAssistantAssignmentTimestamp(
-            eventId: eventId,
-            studentId: studentId,
-          );
-          await _dispatchAssistantAssignmentPush(
-            eventId: eventId,
-            studentId: studentId,
-            teacherId: teacherId,
-            allowScan: allowScan,
-          );
-          final item = Map<String, dynamic>.from(existing.first);
-          item['allow_scan'] = allowScan;
-          item['assigned_by_teacher_id'] = teacherId;
-          return {'ok': true, 'assistant': item};
+        } catch (updateErr) {
+          if (!_isMissingAssistantAssignedByTeacherColumnError(updateErr)) {
+            rethrow;
+          }
+          await _supabase
+              .from('event_assistants')
+              .update({'allow_scan': allowScan})
+              .eq('event_id', eventId)
+              .eq('student_id', studentId);
         }
 
-        final inserted = await _supabase
-            .from('event_assistants')
-            .insert(payload)
-            .select(
-              'id, event_id, student_id, allow_scan, assigned_by_teacher_id',
-            );
         await _touchAssistantAssignmentTimestamp(
           eventId: eventId,
           studentId: studentId,
@@ -4891,25 +4845,73 @@ class EventService {
           teacherId: teacherId,
           allowScan: allowScan,
         );
-        final list = List<Map<String, dynamic>>.from(inserted);
-        return {
-          'ok': true,
-          'assistant': list.isNotEmpty ? list.first : payload,
-        };
-      } catch (fallbackError) {
-        if (_isMissingAssistantsTableError(fallbackError)) {
-          return {
-            'ok': false,
-            'error':
-                'Assistant feature is not set up yet in your database. Please apply the latest Supabase migration first.',
-          };
+        final item = Map<String, dynamic>.from(existing.first);
+        item['allow_scan'] = allowScan;
+        item['assigned_by_teacher_id'] = teacherId;
+        return {'ok': true, 'assistant': item};
+      }
+
+      List<Map<String, dynamic>> inserted;
+      try {
+        inserted = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('event_assistants')
+              .insert(payload)
+              .select('id, event_id, student_id, allow_scan, assigned_by_teacher_id'),
+        );
+      } catch (insertErr) {
+        if (!_isMissingAssistantAssignedByTeacherColumnError(insertErr)) {
+          rethrow;
         }
+        inserted = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('event_assistants')
+              .insert(legacyPayload)
+              .select('id, event_id, student_id, allow_scan'),
+        );
+      }
+
+      await _touchAssistantAssignmentTimestamp(
+        eventId: eventId,
+        studentId: studentId,
+      );
+      await _dispatchAssistantAssignmentPush(
+        eventId: eventId,
+        studentId: studentId,
+        teacherId: teacherId,
+        allowScan: allowScan,
+      );
+      return {
+        'ok': true,
+        'assistant': inserted.isNotEmpty ? inserted.first : legacyPayload,
+      };
+    } catch (e) {
+      if (_isMissingAssistantsTableError(e)) {
         return {
           'ok': false,
-          'error': 'Failed to assign assistant. Please try again.',
-          'debug': e.toString(),
+          'error':
+              'Assistant feature is not set up yet in your database. Please apply the latest Supabase migration first.',
         };
       }
+      if (_isMissingAssistantAssignedByTeacherColumnError(e)) {
+        return {
+          'ok': false,
+          'error':
+              'Assistant assignment needs latest DB migration. Please apply migration 003_event_teacher_assignments.sql.',
+        };
+      }
+      if (_isAccessPolicyError(e)) {
+        return {
+          'ok': false,
+          'error':
+              'Assistant assignment is blocked by database access policy. Please contact admin.',
+        };
+      }
+      return {
+        'ok': false,
+        'error': 'Failed to assign assistant. Please try again.',
+        'debug': e.toString(),
+      };
     }
   }
 
