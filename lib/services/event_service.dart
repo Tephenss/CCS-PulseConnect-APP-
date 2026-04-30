@@ -169,6 +169,36 @@ class EventService {
         status == 'early';
   }
 
+  bool _looksLikeUuid(String raw) {
+    final value = raw.trim().toLowerCase();
+    if (value.isEmpty) return false;
+    final uuid = RegExp(
+      r'^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
+    );
+    return uuid.hasMatch(value);
+  }
+
+  Future<String> _resolveUserUuidFromStudentRef(String rawStudentRef) async {
+    final normalized = rawStudentRef.trim();
+    if (normalized.isEmpty) return '';
+    if (_looksLikeUuid(normalized)) return normalized;
+
+    try {
+      final rows = await _supabase
+          .from('users')
+          .select('id')
+          .eq('student_id', normalized)
+          .limit(1);
+      if (rows.isNotEmpty) {
+        final resolved = rows.first['id']?.toString().trim() ?? '';
+        if (resolved.isNotEmpty) return resolved;
+      }
+    } catch (_) {
+      // Fall through to original reference.
+    }
+    return normalized;
+  }
+
   bool _attendanceRecordCountsAsPresent(Map<String, dynamic>? row) {
     if (row == null || row.isEmpty) return false;
     if ((row['check_in_at']?.toString().trim().isNotEmpty ?? false)) {
@@ -4749,6 +4779,11 @@ class EventService {
     required String teacherId,
     bool allowScan = true,
   }) async {
+    final resolvedStudentId = await _resolveUserUuidFromStudentRef(studentId);
+    if (resolvedStudentId.isEmpty) {
+      return {'ok': false, 'error': 'Missing assistant student account.'};
+    }
+
     final canManage = await canTeacherManageAssistants(eventId, teacherId);
     if (!canManage) {
       return {
@@ -4764,7 +4799,7 @@ class EventService {
           .from('event_registrations')
           .select('id')
           .eq('event_id', eventId)
-          .eq('student_id', studentId)
+          .eq('student_id', resolvedStudentId)
           .limit(1);
       if (regCheck.isEmpty) {
         return {
@@ -4779,13 +4814,13 @@ class EventService {
 
     final payload = {
       'event_id': eventId,
-      'student_id': studentId,
+      'student_id': resolvedStudentId,
       'allow_scan': allowScan,
       'assigned_by_teacher_id': teacherId,
     };
     final legacyPayload = {
       'event_id': eventId,
-      'student_id': studentId,
+      'student_id': resolvedStudentId,
       'allow_scan': allowScan,
     };
 
@@ -4806,11 +4841,11 @@ class EventService {
       }
       await _touchAssistantAssignmentTimestamp(
         eventId: eventId,
-        studentId: studentId,
+        studentId: resolvedStudentId,
       );
       await _dispatchAssistantAssignmentPush(
         eventId: eventId,
-        studentId: studentId,
+        studentId: resolvedStudentId,
         teacherId: teacherId,
         allowScan: allowScan,
       );
@@ -4828,7 +4863,7 @@ class EventService {
               .from('event_assistants')
               .select('id, event_id, student_id, allow_scan, assigned_by_teacher_id')
               .eq('event_id', eventId)
-              .eq('student_id', studentId)
+              .eq('student_id', resolvedStudentId)
               .limit(1),
         );
       } catch (existingErr) {
@@ -4840,7 +4875,7 @@ class EventService {
               .from('event_assistants')
               .select('id, event_id, student_id, allow_scan')
               .eq('event_id', eventId)
-              .eq('student_id', studentId)
+              .eq('student_id', resolvedStudentId)
               .limit(1),
         );
       }
@@ -4854,7 +4889,7 @@ class EventService {
                 'assigned_by_teacher_id': teacherId,
               })
               .eq('event_id', eventId)
-              .eq('student_id', studentId);
+              .eq('student_id', resolvedStudentId);
         } catch (updateErr) {
           if (!_isMissingAssistantAssignedByTeacherColumnError(updateErr)) {
             rethrow;
@@ -4863,16 +4898,16 @@ class EventService {
               .from('event_assistants')
               .update({'allow_scan': allowScan})
               .eq('event_id', eventId)
-              .eq('student_id', studentId);
+              .eq('student_id', resolvedStudentId);
         }
 
         await _touchAssistantAssignmentTimestamp(
           eventId: eventId,
-          studentId: studentId,
+          studentId: resolvedStudentId,
         );
         await _dispatchAssistantAssignmentPush(
           eventId: eventId,
-          studentId: studentId,
+          studentId: resolvedStudentId,
           teacherId: teacherId,
           allowScan: allowScan,
         );
@@ -4904,11 +4939,11 @@ class EventService {
 
       await _touchAssistantAssignmentTimestamp(
         eventId: eventId,
-        studentId: studentId,
+        studentId: resolvedStudentId,
       );
       await _dispatchAssistantAssignmentPush(
         eventId: eventId,
-        studentId: studentId,
+        studentId: resolvedStudentId,
         teacherId: teacherId,
         allowScan: allowScan,
       );
