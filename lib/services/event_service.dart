@@ -4789,6 +4789,37 @@ class EventService {
       'allow_scan': allowScan,
     };
 
+    // Fast path: write without requiring SELECT privileges on event_assistants.
+    // Some deployments allow insert/update but deny select via RLS.
+    try {
+      try {
+        await _supabase
+            .from('event_assistants')
+            .upsert(payload, onConflict: 'event_id,student_id');
+      } catch (e) {
+        if (!_isMissingAssistantAssignedByTeacherColumnError(e)) {
+          rethrow;
+        }
+        await _supabase
+            .from('event_assistants')
+            .upsert(legacyPayload, onConflict: 'event_id,student_id');
+      }
+      await _touchAssistantAssignmentTimestamp(
+        eventId: eventId,
+        studentId: studentId,
+      );
+      await _dispatchAssistantAssignmentPush(
+        eventId: eventId,
+        studentId: studentId,
+        teacherId: teacherId,
+        allowScan: allowScan,
+      );
+      return {'ok': true, 'assistant': payload};
+    } catch (_) {
+      // Keep robust fallback paths below for schemas where upsert/onConflict
+      // is unavailable.
+    }
+
     try {
       List<Map<String, dynamic>> existing;
       try {
