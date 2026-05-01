@@ -48,6 +48,21 @@ class AuthService {
     return nowDay.isAfter(verifiedDay);
   }
 
+  /// Fresh signups can stay blocked while `pending` + verified + app pipeline.
+  /// Established accounts should never be locked out by stale `pending` rows.
+  static const int _adminReviewGateMaxAgeDays = 21;
+
+  static bool _shouldBypassPendingAdminReviewGate(
+    Map<String, dynamic> user,
+  ) {
+    final raw = user['created_at']?.toString().trim() ?? '';
+    if (raw.isEmpty) return false;
+    final created = DateTime.tryParse(raw)?.toUtc();
+    if (created == null) return false;
+    final days = DateTime.now().toUtc().difference(created).inDays;
+    return days >= _adminReviewGateMaxAgeDays;
+  }
+
   // Check if user is logged in
   Future<bool> isLoggedIn() async {
     final prefs = await SharedPreferences.getInstance();
@@ -231,16 +246,25 @@ class AuthService {
         };
       }
 
-      // Student application review gate:
+      // Student application review gate (mobile app signups only):
+      // - `manage_applications` / admin APIs scope pending queue to
+      //   registration_source=app. Only those users should be blocked here.
+      // - Web/legacy students with pending+verified (data drift, old imports)
+      //   should not be locked out of an account they already use.
       // - unverified => allow passing to verification screen first
-      // - pending (after verification) => blocked until admin approval
       // - rejected => blocked with admin note
+      // Legacy approved student rows may still have a blank/null account_status,
+      // so never coerce missing values to "pending" here.
       final accountStatus =
-          (user['account_status']?.toString().toLowerCase() ?? 'pending')
-              .trim();
+          (user['account_status']?.toString().toLowerCase() ?? '').trim();
+      final registrationSource =
+          (user['registration_source']?.toString().toLowerCase() ?? '').trim();
       final emailVerified = user['email_verified'] == true;
       if (role.toLowerCase() == 'student') {
-        if (accountStatus == 'pending' && emailVerified) {
+        if (accountStatus == 'pending' &&
+            emailVerified &&
+            registrationSource == 'app' &&
+            !_shouldBypassPendingAdminReviewGate(user)) {
           return {
             'ok': false,
             'error':
