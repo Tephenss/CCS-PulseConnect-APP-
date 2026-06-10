@@ -215,7 +215,11 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
       if (result['ok'] == true) {
         final updatedUser = Map<String, dynamic>.from(result['user'] as Map);
         if (widget.postRegistrationReviewFlow) {
-          await _service.sendUnderReviewEmail(email: _email, fullName: _name);
+          await _service.sendUnderReviewEmail(
+            userId: _userId,
+            email: _email,
+            fullName: _name,
+          );
           if (!mounted) return;
           await _showVerificationSuccessDialog();
           if (!mounted) return;

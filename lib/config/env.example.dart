@@ -8,12 +8,9 @@ class Env {
   // Gemini API key used by AI Enhance Description in mobile app.
   static const String geminiApiKey = 'YOUR_GEMINI_API_KEY';
 
-  // Public URL of your PHP backend (no trailing slash).
-  // Example: https://your-domain.com
-  // Set this after your web domain is live.
-  static const String mobilePushApiBaseUrl = 'https://YOUR-WEB-DOMAIN';
+  // Hosted PHP backend (no trailing slash).
+  static const String mobilePushApiBaseUrl = 'https://ccspulseconnect.com';
 
-  // Optional shared key for /api/mobile_push_dispatch.php
-  // Keep empty if server-side key check is disabled.
-  static const String mobilePushApiKey = 'YOUR_SHARED_KEY'; // optional but recommended
+  // Must match MOBILE_PUSH_API_KEY in website .env on hosting.
+  static const String mobilePushApiKey = 'YOUR_SHARED_KEY';
 }
