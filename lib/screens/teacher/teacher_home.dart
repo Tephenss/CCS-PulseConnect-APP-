@@ -159,6 +159,25 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     );
   }
 
+  List<Map<String, dynamic>> _teacherActiveUpcomingEvents(
+    List<Map<String, dynamic>> source, {
+    int limit = 5,
+  }) {
+    final now = DateTime.now().toUtc().add(kManilaOffset);
+    final filtered = source
+        .where((event) => isTeacherActiveEvent(event, now: now))
+        .toList();
+
+    filtered.sort((a, b) {
+      final dateA = parseStoredEventDateTime(a['start_at']) ?? DateTime(2100);
+      final dateB = parseStoredEventDateTime(b['start_at']) ?? DateTime(2100);
+      return dateA.compareTo(dateB);
+    });
+
+    if (filtered.length <= limit) return filtered;
+    return filtered.sublist(0, limit);
+  }
+
   Future<void> _loadData() async {
     final user = await _authService.getCurrentUser();
     unawaited(_primeOfflineReadiness(user));
@@ -184,11 +203,16 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     var usingCachedData = false;
     if (teacherId.isNotEmpty) {
       if (isOffline) {
-        events = await _appCacheService.loadJsonList(cacheKey);
+        final cached = await _appCacheService.loadJsonList(cacheKey);
+        events = _teacherActiveUpcomingEvents(cached);
         usingCachedData = true;
       } else {
-        final fetched = await _eventService.getTeacherUpcomingEvents(teacherId);
-        if (fetched.isEmpty) {
+        final accessible = await _eventService.getTeacherAccessibleEvents(
+          teacherId,
+        );
+        events = _teacherActiveUpcomingEvents(accessible);
+
+        if (events.isEmpty) {
           final cached = await _appCacheService.loadJsonList(cacheKey);
           final lastUpdated = await _appCacheService.lastUpdatedAt(cacheKey);
           final cacheStillFresh =
@@ -197,16 +221,12 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
               DateTime.now().difference(lastUpdated) <=
                   const Duration(hours: 24);
           if (cacheStillFresh) {
-            events = cached;
+            events = _teacherActiveUpcomingEvents(cached);
             usingCachedData = true;
-          } else {
-            events = fetched;
-            await _appCacheService.saveJsonList(cacheKey, events);
           }
-        } else {
-          events = fetched;
-          await _appCacheService.saveJsonList(cacheKey, events);
         }
+
+        await _appCacheService.saveJsonList(cacheKey, events);
       }
     }
 

@@ -35,6 +35,40 @@ class MobileBackendService {
     return headers;
   }
 
+  static Map<String, dynamic>? _tryDecodeJsonResponse(String body) {
+    final trimmed = body.trim();
+    if (trimmed.isEmpty) {
+      return {};
+    }
+
+    final lower = trimmed.toLowerCase();
+    if (lower.startsWith('<!doctype') ||
+        lower.startsWith('<html') ||
+        lower.startsWith('<')) {
+      return null;
+    }
+
+    try {
+      final decoded = jsonDecode(trimmed);
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+    } catch (_) {
+      return null;
+    }
+
+    return null;
+  }
+
+  static bool _isEndpointUnavailable(http.Response response) {
+    if (response.statusCode == 404 || response.statusCode == 405) {
+      return true;
+    }
+
+    final body = response.body.trim().toLowerCase();
+    return body.startsWith('<!doctype') || body.startsWith('<html');
+  }
+
   static Future<Map<String, dynamic>> post(
     String path,
     Map<String, dynamic> body,
@@ -56,13 +90,23 @@ class MobileBackendService {
           .post(uri, headers: _headers(), body: jsonEncode(body))
           .timeout(const Duration(seconds: 20));
 
-      Map<String, dynamic> data = {};
-      if (response.body.trim().isNotEmpty) {
-        final decoded = jsonDecode(response.body);
-        if (decoded is Map<String, dynamic>) {
-          data = decoded;
+      final parsed = _tryDecodeJsonResponse(response.body);
+      if (parsed == null) {
+        if (_isEndpointUnavailable(response)) {
+          return {
+            'ok': false,
+            'endpoint_unavailable': true,
+            'error': 'Registration service is temporarily unavailable.',
+          };
         }
+
+        return {
+          'ok': false,
+          'error': 'Invalid server response.',
+        };
       }
+
+      final data = parsed;
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return {
@@ -80,6 +124,12 @@ class MobileBackendService {
       }
 
       return data;
+    } on FormatException {
+      return {
+        'ok': false,
+        'endpoint_unavailable': true,
+        'error': 'Registration service is temporarily unavailable.',
+      };
     } catch (e) {
       if (kDebugMode) {
         debugPrint('[mobile-backend] $path failed: $e');
@@ -103,6 +153,11 @@ class MobileBackendService {
     }
     if (lower.contains('handshake') || lower.contains('certificate')) {
       return 'Secure connection to ccspulseconnect.com failed on this network.';
+    }
+    if (lower.contains('formatexception') ||
+        lower.contains('<!doctype html>') ||
+        lower.contains('unexpected character')) {
+      return 'Registration service is temporarily unavailable.';
     }
     if (message.isEmpty) {
       return 'Unable to contact the hosted backend.';
@@ -140,5 +195,27 @@ class MobileBackendService {
       'email': email.trim().toLowerCase(),
       'full_name': fullName.trim(),
     });
+  }
+
+  Future<Map<String, dynamic>> registerForEvent({
+    required String eventId,
+    required String userId,
+  }) {
+    return post('/api/mobile_register_event.php', {
+      'event_id': eventId.trim(),
+      'user_id': userId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> getEventRegistrationInfo({
+    required String eventId,
+    String? userId,
+  }) {
+    final payload = <String, dynamic>{'event_id': eventId.trim()};
+    final trimmedUserId = userId?.trim() ?? '';
+    if (trimmedUserId.isNotEmpty) {
+      payload['user_id'] = trimmedUserId;
+    }
+    return post('/api/mobile_event_registration_info.php', payload);
   }
 }

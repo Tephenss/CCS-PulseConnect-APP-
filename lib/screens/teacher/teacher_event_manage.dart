@@ -2127,7 +2127,10 @@ class _TeacherEventManageState extends State<TeacherEventManage>
               Expanded(
                 child: _buildStatChip(
                   'Joined',
-                  '${_participants.length}',
+                  _eventService.formatParticipantTotal(
+                    _participants.length,
+                    widget.event['registration_limit'],
+                  ),
                   TeacherThemeUtils.primary,
                   Icons.people_rounded,
                 ),

@@ -222,8 +222,8 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
     final now = DateTime.now().toUtc().add(kManilaOffset);
 
     var filteredEvents = _events.where((e) {
-      final status = (e['status'] as String? ?? 'pending')
-          .toLowerCase(); // Normalize string
+      // Normalize string to avoid missing events due to casing/whitespace.
+      final status = (e['status']?.toString() ?? 'pending').toLowerCase().trim();
 
       // Calculate if the event is truly expired based on event end time.
       final endAtStr = e['end_at'] as String?;
@@ -233,11 +233,12 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
 
       if (statusFilter == 'expired') {
         // Shown in Expired if time naturally passed, excluding manually archived ones
-        return (status == 'expired' || status == 'finished' || isPast) &&
+        return (status == 'expired' ||
+                status == 'finished' ||
+                isPast) &&
             status != 'archived';
       } else if (statusFilter == 'active') {
-        // Shown in Active if published AND time has NOT passed
-        return status == 'published' && !isPast;
+        return isTeacherActiveEvent(e, now: now);
       } else if (statusFilter == 'pending') {
         // Shown in Approval if pending, approved, or rejected AND time has NOT passed
         return (status == 'pending' ||

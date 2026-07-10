@@ -39,8 +39,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   int _participantCount = 0;
   List<Map<String, dynamic>> _eventSessions = [];
   bool _isRefreshingEvent = false;
+  bool _suppressCapacityRefresh = false;
   Timer? _approvalRefreshTimer;
+  Timer? _capacityRefreshTimer;
   RealtimeChannel? _approvalChannel;
+  RealtimeChannel? _capacityChannel;
   String _approvalChannelUserId = '';
 
   Color _studentPrimary(BuildContext context) =>
@@ -63,7 +66,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   @override
   void dispose() {
     _approvalRefreshTimer?.cancel();
+    _capacityRefreshTimer?.cancel();
     _approvalChannel?.unsubscribe();
+    _capacityChannel?.unsubscribe();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -89,6 +94,69 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       }
       unawaited(_loadEvent(silent: true));
     });
+  }
+
+  void _scheduleCapacityRefresh() {
+    _capacityRefreshTimer?.cancel();
+
+    final limit = _eventService.registrationLimitFromEvent(_event);
+    if (limit == null || _isRegistered) {
+      return;
+    }
+
+    _capacityRefreshTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (!mounted || _isRegistered || _suppressCapacityRefresh) {
+        _capacityRefreshTimer?.cancel();
+        return;
+      }
+      unawaited(_loadEvent(silent: true));
+    });
+  }
+
+  void _bindCapacityRealtime() {
+    final limit = _eventService.registrationLimitFromEvent(_event);
+    if (limit == null) {
+      _capacityChannel?.unsubscribe();
+      _capacityChannel = null;
+      return;
+    }
+
+    _capacityChannel?.unsubscribe();
+    _capacityChannel = _supabase.channel(
+      'student_event_capacity:${widget.eventId}',
+    );
+
+    _capacityChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.update,
+      schema: 'public',
+      table: 'events',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'id',
+        value: widget.eventId,
+      ),
+      callback: (_) {
+        if (_suppressCapacityRefresh || _isRegistered) return;
+        unawaited(_loadEvent(silent: true));
+      },
+    );
+
+    _capacityChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.insert,
+      schema: 'public',
+      table: 'event_registrations',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'event_id',
+        value: widget.eventId,
+      ),
+      callback: (_) {
+        if (_suppressCapacityRefresh || _isRegistered) return;
+        unawaited(_loadEvent(silent: true));
+      },
+    );
+
+    _capacityChannel!.subscribe();
   }
 
   bool _payloadAllowsRegistration(Map<String, dynamic> payload) {
@@ -204,14 +272,29 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final results = await Future.wait([
         _eventService.getEventById(widget.eventId),
         _eventService.isRegistered(widget.eventId, userId),
-        _eventService.getParticipantCount(widget.eventId),
+        _eventService.getEventRegistrationSettings(widget.eventId),
         _eventService.getEventSessions(widget.eventId),
       ]);
 
-      final event = results[0] as Map<String, dynamic>?;
-      var isReg = results[1] as bool;
-      final count = results[2] as int;
+      final baseEvent = results[0] as Map<String, dynamic>?;
+      var isReg = results[1] as bool || _isRegistered;
+      final registrationSettings = results[2] as Map<String, dynamic>?;
       final sessions = results[3] as List<Map<String, dynamic>>;
+      final event = _eventService.mergeEventRegistrationSettings(
+        baseEvent,
+        registrationSettings,
+      );
+      final snapshot = await _eventService.getRegistrationSnapshot(widget.eventId);
+      if (snapshot != null && event.isNotEmpty) {
+        event.addAll(_eventService.applyRegistrationSnapshot(event, snapshot));
+      }
+      final count = await _eventService.getParticipantCount(
+        widget.eventId,
+        eventHint: event.isNotEmpty ? event : null,
+      );
+      if (event.isNotEmpty) {
+        event['registered_count'] = count;
+      }
       var accessDenied = false;
       var canRegisterNow = false;
       var approvalRequired = false;
@@ -228,7 +311,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         }
       }
 
-      if (event != null && !isReg) {
+      if (event.isNotEmpty && !isReg) {
         final availability = await _eventService
             .getStudentRegistrationAvailability(
               widget.eventId,
@@ -239,21 +322,31 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         canRegisterNow = availability['allowed'] == true;
         approvalRequired = availability['approvalRequired'] == true;
         registrationMessage = (availability['message'] as String? ?? '').trim();
+      } else if (isReg) {
+        canRegisterNow = false;
+        approvalRequired = false;
+        registrationMessage = '';
       }
+
+      final resolvedCount = isReg && count < _participantCount
+          ? _participantCount
+          : count;
 
       if (mounted) {
         setState(() {
-          _event = event ?? _event;
+          _event = event.isNotEmpty ? event : _event;
           _isRegistered = isReg;
           _isAccessDenied = accessDenied;
           _canRegisterNow = canRegisterNow;
           _approvalRequired = approvalRequired;
           _registrationMessage = registrationMessage;
-          _participantCount = count;
+          _participantCount = resolvedCount;
           _eventSessions = sessions;
           _isRegistrationResolved = true;
           _isLoading = false;
         });
+        _bindCapacityRealtime();
+        _scheduleCapacityRefresh();
         _scheduleApprovalRefresh();
       }
     } finally {
@@ -264,6 +357,19 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   Future<void> _handleRegister() async {
     if (_approvalRequired && !_canRegisterNow) {
       await _loadEvent(silent: true);
+    }
+
+    final snapshot = await _eventService.getRegistrationSnapshot(widget.eventId);
+    if (snapshot != null && snapshot['is_full'] == true) {
+      await _loadEvent(silent: true);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Registration is full for this event.'),
+          ),
+        );
+      }
+      return;
     }
 
     if (_isAccessDenied || !_canRegisterNow) {
@@ -288,30 +394,40 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
     final result = await _eventService.registerForEvent(widget.eventId, userId);
 
-    setState(() => _isRegistering = false);
-
     if (result['ok'] == true) {
-      setState(() {
-        _isRegistered = true;
-        _participantCount++;
-      });
+      final nextCount = _participantCount + 1;
+
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Successfully registered! Check your tickets.'),
-            backgroundColor: Color(0xFF15803D),
-          ),
-        );
+        setState(() {
+          _isRegistering = false;
+          _isRegistered = true;
+          _canRegisterNow = false;
+          _approvalRequired = false;
+          _registrationMessage = '';
+          _participantCount = nextCount;
+          _suppressCapacityRefresh = true;
+        });
       }
-    } else {
+
+      _capacityRefreshTimer?.cancel();
+
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      unawaited(_loadEvent(silent: true));
+
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(result['error'] as String? ?? 'Registration failed'),
-            backgroundColor: _studentPrimary(context),
-          ),
-        );
+        setState(() => _suppressCapacityRefresh = false);
       }
+      return;
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(result['error'] as String? ?? 'Registration failed'),
+          backgroundColor: _studentPrimary(context),
+        ),
+      );
     }
   }
 
@@ -441,18 +557,23 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final startDate = parseStoredEventDateTime(startAt);
     final endDate = parseStoredEventDateTime(endAt);
 
+    final isRegistrationFull = _eventService.isEventAtCapacity(
+      _event,
+      participantCount: _participantCount,
+    );
     final registrationStatusLabel = _isRegistered
         ? 'Registered'
-        : (_canRegisterNow
-              ? 'Open'
-              : (_approvalRequired ? 'Approval Required' : 'Closed'));
+        : (isRegistrationFull
+              ? 'Closed'
+              : (_canRegisterNow
+                    ? 'Open'
+                    : (_approvalRequired ? 'Approval Required' : 'Closed')));
     final usesSessions =
         usesEventSessions(_event!) || _eventSessions.isNotEmpty;
     final canTapAction =
-        _isRegistrationResolved &&
         !_isAccessDenied &&
         !_isRegistering &&
-        (_isRegistered || _canRegisterNow);
+        (_isRegistered || (_isRegistrationResolved && _canRegisterNow));
     final isActionDisabled = !_isRegistered && !_canRegisterNow;
 
     return Scaffold(
@@ -599,6 +720,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                     eventType: eventType,
                     eventFor: eventFor,
                     graceTime: graceTime,
+                    event: _event!,
                   ),
                   if (usesSessions) ...[
                     const SizedBox(height: 12),
@@ -712,7 +834,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             SizedBox(
               width: double.infinity,
               height: 60,
-              child: Container(
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 280),
+                curve: Curves.easeOutCubic,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(16),
                   gradient: LinearGradient(
@@ -753,34 +877,42 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                       borderRadius: BorderRadius.circular(16),
                     ),
                   ),
-                  child: (_isRegistering || !_isRegistrationResolved)
+                  child: (_isRegistering || (!_isRegistrationResolved && !_isRegistered))
                       ? const PulseConnectLoader(size: 14, color: Colors.white)
-                      : Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              _isRegistered
-                                  ? Icons.confirmation_num_rounded
-                                  : (_approvalRequired
-                                        ? Icons.lock_clock_rounded
-                                        : Icons.how_to_reg_rounded),
-                              size: 20,
+                      : AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 280),
+                          switchInCurve: Curves.easeOutCubic,
+                          switchOutCurve: Curves.easeInCubic,
+                          child: Row(
+                            key: ValueKey(
+                              _isRegistered ? 'ticket_action' : 'register_action',
                             ),
-                            const SizedBox(width: 10),
-                            Text(
-                              _isRegistered
-                                  ? 'See Ticket'
-                                  : (_canRegisterNow
-                                        ? 'Register'
-                                        : (_approvalRequired
-                                              ? 'Approval Required'
-                                              : 'Registration Closed')),
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w800,
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                _isRegistered
+                                    ? Icons.confirmation_num_rounded
+                                    : (_approvalRequired
+                                          ? Icons.lock_clock_rounded
+                                          : Icons.how_to_reg_rounded),
+                                size: 20,
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: 10),
+                              Text(
+                                _isRegistered
+                                    ? 'See Ticket'
+                                    : (_canRegisterNow
+                                          ? 'Register'
+                                          : (_approvalRequired
+                                                ? 'Approval Required'
+                                                : 'Registration Closed')),
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                 ),
               ),
@@ -806,7 +938,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final items = <Widget>[
       _buildInfoChip(
         Icons.people_rounded,
-        '$_participantCount',
+        _eventService.formatParticipantTotal(
+          _participantCount,
+          _event?['registration_limit'],
+        ),
         'Participants',
         itemWidth,
       ),
@@ -859,17 +994,21 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           children: [
             Icon(icon, color: _studentPrimary(context), size: 22),
             const SizedBox(height: 6),
-            Text(
-              value,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontWeight: FontWeight.w800,
-                fontSize: 14,
-                color: _studentPrimary(context),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 250),
+              child: Text(
+                value,
+                key: ValueKey('$label-$value'),
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 14,
+                  color: _studentPrimary(context),
+                ),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                softWrap: true,
               ),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              softWrap: true,
             ),
             const SizedBox(height: 2),
             Text(
@@ -978,6 +1117,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     required String eventType,
     required String eventFor,
     required String graceTime,
+    required Map<String, dynamic> event,
   }) {
     final cards = <Widget>[
       _buildScheduleInfoCard(
@@ -994,6 +1134,20 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             ? DateFormat('MMM d, yyyy, h:mm a').format(endDate)
             : 'TBA',
       ),
+    ];
+
+    if (hasRegistrationDeadline(event)) {
+      cards.add(
+        _buildScheduleInfoCard(
+          icon: Icons.event_busy_rounded,
+          title: 'Registration Deadline',
+          value: formatRegistrationDeadlineLabel(event),
+          subtitle: registrationDeadlineSubtitle(event),
+        ),
+      );
+    }
+
+    cards.addAll([
       _buildScheduleInfoCard(
         icon: Icons.location_on_rounded,
         title: 'Location / Venue',
@@ -1010,7 +1164,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         value: _targetParticipantsLabel(eventFor),
         fullWidth: true,
       ),
-    ];
+    ]);
 
     if (graceTime.isNotEmpty) {
       cards.add(
@@ -1029,6 +1183,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     required IconData icon,
     required String title,
     required String value,
+    String? subtitle,
     bool fullWidth = false,
   }) {
     final screenWidth = MediaQuery.of(context).size.width;
@@ -1082,6 +1237,18 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                     color: Color(0xFF111827),
                   ),
                 ),
+                if (subtitle != null && subtitle.trim().isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.grey.shade600,
+                      fontWeight: FontWeight.w600,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),

@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/env.dart';
+import '../utils/event_time_utils.dart';
+import 'mobile_backend_service.dart';
 
 class EventService {
   final _supabase = Supabase.instance.client;
@@ -2398,12 +2400,292 @@ class EventService {
     }
   }
 
+  Future<Map<String, dynamic>?> getEventRegistrationSettings(
+    String eventId,
+  ) async {
+    return _fetchRegistrationEvent(eventId);
+  }
+
+  Map<String, dynamic> mergeEventRegistrationSettings(
+    Map<String, dynamic>? baseEvent,
+    Map<String, dynamic>? registrationSettings,
+  ) {
+    final merged = <String, dynamic>{
+      if (baseEvent != null) ...Map<String, dynamic>.from(baseEvent),
+      if (registrationSettings != null)
+        ...Map<String, dynamic>.from(registrationSettings),
+    };
+    return merged;
+  }
+
+  int? registrationLimitFromEvent(Map<String, dynamic>? event) {
+    if (event == null) return null;
+    return _normalizeRegistrationLimit(event['registration_limit']);
+  }
+
+  int registeredCountFromEvent(Map<String, dynamic>? event) {
+    if (event == null) return 0;
+    return int.tryParse(event['registered_count']?.toString() ?? '') ?? 0;
+  }
+
+  bool isEventAtCapacity(Map<String, dynamic>? event, {int? participantCount}) {
+    final limit = registrationLimitFromEvent(event);
+    if (limit == null) return false;
+
+    final count = participantCount ?? registeredCountFromEvent(event);
+    return count >= limit;
+  }
+
+  String formatParticipantTotal(int count, dynamic registrationLimit) {
+    final limit = _normalizeRegistrationLimit(registrationLimit);
+    if (limit != null) {
+      return '$count/$limit';
+    }
+    return count.toString();
+  }
+
   bool _asRegistrationBool(dynamic value) {
     if (value is bool) {
       return value;
     }
     final normalized = value?.toString().trim().toLowerCase() ?? '';
     return const {'1', 'true', 't', 'yes', 'y', 'on'}.contains(normalized);
+  }
+
+  int? _normalizeRegistrationLimit(dynamic value) {
+    if (value == null) return null;
+    final raw = value.toString().trim();
+    if (raw.isEmpty) return null;
+    final parsed = int.tryParse(raw);
+    if (parsed == null || parsed < 1 || parsed > 9999) return null;
+    return parsed;
+  }
+
+  final _mobileBackend = MobileBackendService();
+
+  Future<Map<String, dynamic>?> getRegistrationSnapshot(String eventId) async {
+    return _fetchRegistrationSnapshot(eventId);
+  }
+
+  Future<Map<String, dynamic>?> _fetchRegistrationSnapshot(String eventId) async {
+    try {
+      final response = await _supabase.rpc(
+        'get_event_registration_snapshot',
+        params: {'p_event_id': eventId},
+      );
+
+      if (response is Map) {
+        final map = Map<String, dynamic>.from(response);
+        if (map['ok'] == true || map.containsKey('registration_count')) {
+          return map;
+        }
+      }
+    } catch (_) {
+      // RPC not deployed yet.
+    }
+
+    return null;
+  }
+
+  Map<String, dynamic> applyRegistrationSnapshot(
+    Map<String, dynamic> event,
+    Map<String, dynamic> snapshot,
+  ) {
+    final merged = Map<String, dynamic>.from(event);
+    if (snapshot.containsKey('registration_count')) {
+      merged['registered_count'] = snapshot['registration_count'];
+    }
+    if (snapshot.containsKey('registration_limit')) {
+      merged['registration_limit'] = snapshot['registration_limit'];
+    }
+    if (snapshot.containsKey('allow_registration')) {
+      merged['allow_registration'] = snapshot['allow_registration'];
+    }
+    if (snapshot.containsKey('is_free_event')) {
+      merged['is_free_event'] = snapshot['is_free_event'];
+    }
+    return merged;
+  }
+
+  Future<int?> _fetchHostedRegistrationCount(String eventId) async {
+    if (!MobileBackendService.isConfigured) {
+      return null;
+    }
+
+    final info = await _mobileBackend.getEventRegistrationInfo(eventId: eventId);
+    if (info['ok'] != true) {
+      return null;
+    }
+
+    return int.tryParse(info['registration_count']?.toString() ?? '');
+  }
+
+  Future<Map<String, dynamic>?> _fetchHostedRegistrationAvailability(
+    String eventId,
+    String studentId,
+  ) async {
+    if (!MobileBackendService.isConfigured) {
+      return null;
+    }
+
+    final info = await _mobileBackend.getEventRegistrationInfo(
+      eventId: eventId,
+      userId: studentId,
+    );
+    if (info['ok'] != true) {
+      return null;
+    }
+
+    final availability = info['availability'];
+    if (availability is! Map) {
+      return null;
+    }
+
+    final access = Map<String, dynamic>.from(availability);
+    return {
+      'allowed': access['allowed'] == true,
+      'targetAllowed': access['target_allowed'] == true,
+      'approvalRequired': access['approval_required'] == true,
+      'registrationOpenToAll': info['registration_open_to_all'] == true,
+      'message': (access['message'] as String? ?? '').trim(),
+    };
+  }
+
+  Future<int?> _fetchEventRegisteredCountColumn(String eventId) async {
+    const selectAttempts = [
+      'registered_count',
+      'registered_count,registration_limit',
+    ];
+
+    for (final fields in selectAttempts) {
+      try {
+        final response = await _supabase
+            .from('events')
+            .select(fields)
+            .eq('id', eventId)
+            .maybeSingle();
+        if (response == null) {
+          return null;
+        }
+
+        final parsed = int.tryParse(
+          (response as Map)['registered_count']?.toString() ?? '',
+        );
+        if (parsed != null) {
+          return parsed;
+        }
+      } catch (_) {
+        continue;
+      }
+    }
+
+    return null;
+  }
+
+  Future<int> _fetchEventRegistrationCount(
+    String eventId, {
+    Map<String, dynamic>? eventHint,
+  }) async {
+    final snapshot = await _fetchRegistrationSnapshot(eventId);
+    if (snapshot != null) {
+      final count = int.tryParse(snapshot['registration_count']?.toString() ?? '');
+      if (count != null) {
+        return count;
+      }
+    }
+
+    final hostedCount = await _fetchHostedRegistrationCount(eventId);
+    if (hostedCount != null) {
+      return hostedCount;
+    }
+
+    final columnCount = await _fetchEventRegisteredCountColumn(eventId);
+    if (columnCount != null) {
+      return columnCount;
+    }
+
+    final hintCount = int.tryParse(
+      eventHint?['registered_count']?.toString() ?? '',
+    );
+    if (hintCount != null &&
+        eventHint != null &&
+        eventHint.containsKey('registered_count')) {
+      return hintCount;
+    }
+
+    try {
+      final response = await _supabase.rpc(
+        'event_registration_count',
+        params: {'p_event_id': eventId},
+      );
+      if (response is int) return response;
+      if (response is num) return response.toInt();
+      final parsed = int.tryParse(response?.toString() ?? '');
+      if (parsed != null) return parsed;
+    } catch (_) {
+      // Fall back when RPC is not deployed yet.
+    }
+
+    try {
+      final rows = await _supabase
+          .from('event_registrations')
+          .select('id')
+          .eq('event_id', eventId);
+      return List<Map<String, dynamic>>.from(rows).length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  bool _isEventRegistrationFullSync(
+    Map<String, dynamic> event, {
+    int? participantCount,
+  }) {
+    final limit = _normalizeRegistrationLimit(event['registration_limit']);
+    if (limit == null) return false;
+
+    final count = participantCount ?? registeredCountFromEvent(event);
+    return count >= limit;
+  }
+
+  Future<bool> _isEventRegistrationFull(
+    String eventId,
+    Map<String, dynamic> event, {
+    int? participantCount,
+  }) async {
+    if (_isEventRegistrationFullSync(
+      event,
+      participantCount: participantCount,
+    )) {
+      return true;
+    }
+
+    final limit = _normalizeRegistrationLimit(event['registration_limit']);
+    if (limit == null) return false;
+
+    final count = participantCount ??
+        await _fetchEventRegistrationCount(eventId, eventHint: event);
+    return count >= limit;
+  }
+
+  Future<void> _maybeCloseRegistrationAtCapacity(
+    String eventId,
+    Map<String, dynamic> event,
+  ) async {
+    final limit = _normalizeRegistrationLimit(event['registration_limit']);
+    if (limit == null) return;
+
+    try {
+      final count = await _fetchEventRegistrationCount(eventId);
+      if (count >= limit) {
+        await _supabase
+            .from('events')
+            .update({'allow_registration': false})
+            .eq('id', eventId);
+      }
+    } catch (_) {
+      // Best-effort only.
+    }
   }
 
   String _normalizeRegistrationPaymentStatus(dynamic value) {
@@ -2453,35 +2735,53 @@ class EventService {
     return paymentStatus == 'paid' || paymentStatus == 'waived';
   }
 
+  bool _eventRegistrationOpenToAll(Map<String, dynamic> event) {
+    if (_asRegistrationBool(event['allow_registration'])) {
+      return true;
+    }
+
+    if (!_asRegistrationBool(event['is_free_event'] ?? true)) {
+      return false;
+    }
+
+    final status = (event['status']?.toString() ?? '').trim().toLowerCase();
+    return status == 'published';
+  }
+
   Future<Map<String, dynamic>?> _fetchRegistrationEvent(String eventId) async {
-    try {
-      final response = await _supabase
-          .from('events')
-          .select('id,status,event_for,allow_registration')
-          .eq('id', eventId)
-          .maybeSingle();
-      if (response == null) {
-        return null;
-      }
-      return Map<String, dynamic>.from(response);
-    } catch (_) {
+    const selectAttempts = [
+      'id,status,event_for,start_at,allow_registration,is_free_event,registration_limit,registration_close_weeks,registered_count',
+      'id,status,event_for,start_at,allow_registration,is_free_event,registration_limit,registered_count',
+      'id,status,event_for,start_at,allow_registration,is_free_event,registration_limit,registration_close_weeks',
+      'id,status,event_for,start_at,allow_registration,is_free_event,registration_limit',
+      'id,status,event_for,start_at,allow_registration,is_free_event',
+      'id,status,event_for,start_at,allow_registration',
+      'id,status,event_for,start_at,is_free_event',
+      'id,status,event_for,start_at',
+    ];
+
+    for (final fields in selectAttempts) {
       try {
-        final fallback = await _supabase
+        final response = await _supabase
             .from('events')
-            .select('id,status,event_for')
+            .select(fields)
             .eq('id', eventId)
             .maybeSingle();
-        if (fallback == null) {
+        if (response == null) {
           return null;
         }
-        return {
-          ...Map<String, dynamic>.from(fallback),
-          'allow_registration': false,
-        };
+
+        final event = Map<String, dynamic>.from(response);
+        event.putIfAbsent('is_free_event', () => true);
+        event.putIfAbsent('registration_limit', () => null);
+        event.putIfAbsent('registration_close_weeks', () => null);
+        return event;
       } catch (_) {
-        return null;
+        continue;
       }
     }
+
+    return null;
   }
 
   Future<Map<String, dynamic>> getStudentRegistrationAvailability(
@@ -2489,6 +2789,14 @@ class EventService {
     String studentId, {
     Map<String, dynamic>? preloadedEvent,
   }) async {
+    final hostedAvailability = await _fetchHostedRegistrationAvailability(
+      eventId,
+      studentId,
+    );
+    if (hostedAvailability != null) {
+      return hostedAvailability;
+    }
+
     final event = preloadedEvent != null
         ? Map<String, dynamic>.from(preloadedEvent)
         : await _fetchRegistrationEvent(eventId);
@@ -2502,6 +2810,30 @@ class EventService {
         'message': 'Event not found.',
       };
     }
+
+    final snapshot = await _fetchRegistrationSnapshot(eventId);
+    if (snapshot != null) {
+      event.addAll(applyRegistrationSnapshot(event, snapshot));
+      if (snapshot['is_full'] == true) {
+        return {
+          'allowed': false,
+          'targetAllowed': true,
+          'approvalRequired': false,
+          'registrationOpenToAll': _eventRegistrationOpenToAll(event),
+          'message': 'Registration is full for this event.',
+        };
+      }
+    }
+
+    if (_normalizeRegistrationLimit(event['registration_limit']) == null) {
+      final settings = await _fetchRegistrationEvent(eventId);
+      if (settings != null) {
+        event.addAll(settings);
+      }
+    }
+
+    final count = await _fetchEventRegistrationCount(eventId, eventHint: event);
+    event['registered_count'] = count;
 
     final status = (event['status']?.toString() ?? '').trim().toLowerCase();
     if (status != 'published') {
@@ -2530,10 +2862,27 @@ class EventService {
       };
     }
 
-    final registrationOpenToAll = _asRegistrationBool(
-      event['allow_registration'],
-    );
-    if (registrationOpenToAll) {
+    if (await _isEventRegistrationFull(eventId, event)) {
+      return {
+        'allowed': false,
+        'targetAllowed': true,
+        'approvalRequired': false,
+        'registrationOpenToAll': _eventRegistrationOpenToAll(event),
+        'message': 'Registration is full for this event.',
+      };
+    }
+
+    if (isEventRegistrationWindowClosed(event)) {
+      return {
+        'allowed': false,
+        'targetAllowed': true,
+        'approvalRequired': false,
+        'registrationOpenToAll': _eventRegistrationOpenToAll(event),
+        'message': 'Registration is closed for this event.',
+      };
+    }
+
+    if (_eventRegistrationOpenToAll(event)) {
       return {
         'allowed': true,
         'targetAllowed': true,
@@ -2613,6 +2962,34 @@ class EventService {
     String eventId,
     String userId,
   ) async {
+    if (MobileBackendService.isConfigured) {
+      final result = await _mobileBackend.registerForEvent(
+        eventId: eventId,
+        userId: userId,
+      );
+      if (result['ok'] == true) {
+        return {
+          'ok': true,
+          if (result['already_registered'] == true) 'already_registered': true,
+        };
+      }
+      if (result['endpoint_unavailable'] != true) {
+        return {
+          'ok': false,
+          'error': (result['error'] as String?)?.trim().isNotEmpty == true
+              ? result['error'] as String
+              : 'Registration failed.',
+        };
+      }
+    }
+
+    return _registerForEventViaSupabase(eventId, userId);
+  }
+
+  Future<Map<String, dynamic>> _registerForEventViaSupabase(
+    String eventId,
+    String userId,
+  ) async {
     String registrationId = '';
     try {
       // 1. Check if already registered
@@ -2644,6 +3021,27 @@ class EventService {
           'error':
               availability['message'] as String? ??
               'Registration is not allowed for this event.',
+        };
+      }
+
+      final latestCount = await _fetchEventRegistrationCount(
+        eventId,
+        eventHint: event,
+      );
+      event['registered_count'] = latestCount;
+
+      final latestSnapshot = await _fetchRegistrationSnapshot(eventId);
+      if (latestSnapshot != null && latestSnapshot['is_full'] == true) {
+        return {
+          'ok': false,
+          'error': 'Registration is full for this event.',
+        };
+      }
+
+      if (_isEventRegistrationFullSync(event, participantCount: latestCount)) {
+        return {
+          'ok': false,
+          'error': 'Registration is full for this event.',
         };
       }
 
@@ -2682,6 +3080,8 @@ class EventService {
         }
       }
 
+      await _maybeCloseRegistrationAtCapacity(eventId, event);
+
       return {'ok': true};
     } catch (e) {
       // If registration/ticket was created but a later step failed (commonly
@@ -2704,6 +3104,14 @@ class EventService {
           return {'ok': true};
         }
       } catch (_) {}
+
+      final errorText = e.toString().toLowerCase();
+      if (errorText.contains('registration is full')) {
+        return {
+          'ok': false,
+          'error': 'Registration is full for this event.',
+        };
+      }
 
       return {'ok': false, 'error': 'Registration failed: ${e.toString()}'};
     }
@@ -2825,16 +3233,11 @@ class EventService {
   }
 
   // Get participant count for an event
-  Future<int> getParticipantCount(String eventId) async {
-    try {
-      final response = await _supabase
-          .from('event_registrations')
-          .select('id')
-          .eq('event_id', eventId);
-      return (response as List).length;
-    } catch (e) {
-      return 0;
-    }
+  Future<int> getParticipantCount(
+    String eventId, {
+    Map<String, dynamic>? eventHint,
+  }) async {
+    return _fetchEventRegistrationCount(eventId, eventHint: eventHint);
   }
 
   // Check if user is registered for an event
@@ -3221,23 +3624,12 @@ class EventService {
   ) async {
     try {
       final allAccessible = await getTeacherAccessibleEvents(teacherId);
-      final now = DateTime.now().toUtc();
+      final now = DateTime.now().toUtc().add(kManilaOffset);
 
-      final upcoming = allAccessible.where((e) {
-        final status = (e['status']?.toString() ?? '').toLowerCase();
-        if (status != 'published' && status != 'approved') {
-          return false;
-        }
-        final start = _toUtcDate(e['start_at']);
-        final end = _toUtcDate(e['end_at']);
-
-        // Show event on home while it is upcoming OR still ongoing.
-        if (end != null) {
-          return end.isAfter(now) || end.isAtSameMomentAs(now);
-        }
-        if (start == null) return false;
-        return start.isAfter(now) || start.isAtSameMomentAs(now);
-      }).toList();
+      // Same criteria as teacher Events tab "Active": published and not ended.
+      final upcoming = allAccessible
+          .where((e) => isTeacherActiveEvent(e, now: now))
+          .toList();
 
       // Return ascending for upcoming
       upcoming.sort((a, b) {
