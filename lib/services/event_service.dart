@@ -15,6 +15,43 @@ class EventService {
   final Map<String, bool> _attendanceColumnSupport = {};
   bool? _eventSessionAttendanceTableSupported;
   DateTime? _eventSessionAttendanceSupportCheckedAtUtc;
+  static final Map<String, _CachedStudentRequirements> _studentRequirementsCache =
+      {};
+
+  static const Duration _studentRequirementsCacheTtl = Duration(minutes: 2);
+
+  List<Map<String, dynamic>>? _readCachedStudentRequirements(String eventId) {
+    final cached = _studentRequirementsCache[eventId];
+    if (cached == null) {
+      return null;
+    }
+    if (DateTime.now().difference(cached.cachedAt) > _studentRequirementsCacheTtl) {
+      _studentRequirementsCache.remove(eventId);
+      return null;
+    }
+    return List<Map<String, dynamic>>.from(cached.items);
+  }
+
+  void _writeCachedStudentRequirements(
+    String eventId,
+    List<Map<String, dynamic>> items,
+  ) {
+    if (items.isEmpty) {
+      return;
+    }
+    _studentRequirementsCache[eventId] = _CachedStudentRequirements(
+      items: List<Map<String, dynamic>>.from(items),
+      cachedAt: DateTime.now(),
+    );
+  }
+
+  void clearStudentRequirementsCache([String? eventId]) {
+    if (eventId == null || eventId.trim().isEmpty) {
+      _studentRequirementsCache.clear();
+      return;
+    }
+    _studentRequirementsCache.remove(eventId.trim());
+  }
 
   String _approvedRegistrationCacheKey(String userId) =>
       'approved_registration_events_${userId.trim()}';
@@ -2547,8 +2584,584 @@ class EventService {
       'targetAllowed': access['target_allowed'] == true,
       'approvalRequired': access['approval_required'] == true,
       'registrationOpenToAll': info['registration_open_to_all'] == true,
+      'requirementsRequired': access['requirements_required'] == true,
+      'requirementsComplete': access['requirements_complete'] == true,
+      'requirementsApproved': access['requirements_approved'] == true,
+      'requirementsStatus': (access['requirements_status'] as String? ?? '').trim(),
+      'requirementsDeclineReason':
+          (access['requirements_decline_reason'] as String? ?? '').trim(),
       'message': (access['message'] as String? ?? '').trim(),
     };
+  }
+
+  Future<Map<String, dynamic>?> _fetchStudentDocumentAccessGate(
+    String eventId,
+    String studentId,
+  ) async {
+    if (MobileBackendService.isConfigured) {
+      try {
+        final hosted = await _fetchStudentDocumentAccessGateFromHosted(
+          eventId,
+          studentId,
+        ).timeout(
+          const Duration(seconds: 4),
+          onTimeout: () => null,
+        );
+        if (hosted != null) {
+          return hosted;
+        }
+      } catch (_) {
+        // Fall through to direct Supabase lookup.
+      }
+    }
+
+    final requirements = await fetchEventStudentRequirementsList(
+      eventId,
+      studentId: studentId,
+    );
+    if (requirements.isEmpty) {
+      return null;
+    }
+
+    return _buildStudentDocumentAccessGate(
+      eventId: eventId,
+      studentId: studentId,
+      requirements: requirements,
+    );
+  }
+
+  Future<Map<String, dynamic>?> _fetchStudentDocumentAccessGateFromHosted(
+    String eventId,
+    String studentId,
+  ) async {
+    if (!MobileBackendService.isConfigured) {
+      return null;
+    }
+
+    try {
+      final hosted = await _mobileBackend.getStudentRequirementsInfo(
+        eventId: eventId,
+        userId: studentId,
+      );
+      if (hosted['ok'] != true) {
+        return null;
+      }
+
+      final requirements = List<Map<String, dynamic>>.from(
+        hosted['requirements'] as List? ?? const [],
+      );
+      if (requirements.isEmpty) {
+        return null;
+      }
+
+      final access = hosted['access'] is Map
+          ? Map<String, dynamic>.from(hosted['access'] as Map)
+          : <String, dynamic>{};
+      final status = (access['status']?.toString() ?? '').trim().toLowerCase();
+      final declineReason =
+          (access['decline_reason']?.toString() ?? '').trim();
+      final complete = access['complete'] == true;
+      final approved = access['approved'] == true;
+      final message = (access['message']?.toString() ?? '').trim();
+
+      if (approved) {
+        return {
+          'requirementsRequired': true,
+          'requirementsComplete': true,
+          'requirementsApproved': true,
+          'requirementsStatus': 'approved',
+          'requirementsDeclineReason': '',
+          'allowed': true,
+          'message': '',
+        };
+      }
+
+      if (status == 'pending_review') {
+        return {
+          'requirementsRequired': true,
+          'requirementsComplete': complete,
+          'requirementsApproved': false,
+          'requirementsStatus': 'pending_review',
+          'requirementsDeclineReason': '',
+          'allowed': false,
+          'message': message.isNotEmpty
+              ? message
+              : 'Your documents are under review. Registration will open after approval.',
+        };
+      }
+
+      if (status == 'declined') {
+        return {
+          'requirementsRequired': true,
+          'requirementsComplete': complete,
+          'requirementsApproved': false,
+          'requirementsStatus': 'declined',
+          'requirementsDeclineReason': declineReason,
+          'allowed': false,
+          'message': message.isNotEmpty
+              ? message
+              : (declineReason.isNotEmpty
+                    ? 'Your documents were declined: $declineReason'
+                    : 'Your documents were declined. Please update and resubmit.'),
+        };
+      }
+
+      if (!complete) {
+        return {
+          'requirementsRequired': true,
+          'requirementsComplete': false,
+          'requirementsApproved': false,
+          'requirementsStatus': 'incomplete',
+          'requirementsDeclineReason': '',
+          'allowed': false,
+          'message': message.isNotEmpty
+              ? message
+              : 'Submit the required documents before registering.',
+        };
+      }
+
+      return {
+        'requirementsRequired': true,
+        'requirementsComplete': true,
+        'requirementsApproved': false,
+        'requirementsStatus': status.isNotEmpty ? status : 'ready_to_submit',
+        'requirementsDeclineReason': declineReason,
+        'allowed': false,
+        'message': message.isNotEmpty
+            ? message
+            : 'Submit your documents for review before registering.',
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> _buildStudentDocumentAccessGate({
+    required String eventId,
+    required String studentId,
+    required List<Map<String, dynamic>> requirements,
+  }) async {
+    try {
+      final documents = List<Map<String, dynamic>>.from(
+        await _supabase
+            .from('event_student_documents')
+            .select('requirement_id,file_url,file_path')
+            .eq('event_id', eventId)
+            .eq('student_id', studentId),
+      );
+
+      final uploadedIds = <String>{};
+      for (final doc in documents) {
+        final requirementId = doc['requirement_id']?.toString() ?? '';
+        final fileUrl = doc['file_url']?.toString().trim() ?? '';
+        final filePath = doc['file_path']?.toString().trim() ?? '';
+        if (requirementId.isNotEmpty && (fileUrl.isNotEmpty || filePath.isNotEmpty)) {
+          uploadedIds.add(requirementId);
+        }
+      }
+
+      var submittedCount = 0;
+      for (final requirement in requirements) {
+        final requirementId = requirement['id']?.toString() ?? '';
+        if (requirementId.isNotEmpty && uploadedIds.contains(requirementId)) {
+          submittedCount += 1;
+        }
+      }
+
+      final complete = submittedCount >= requirements.length;
+      final submissionRows = List<Map<String, dynamic>>.from(
+        await _supabase
+            .from('event_student_submissions')
+            .select('status,decline_reason,submitted_at')
+            .eq('event_id', eventId)
+            .eq('student_id', studentId)
+            .limit(1),
+      );
+
+      final submission = submissionRows.isNotEmpty
+          ? Map<String, dynamic>.from(submissionRows.first)
+          : <String, dynamic>{};
+      final status = (submission['status']?.toString() ?? '').trim().toLowerCase();
+      final declineReason = (submission['decline_reason']?.toString() ?? '').trim();
+
+      if (status == 'approved') {
+        return {
+          'requirementsRequired': true,
+          'requirementsComplete': true,
+          'requirementsApproved': true,
+          'requirementsStatus': 'approved',
+          'requirementsDeclineReason': '',
+          'allowed': true,
+          'message': '',
+        };
+      }
+
+      if (status == 'pending_review') {
+        return {
+          'requirementsRequired': true,
+          'requirementsComplete': complete,
+          'requirementsApproved': false,
+          'requirementsStatus': 'pending_review',
+          'requirementsDeclineReason': '',
+          'allowed': false,
+          'message':
+              'Your documents are under review. Registration will open after approval.',
+        };
+      }
+
+      if (status == 'declined') {
+        return {
+          'requirementsRequired': true,
+          'requirementsComplete': complete,
+          'requirementsApproved': false,
+          'requirementsStatus': 'declined',
+          'requirementsDeclineReason': declineReason,
+          'allowed': false,
+          'message': declineReason.isNotEmpty
+              ? 'Your documents were declined: $declineReason'
+              : 'Your documents were declined. Please update and resubmit.',
+        };
+      }
+
+      if (!complete) {
+        return {
+          'requirementsRequired': true,
+          'requirementsComplete': false,
+          'requirementsApproved': false,
+          'requirementsStatus': 'incomplete',
+          'requirementsDeclineReason': '',
+          'allowed': false,
+          'message': 'Submit the required documents before registering.',
+        };
+      }
+
+      return {
+        'requirementsRequired': true,
+        'requirementsComplete': true,
+        'requirementsApproved': false,
+        'requirementsStatus': 'ready_to_submit',
+        'requirementsDeclineReason': '',
+        'allowed': false,
+        'message': 'Submit your documents for review before registering.',
+      };
+    } catch (_) {
+      return _fetchStudentDocumentAccessGateFromHosted(eventId, studentId);
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> fetchEventStudentRequirementsList(
+    String eventId, {
+    String? studentId,
+  }) async {
+    final trimmedEventId = eventId.trim();
+    if (trimmedEventId.isEmpty) {
+      return [];
+    }
+
+    final cached = _readCachedStudentRequirements(trimmedEventId);
+    if (cached != null) {
+      return cached;
+    }
+
+    final trimmedStudentId = studentId?.trim() ?? '';
+    if (MobileBackendService.isConfigured && trimmedStudentId.isNotEmpty) {
+      try {
+        final hosted = await _mobileBackend
+            .getStudentRequirementsInfo(
+              eventId: trimmedEventId,
+              userId: trimmedStudentId,
+            )
+            .timeout(
+              const Duration(seconds: 4),
+              onTimeout: () => {'ok': false},
+            );
+        if (hosted['ok'] == true) {
+          final hostedRequirements = List<Map<String, dynamic>>.from(
+            hosted['requirements'] as List? ?? const [],
+          );
+          if (hostedRequirements.isNotEmpty) {
+            _writeCachedStudentRequirements(trimmedEventId, hostedRequirements);
+            return hostedRequirements;
+          }
+        }
+      } catch (_) {
+        // Fall through to Supabase lookup.
+      }
+    }
+
+    try {
+      final rpcRows = await _supabase.rpc(
+        'get_event_student_requirements',
+        params: {'p_event_id': trimmedEventId},
+      );
+      final rpcRequirements = List<Map<String, dynamic>>.from(rpcRows);
+      if (rpcRequirements.isNotEmpty) {
+        _writeCachedStudentRequirements(trimmedEventId, rpcRequirements);
+        return rpcRequirements;
+      }
+    } catch (_) {
+      // Fall through to direct table read.
+    }
+
+    try {
+      final rows = List<Map<String, dynamic>>.from(
+        await _supabase
+            .from('event_student_requirements')
+            .select('id,code,label,sort_order,created_at')
+            .eq('event_id', trimmedEventId)
+            .order('sort_order'),
+      );
+      if (rows.isNotEmpty) {
+        _writeCachedStudentRequirements(trimmedEventId, rows);
+        return rows;
+      }
+    } catch (_) {
+      // No readable requirements source available.
+    }
+
+    return [];
+  }
+
+  Future<Map<String, dynamic>> getStudentRequirementsInfo(
+    String eventId,
+    String studentId,
+  ) async {
+    if (MobileBackendService.isConfigured) {
+      try {
+        final hosted = await _mobileBackend
+            .getStudentRequirementsInfo(
+              eventId: eventId,
+              userId: studentId,
+            )
+            .timeout(
+              const Duration(seconds: 4),
+              onTimeout: () => {'ok': false},
+            );
+        if (hosted['ok'] == true) {
+          final hostedRequirements = List<Map<String, dynamic>>.from(
+            hosted['requirements'] as List? ?? const [],
+          );
+          if (hostedRequirements.isNotEmpty) {
+            _writeCachedStudentRequirements(eventId, hostedRequirements);
+            final access = hosted['access'] is Map
+                ? Map<String, dynamic>.from(hosted['access'] as Map)
+                : <String, dynamic>{};
+            return {
+              ...hosted,
+              'access': {
+                'required': true,
+                'complete': access['complete'] == true,
+                'approved': access['approved'] == true,
+                'status': access['status']?.toString() ?? 'incomplete',
+                'message': access['message']?.toString() ??
+                    'Upload the required documents before registering.',
+                'decline_reason': access['decline_reason']?.toString() ?? '',
+              },
+            };
+          }
+        }
+      } catch (_) {
+        // Fall through to direct Supabase lookup.
+      }
+    }
+
+    try {
+      final requirements = await fetchEventStudentRequirementsList(
+        eventId,
+        studentId: studentId,
+      );
+      if (requirements.isNotEmpty) {
+        final documents = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('event_student_documents')
+              .select(
+                'id,event_id,requirement_id,student_id,file_name,file_path,file_url,mime_type,uploaded_at,updated_at',
+              )
+              .eq('event_id', eventId)
+              .eq('student_id', studentId),
+        );
+        final submissionRows = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('event_student_submissions')
+              .select(
+                'id,event_id,student_id,status,submitted_at,reviewed_at,decline_reason,updated_at',
+              )
+              .eq('event_id', eventId)
+              .eq('student_id', studentId)
+              .limit(1),
+        );
+
+        final gate = await _buildStudentDocumentAccessGate(
+          eventId: eventId,
+          studentId: studentId,
+          requirements: requirements,
+        );
+
+        return {
+          'ok': true,
+          'requirements': requirements,
+          'documents': documents,
+          'submission': submissionRows.isNotEmpty ? submissionRows.first : null,
+          'access': {
+            'required': true,
+            'complete': gate?['requirementsComplete'] == true,
+            'approved': gate?['requirementsApproved'] == true,
+            'status': gate?['requirementsStatus'] ?? 'incomplete',
+            'message': gate?['message'] ??
+                'Upload the required documents before registering.',
+            'decline_reason': gate?['requirementsDeclineReason'] ?? '',
+          },
+        };
+      }
+    } catch (_) {
+      // Fall through to empty requirements response.
+    }
+
+    return {
+      'ok': true,
+      'requirements': <Map<String, dynamic>>[],
+      'documents': <Map<String, dynamic>>[],
+      'submission': null,
+      'access': {
+        'required': false,
+        'complete': true,
+        'approved': true,
+        'status': '',
+        'message': '',
+        'decline_reason': '',
+      },
+    };
+  }
+
+  Future<Map<String, dynamic>> submitStudentRequirementsForReview(
+    String eventId,
+    String studentId,
+  ) async {
+    if (MobileBackendService.isConfigured) {
+      final hosted = await _mobileBackend.submitStudentRequirements(
+        eventId: eventId,
+        userId: studentId,
+      );
+      if (hosted['ok'] == true || hosted['already_approved'] == true) {
+        return hosted;
+      }
+    }
+
+    try {
+      final gate = await _fetchStudentDocumentAccessGate(eventId, studentId);
+      if (gate == null) {
+        return {'ok': false, 'error': 'This event has no student requirements.'};
+      }
+      if (gate['requirementsComplete'] != true) {
+        return {
+          'ok': false,
+          'error': 'Upload all required documents before submitting.',
+        };
+      }
+      if (gate['requirementsStatus'] == 'pending_review') {
+        return {'ok': false, 'error': 'Your documents are already under review.'};
+      }
+      if (gate['requirementsApproved'] == true) {
+        return {'ok': true, 'already_approved': true};
+      }
+
+      final nowIso = DateTime.now().toUtc().toIso8601String();
+      await _supabase.from('event_student_submissions').upsert(
+        {
+          'event_id': eventId,
+          'student_id': studentId,
+          'status': 'pending_review',
+          'submitted_at': nowIso,
+          'reviewed_at': null,
+          'reviewed_by': null,
+          'decline_reason': null,
+          'updated_at': nowIso,
+        },
+        onConflict: 'event_id,student_id',
+      );
+
+      return {'ok': true};
+    } catch (error) {
+      return {'ok': false, 'error': error.toString()};
+    }
+  }
+
+  Future<Map<String, dynamic>> uploadStudentRequirementDocument({
+    required String eventId,
+    required String requirementId,
+    required String studentId,
+    required List<int> bytes,
+    required String fileName,
+    required String mimeType,
+  }) async {
+    if (MobileBackendService.isConfigured) {
+      final hosted = await _mobileBackend.uploadStudentRequirementFile(
+        eventId: eventId,
+        requirementId: requirementId,
+        userId: studentId,
+        bytes: bytes,
+        fileName: fileName,
+        mimeType: mimeType,
+      );
+      if (hosted['ok'] == true) {
+        return hosted;
+      }
+    }
+
+    try {
+      final extension = fileName.contains('.')
+          ? fileName.split('.').last.toLowerCase()
+          : 'pdf';
+      final storagePath =
+          '$eventId/$studentId/$requirementId-${DateTime.now().millisecondsSinceEpoch}.$extension';
+
+      await _supabase.storage.from('student-documents').uploadBinary(
+        storagePath,
+        Uint8List.fromList(bytes),
+        fileOptions: FileOptions(
+          cacheControl: '0',
+          upsert: true,
+          contentType: mimeType,
+        ),
+      );
+
+      final publicUrl =
+          _supabase.storage.from('student-documents').getPublicUrl(storagePath);
+
+      final nowIso = DateTime.now().toUtc().toIso8601String();
+      final savedRows = await _supabase.from('event_student_documents').upsert(
+        {
+          'event_id': eventId,
+          'requirement_id': requirementId,
+          'student_id': studentId,
+          'file_name': fileName,
+          'file_path': storagePath,
+          'file_url': publicUrl,
+          'mime_type': mimeType,
+          'uploaded_at': nowIso,
+          'updated_at': nowIso,
+        },
+        onConflict: 'requirement_id,student_id',
+      ).select();
+
+      final document = savedRows.isNotEmpty
+          ? Map<String, dynamic>.from(savedRows.first as Map)
+          : {
+              'event_id': eventId,
+              'requirement_id': requirementId,
+              'student_id': studentId,
+              'file_name': fileName,
+              'file_path': storagePath,
+              'file_url': publicUrl,
+              'mime_type': mimeType,
+              'uploaded_at': nowIso,
+              'updated_at': nowIso,
+            };
+
+      return {'ok': true, 'document': document};
+    } catch (error) {
+      return {'ok': false, 'error': error.toString()};
+    }
   }
 
   Future<int?> _fetchEventRegisteredCountColumn(String eventId) async {
@@ -2784,16 +3397,82 @@ class EventService {
     return null;
   }
 
+  bool _isRegistrationClosedAvailabilityMessage(String? message) {
+    final normalized = (message ?? '').trim().toLowerCase();
+    return normalized.contains('full') || normalized.contains('closed');
+  }
+
   Future<Map<String, dynamic>> getStudentRegistrationAvailability(
     String eventId,
     String studentId, {
     Map<String, dynamic>? preloadedEvent,
   }) async {
-    final hostedAvailability = await _fetchHostedRegistrationAvailability(
-      eventId,
-      studentId,
-    );
+    final gateAndHosted = await Future.wait<dynamic>([
+      _fetchStudentDocumentAccessGate(eventId, studentId),
+      _fetchHostedRegistrationAvailability(eventId, studentId),
+    ]);
+    final documentGate = gateAndHosted[0] as Map<String, dynamic>?;
+    final hostedAvailability =
+        gateAndHosted[1] as Map<String, dynamic>?;
     if (hostedAvailability != null) {
+      final hostedClosed = hostedAvailability['allowed'] != true &&
+          _isRegistrationClosedAvailabilityMessage(
+            hostedAvailability['message'] as String?,
+          );
+      if (hostedClosed) {
+        return hostedAvailability;
+      }
+
+      if (documentGate != null) {
+        final merged = Map<String, dynamic>.from(hostedAvailability);
+        merged['requirementsRequired'] =
+            documentGate['requirementsRequired'] == true;
+        merged['requirementsComplete'] =
+            documentGate['requirementsComplete'] == true;
+        merged['requirementsApproved'] =
+            documentGate['requirementsApproved'] == true;
+        merged['requirementsStatus'] =
+            (documentGate['requirementsStatus'] as String? ?? '').trim();
+        merged['requirementsDeclineReason'] =
+            (documentGate['requirementsDeclineReason'] as String? ?? '').trim();
+
+        if (documentGate['requirementsApproved'] != true) {
+          merged['allowed'] = false;
+          final gateMessage = (documentGate['message'] as String? ?? '').trim();
+          if (gateMessage.isNotEmpty) {
+            merged['message'] = gateMessage;
+          }
+        }
+        return merged;
+      }
+
+      final requirements = await fetchEventStudentRequirementsList(
+        eventId,
+        studentId: studentId,
+      );
+      if (requirements.isNotEmpty) {
+        final builtGate = await _buildStudentDocumentAccessGate(
+          eventId: eventId,
+          studentId: studentId,
+          requirements: requirements,
+        );
+        if (builtGate != null && builtGate['requirementsApproved'] != true) {
+          return {
+            ...hostedAvailability,
+            'allowed': false,
+            'requirementsRequired': true,
+            'requirementsComplete': builtGate['requirementsComplete'] == true,
+            'requirementsApproved': false,
+            'requirementsStatus': builtGate['requirementsStatus'] ?? 'incomplete',
+            'requirementsDeclineReason':
+                builtGate['requirementsDeclineReason'] ?? '',
+            'message': (builtGate['message'] as String? ?? '').trim().isNotEmpty
+                ? builtGate['message'] as String
+                : 'Upload the required documents before registering.',
+          };
+        }
+      }
+
       return hostedAvailability;
     }
 
@@ -2882,6 +3561,22 @@ class EventService {
       };
     }
 
+    if (documentGate != null && documentGate['requirementsApproved'] != true) {
+      return {
+        'allowed': false,
+        'targetAllowed': true,
+        'approvalRequired': false,
+        'registrationOpenToAll': _eventRegistrationOpenToAll(event),
+        'requirementsRequired': documentGate['requirementsRequired'] == true,
+        'requirementsComplete': documentGate['requirementsComplete'] == true,
+        'requirementsApproved': false,
+        'requirementsStatus': documentGate['requirementsStatus'] ?? '',
+        'requirementsDeclineReason':
+            documentGate['requirementsDeclineReason'] ?? '',
+        'message': (documentGate['message'] as String? ?? '').trim(),
+      };
+    }
+
     if (_eventRegistrationOpenToAll(event)) {
       return {
         'allowed': true,
@@ -2962,6 +3657,17 @@ class EventService {
     String eventId,
     String userId,
   ) async {
+    final documentGate = await _fetchStudentDocumentAccessGate(eventId, userId);
+    if (documentGate != null && documentGate['requirementsApproved'] != true) {
+      return {
+        'ok': false,
+        'error': (documentGate['message'] as String? ?? '').trim().isNotEmpty
+            ? documentGate['message'] as String
+            : 'Submit and get your documents approved before registering.',
+        'requirements_required': true,
+      };
+    }
+
     if (MobileBackendService.isConfigured) {
       final result = await _mobileBackend.registerForEvent(
         eventId: eventId,
@@ -7374,4 +8080,14 @@ class EventService {
       return null;
     }
   }
+}
+
+class _CachedStudentRequirements {
+  final List<Map<String, dynamic>> items;
+  final DateTime cachedAt;
+
+  const _CachedStudentRequirements({
+    required this.items,
+    required this.cachedAt,
+  });
 }

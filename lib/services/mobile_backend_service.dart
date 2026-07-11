@@ -88,7 +88,7 @@ class MobileBackendService {
     try {
       final response = await http
           .post(uri, headers: _headers(), body: jsonEncode(body))
-          .timeout(const Duration(seconds: 20));
+          .timeout(const Duration(seconds: 5));
 
       final parsed = _tryDecodeJsonResponse(response.body);
       if (parsed == null) {
@@ -217,5 +217,90 @@ class MobileBackendService {
       payload['user_id'] = trimmedUserId;
     }
     return post('/api/mobile_event_registration_info.php', payload);
+  }
+
+  Future<Map<String, dynamic>> getStudentRequirementsInfo({
+    required String eventId,
+    required String userId,
+  }) {
+    return post('/api/mobile_student_requirements_info.php', {
+      'event_id': eventId.trim(),
+      'user_id': userId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> submitStudentRequirements({
+    required String eventId,
+    required String userId,
+  }) {
+    return post('/api/mobile_student_requirements_submit.php', {
+      'event_id': eventId.trim(),
+      'user_id': userId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> uploadStudentRequirementFile({
+    required String eventId,
+    required String requirementId,
+    required String userId,
+    required List<int> bytes,
+    required String fileName,
+    required String mimeType,
+  }) async {
+    if (!isConfigured) {
+      return {
+        'ok': false,
+        'error':
+            'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
+      };
+    }
+
+    final base = _baseUri!;
+    final uri = base.replace(path: '/api/mobile_student_requirement_document_upload.php');
+    final request = http.MultipartRequest('POST', uri);
+
+    final key = Env.mobilePushApiKey.trim();
+    if (key.isNotEmpty && !key.contains('YOUR_SHARED_KEY')) {
+      request.headers['X-Mobile-Api-Key'] = key;
+    }
+
+    request.fields['event_id'] = eventId.trim();
+    request.fields['requirement_id'] = requirementId.trim();
+    request.fields['user_id'] = userId.trim();
+    request.files.add(
+      http.MultipartFile.fromBytes(
+        'student_file',
+        bytes,
+        filename: fileName,
+      ),
+    );
+
+    try {
+      final streamed = await request.send().timeout(const Duration(seconds: 45));
+      final response = await http.Response.fromStream(streamed);
+      final parsed = _tryDecodeJsonResponse(response.body);
+      if (parsed == null) {
+        return {'ok': false, 'error': 'Invalid server response.'};
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return {
+          'ok': false,
+          'error': parsed['error']?.toString() ??
+              'Upload failed (HTTP ${response.statusCode}).',
+        };
+      }
+      if (parsed['ok'] != true) {
+        return {
+          'ok': false,
+          'error': parsed['error']?.toString() ?? 'Upload failed.',
+        };
+      }
+      return parsed;
+    } catch (e) {
+      return {
+        'ok': false,
+        'error': normalizeTransportError(e.toString()),
+      };
+    }
   }
 }

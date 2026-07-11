@@ -6,6 +6,7 @@ import 'dart:async';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'student_ticket_view.dart';
+import 'student_registration_requirements_page.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/course_theme_utils.dart';
 
@@ -32,10 +33,16 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   bool _isRegistered = false;
   bool _isRegistrationResolved = false;
   bool _isRegistering = false;
+  bool _isPrimaryActionInProgress = false;
+  bool _isOpeningRequirements = false;
   bool _isAccessDenied = false;
   bool _canRegisterNow = false;
   bool _approvalRequired = false;
+  bool _requirementsRequired = false;
+  bool _requirementsApproved = false;
+  String _requirementsStatus = '';
   String _registrationMessage = '';
+  bool _hasStudentRequirements = false;
   int _participantCount = 0;
   List<Map<String, dynamic>> _eventSessions = [];
   bool _isRefreshingEvent = false;
@@ -255,6 +262,26 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     _approvalChannel!.subscribe();
   }
 
+  bool _isRegistrationClosedForEvent() {
+    if (_isRegistered || _event == null) return false;
+    return _eventService.isEventAtCapacity(
+          _event,
+          participantCount: _participantCount,
+        ) ||
+        isEventRegistrationWindowClosed(_event!);
+  }
+
+  String _registrationClosedMessage() {
+    if (_event != null &&
+        _eventService.isEventAtCapacity(
+          _event,
+          participantCount: _participantCount,
+        )) {
+      return 'Registration is full for this event.';
+    }
+    return 'Registration is closed for this event.';
+  }
+
   Future<void> _loadEvent({bool silent = false}) async {
     if (_isRefreshingEvent) return;
     _isRefreshingEvent = true;
@@ -266,6 +293,81 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     }
 
     try {
+      await _loadEventData(silent: silent).timeout(
+        const Duration(seconds: 25),
+        onTimeout: () {
+          if (!mounted) return;
+          setState(() {
+            if (_event == null && widget.initialEvent != null) {
+              _event = Map<String, dynamic>.from(widget.initialEvent!);
+            }
+            _isLoading = false;
+          });
+          unawaited(_recoverEventRegistrationState());
+        },
+      );
+    } catch (_) {
+      if (mounted && !silent) {
+        setState(() {
+          if (_event == null && widget.initialEvent != null) {
+            _event = Map<String, dynamic>.from(widget.initialEvent!);
+          }
+          _isLoading = false;
+        });
+        if (!_isRegistrationResolved) {
+          unawaited(_recoverEventRegistrationState());
+        }
+      }
+    } finally {
+      _isRefreshingEvent = false;
+    }
+  }
+
+  Future<void> _recoverEventRegistrationState() async {
+    if (!mounted || _isRegistered) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id') ?? '';
+    if (userId.isEmpty) {
+      if (mounted) setState(() => _isRegistrationResolved = true);
+      return;
+    }
+
+    try {
+      final requirementRows = await _eventService
+          .fetchEventStudentRequirementsList(
+            widget.eventId,
+            studentId: userId,
+          )
+          .timeout(
+            const Duration(seconds: 6),
+            onTimeout: () => <Map<String, dynamic>>[],
+          );
+
+      if (!mounted) return;
+      setState(() {
+        _hasStudentRequirements = requirementRows.isNotEmpty;
+        if (requirementRows.isNotEmpty && !_isRegistrationClosedForEvent()) {
+          _requirementsRequired = true;
+          _requirementsApproved = false;
+          _requirementsStatus = _requirementsStatus.isEmpty
+              ? 'incomplete'
+              : _requirementsStatus;
+          _canRegisterNow = false;
+          if (_registrationMessage.isEmpty) {
+            _registrationMessage =
+                'Upload the required documents before registering.';
+          }
+        }
+        _isRegistrationResolved = true;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _isRegistrationResolved = true);
+    }
+  }
+
+  Future<void> _loadEventData({required bool silent}) async {
+    try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id') ?? '';
       _bindApprovalRealtime(userId);
@@ -274,7 +376,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         _eventService.isRegistered(widget.eventId, userId),
         _eventService.getEventRegistrationSettings(widget.eventId),
         _eventService.getEventSessions(widget.eventId),
-      ]);
+      ]).timeout(const Duration(seconds: 12));
 
       final baseEvent = results[0] as Map<String, dynamic>?;
       var isReg = results[1] as bool || _isRegistered;
@@ -284,43 +386,84 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         baseEvent,
         registrationSettings,
       );
-      final snapshot = await _eventService.getRegistrationSnapshot(widget.eventId);
+
+      final secondary = await Future.wait([
+        _eventService.getRegistrationSnapshot(widget.eventId),
+        _eventService.getParticipantCount(
+          widget.eventId,
+          eventHint: event.isNotEmpty ? event : null,
+        ),
+        if (!isReg && userId.isNotEmpty)
+          _eventService.getTicketForEvent(widget.eventId, userId)
+        else
+          Future<Map<String, dynamic>>.value({}),
+        if (event.isNotEmpty && !isReg && userId.isNotEmpty)
+          _eventService.getStudentRegistrationAvailability(
+            widget.eventId,
+            userId,
+            preloadedEvent: Map<String, dynamic>.from(event),
+          )
+        else
+          Future<Map<String, dynamic>>.value({}),
+        if (userId.isNotEmpty)
+          _eventService
+              .getStudentRequirementsInfo(widget.eventId, userId)
+              .timeout(
+                const Duration(seconds: 5),
+                onTimeout: () => {'ok': false},
+              )
+        else
+          Future<Map<String, dynamic>>.value({'ok': false}),
+        if (userId.isNotEmpty)
+          _eventService
+              .fetchEventStudentRequirementsList(
+                widget.eventId,
+                studentId: userId,
+              )
+              .timeout(
+                const Duration(seconds: 6),
+                onTimeout: () => <Map<String, dynamic>>[],
+              )
+        else
+          Future<List<Map<String, dynamic>>>.value([]),
+      ]);
+
+      final snapshot = secondary[0] as Map<String, dynamic>?;
+      final count = secondary[1] as int;
+      final ticket = secondary[2] as Map<String, dynamic>;
+      final availability = secondary[3] as Map<String, dynamic>;
+      final reqInfo = secondary[4] as Map<String, dynamic>;
+      final requirementRows = List<Map<String, dynamic>>.from(
+        secondary[5] as List? ?? const [],
+      );
+
       if (snapshot != null && event.isNotEmpty) {
         event.addAll(_eventService.applyRegistrationSnapshot(event, snapshot));
       }
-      final count = await _eventService.getParticipantCount(
-        widget.eventId,
-        eventHint: event.isNotEmpty ? event : null,
-      );
       if (event.isNotEmpty) {
         event['registered_count'] = count;
       }
+
+      if (!isReg && ticket.isNotEmpty) {
+        isReg = true;
+      }
+
       var accessDenied = false;
       var canRegisterNow = false;
       var approvalRequired = false;
+      var requirementsRequired = false;
+      var requirementsApproved = false;
+      var requirementsStatus = '';
       var registrationMessage = '';
 
-      if (!isReg) {
-        // Fallback: if registration row check misses, verify by ticket existence.
-        final ticket = await _eventService.getTicketForEvent(
-          widget.eventId,
-          userId,
-        );
-        if (ticket.isNotEmpty) {
-          isReg = true;
-        }
-      }
-
-      if (event.isNotEmpty && !isReg) {
-        final availability = await _eventService
-            .getStudentRegistrationAvailability(
-              widget.eventId,
-              userId,
-              preloadedEvent: Map<String, dynamic>.from(event),
-            );
+      if (event.isNotEmpty && !isReg && availability.isNotEmpty) {
         accessDenied = availability['targetAllowed'] == false;
         canRegisterNow = availability['allowed'] == true;
         approvalRequired = availability['approvalRequired'] == true;
+        requirementsRequired = availability['requirementsRequired'] == true;
+        requirementsApproved = availability['requirementsApproved'] == true;
+        requirementsStatus =
+            (availability['requirementsStatus'] as String? ?? '').trim();
         registrationMessage = (availability['message'] as String? ?? '').trim();
       } else if (isReg) {
         canRegisterNow = false;
@@ -331,6 +474,57 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final resolvedCount = isReg && count < _participantCount
           ? _participantCount
           : count;
+      final isRegistrationClosed = !isReg &&
+          (_eventService.isEventAtCapacity(
+                event.isNotEmpty ? event : null,
+                participantCount: resolvedCount,
+              ) ||
+              (event.isNotEmpty && isEventRegistrationWindowClosed(event)));
+
+      if (reqInfo['ok'] == true && !isRegistrationClosed) {
+        final reqs = List<Map<String, dynamic>>.from(
+          reqInfo['requirements'] as List? ?? const [],
+        );
+        if (reqs.isNotEmpty) {
+          final access = reqInfo['access'] is Map
+              ? Map<String, dynamic>.from(reqInfo['access'] as Map)
+              : <String, dynamic>{};
+          requirementsRequired = true;
+          requirementsApproved = access['approved'] == true;
+          requirementsStatus = (access['status']?.toString() ?? '').trim();
+          if (!requirementsApproved) {
+            canRegisterNow = false;
+            final reqMessage = (access['message']?.toString() ?? '').trim();
+            registrationMessage = reqMessage.isNotEmpty
+                ? reqMessage
+                : 'Upload the required documents before registering.';
+          }
+        }
+      } else if (!isRegistrationClosed && requirementRows.isNotEmpty) {
+        requirementsRequired = true;
+        if (!requirementsApproved) {
+          canRegisterNow = false;
+          requirementsStatus = requirementsStatus.isEmpty
+              ? 'incomplete'
+              : requirementsStatus;
+          if (registrationMessage.isEmpty) {
+            registrationMessage =
+                'Upload the required documents before registering.';
+          }
+        }
+      }
+
+      final hasStudentRequirements = requirementRows.isNotEmpty;
+
+      if (isRegistrationClosed) {
+        canRegisterNow = false;
+        registrationMessage = _eventService.isEventAtCapacity(
+              event.isNotEmpty ? event : null,
+              participantCount: resolvedCount,
+            )
+            ? 'Registration is full for this event.'
+            : 'Registration is closed for this event.';
+      }
 
       if (mounted) {
         setState(() {
@@ -339,7 +533,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           _isAccessDenied = accessDenied;
           _canRegisterNow = canRegisterNow;
           _approvalRequired = approvalRequired;
+          _requirementsRequired = requirementsRequired;
+          _requirementsApproved = requirementsApproved;
+          _requirementsStatus = requirementsStatus;
           _registrationMessage = registrationMessage;
+          _hasStudentRequirements = hasStudentRequirements;
           _participantCount = resolvedCount;
           _eventSessions = sessions;
           _isRegistrationResolved = true;
@@ -349,12 +547,225 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         _scheduleCapacityRefresh();
         _scheduleApprovalRefresh();
       }
-    } finally {
-      _isRefreshingEvent = false;
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          if (_event == null && widget.initialEvent != null) {
+            _event = Map<String, dynamic>.from(widget.initialEvent!);
+          }
+          _isLoading = false;
+        });
+        if (!_isRegistrationResolved) {
+          unawaited(_recoverEventRegistrationState());
+        }
+      }
     }
   }
 
+  Future<void> _handleRequirementsFlow() async {
+    if (_event == null || _isOpeningRequirements) return;
+    if (_isRegistrationClosedForEvent()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(_registrationClosedMessage())),
+        );
+      }
+      return;
+    }
+
+    setState(() => _isOpeningRequirements = true);
+    try {
+      final result = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => StudentRegistrationRequirementsPage(
+            eventId: widget.eventId,
+            event: Map<String, dynamic>.from(_event!),
+          ),
+        ),
+      );
+
+      if (!mounted) return;
+      await _loadEvent(silent: true);
+      if (result == true && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Documents submitted. Wait for teacher approval.'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isOpeningRequirements = false);
+      } else {
+        _isOpeningRequirements = false;
+      }
+    }
+  }
+
+  Future<void> _handlePrimaryAction() async {
+    if (_isPrimaryActionInProgress) return;
+    _isPrimaryActionInProgress = true;
+    if (mounted) setState(() {});
+
+    try {
+      if (_isRegistered) {
+        await _handleViewTicket();
+        return;
+      }
+
+      if (_isRegistrationClosedForEvent()) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(_registrationClosedMessage())),
+          );
+        }
+        return;
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id') ?? '';
+      if (userId.isNotEmpty) {
+        final requirements = await _eventService.fetchEventStudentRequirementsList(
+          widget.eventId,
+          studentId: userId,
+        );
+        if (requirements.isNotEmpty) {
+          final reqInfo = await _eventService.getStudentRequirementsInfo(
+            widget.eventId,
+            userId,
+          );
+          final access = reqInfo['access'] is Map
+              ? Map<String, dynamic>.from(reqInfo['access'] as Map)
+              : <String, dynamic>{};
+          final approved = access['approved'] == true;
+          final status = (access['status']?.toString() ?? '').trim();
+
+          if (mounted) {
+            setState(() {
+              _requirementsRequired = true;
+              _requirementsApproved = approved;
+              _requirementsStatus = status;
+              if (!approved) {
+                _canRegisterNow = false;
+                _registrationMessage =
+                    (access['message']?.toString() ?? '').trim().isNotEmpty
+                    ? access['message'].toString()
+                    : 'Upload the required documents before registering.';
+              }
+            });
+          }
+
+          if (!approved) {
+            if (status == 'pending_review') {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Your documents are under review. Wait for teacher approval.',
+                    ),
+                  ),
+                );
+              }
+              return;
+            }
+            await _handleRequirementsFlow();
+            return;
+          }
+        }
+      }
+
+      if (_requirementsRequired && !_requirementsApproved) {
+        await _handleRequirementsFlow();
+        return;
+      }
+
+      await _handleRegister();
+    } finally {
+      _isPrimaryActionInProgress = false;
+      if (mounted) setState(() {});
+    }
+  }
+
+  String _primaryActionLabel() {
+    if (_isRegistered) return 'See Ticket';
+    if (_isRegistrationClosedForEvent()) return 'Registration Closed';
+    if (_requirementsRequired && !_requirementsApproved) {
+      if (_requirementsStatus == 'pending_review') {
+        return 'Under Review';
+      }
+      if (_requirementsStatus == 'declined') {
+        return 'Resubmit Documents';
+      }
+      return 'Submit Documents';
+    }
+    if (_canRegisterNow) return 'Register';
+    if (_approvalRequired) return 'Approval Required';
+    if (_hasStudentRequirements && _requirementsRequired && !_requirementsApproved) {
+      return 'Submit Documents';
+    }
+    if (!_isRegistrationResolved) return 'Loading...';
+    return 'Register';
+  }
+
+  IconData _primaryActionIcon() {
+    if (_isRegistered) return Icons.confirmation_num_rounded;
+    if (_isRegistrationClosedForEvent()) return Icons.lock_outline_rounded;
+    if (_requirementsRequired && !_requirementsApproved) {
+      if (_requirementsStatus == 'pending_review') {
+        return Icons.hourglass_top_rounded;
+      }
+      return Icons.upload_file_rounded;
+    }
+    if (_approvalRequired) return Icons.lock_clock_rounded;
+    return Icons.how_to_reg_rounded;
+  }
+
+  bool get _needsRequirementsAction =>
+      !_isRegistrationClosedForEvent() &&
+      _requirementsRequired &&
+      !_requirementsApproved &&
+      _requirementsStatus != 'pending_review';
+
   Future<void> _handleRegister() async {
+    if (_requirementsRequired && !_requirementsApproved) {
+      await _handleRequirementsFlow();
+      return;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id') ?? '';
+    if (userId.isNotEmpty) {
+      final reqInfo = await _eventService.getStudentRequirementsInfo(
+        widget.eventId,
+        userId,
+      );
+      if (reqInfo['ok'] == true) {
+        final reqs = List<Map<String, dynamic>>.from(
+          reqInfo['requirements'] as List? ?? const [],
+        );
+        final access = reqInfo['access'] is Map
+            ? Map<String, dynamic>.from(reqInfo['access'] as Map)
+            : <String, dynamic>{};
+        if (reqs.isNotEmpty && access['approved'] != true) {
+          if (mounted) {
+            setState(() {
+              _requirementsRequired = true;
+              _requirementsApproved = false;
+              _requirementsStatus = (access['status']?.toString() ?? '').trim();
+              _canRegisterNow = false;
+              _registrationMessage =
+                  (access['message']?.toString() ?? '').trim().isNotEmpty
+                  ? access['message'].toString()
+                  : 'Upload the required documents before registering.';
+            });
+          }
+          await _handleRequirementsFlow();
+          return;
+        }
+      }
+    }
+
     if (_approvalRequired && !_canRegisterNow) {
       await _loadEvent(silent: true);
     }
@@ -387,12 +798,17 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       return;
     }
 
-    final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString('user_id') ?? '';
-
     setState(() => _isRegistering = true);
 
     final result = await _eventService.registerForEvent(widget.eventId, userId);
+
+    if (result['requirements_required'] == true) {
+      if (mounted) {
+        setState(() => _isRegistering = false);
+        await _handleRequirementsFlow();
+      }
+      return;
+    }
 
     if (result['ok'] == true) {
       final nextCount = _participantCount + 1;
@@ -557,24 +973,48 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final startDate = parseStoredEventDateTime(startAt);
     final endDate = parseStoredEventDateTime(endAt);
 
-    final isRegistrationFull = _eventService.isEventAtCapacity(
-      _event,
-      participantCount: _participantCount,
-    );
+    final isRegistrationClosed = _isRegistrationClosedForEvent();
+    final isDeclinedDocs = _requirementsStatus == 'declined';
     final registrationStatusLabel = _isRegistered
         ? 'Registered'
-        : (isRegistrationFull
+        : (isRegistrationClosed
               ? 'Closed'
-              : (_canRegisterNow
-                    ? 'Open'
-                    : (_approvalRequired ? 'Approval Required' : 'Closed')));
+              : (_requirementsRequired && !_requirementsApproved
+                    ? (_requirementsStatus == 'pending_review'
+                          ? 'Under Review'
+                          : (_requirementsStatus == 'declined'
+                                ? 'Docs Declined'
+                                : 'Docs Required'))
+                    : (_canRegisterNow
+                          ? 'Open'
+                          : (_approvalRequired
+                                ? 'Approval Required'
+                                : (_hasStudentRequirements &&
+                                        _requirementsRequired &&
+                                        !_requirementsApproved
+                                    ? 'Docs Required'
+                                    : (!_isRegistrationResolved
+                                          ? 'Checking...'
+                                          : 'Open'))))));
     final usesSessions =
         usesEventSessions(_event!) || _eventSessions.isNotEmpty;
     final canTapAction =
         !_isAccessDenied &&
         !_isRegistering &&
-        (_isRegistered || (_isRegistrationResolved && _canRegisterNow));
-    final isActionDisabled = !_isRegistered && !_canRegisterNow;
+        !_isPrimaryActionInProgress &&
+        !_isOpeningRequirements &&
+        (_isRegistered ||
+            (!isRegistrationClosed &&
+                (_needsRequirementsAction ||
+                    (_isRegistrationResolved && _canRegisterNow) ||
+                    (_isRegistrationResolved &&
+                        _hasStudentRequirements &&
+                        _requirementsRequired &&
+                        !_requirementsApproved &&
+                        _requirementsStatus != 'pending_review'))));
+    final isActionDisabled =
+        !_isRegistered &&
+        (isRegistrationClosed || (!_canRegisterNow && !_needsRequirementsAction));
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -784,7 +1224,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           children: [
             if (_registrationMessage.isNotEmpty &&
                 !_isRegistered &&
-                !_approvalRequired) ...[
+                (!_approvalRequired ||
+                    _requirementsRequired ||
+                    isRegistrationClosed)) ...[
               Container(
                 width: double.infinity,
                 margin: const EdgeInsets.only(bottom: 12),
@@ -793,12 +1235,16 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                   vertical: 12,
                 ),
                 decoration: BoxDecoration(
-                  color: _approvalRequired
+                  color: isDeclinedDocs
+                      ? const Color(0xFFFEF2F2)
+                      : _approvalRequired
                       ? const Color(0xFFFFF7ED)
                       : const Color(0xFFF3F4F6),
                   borderRadius: BorderRadius.circular(14),
                   border: Border.all(
-                    color: _approvalRequired
+                    color: isDeclinedDocs
+                        ? const Color(0xFFFECACA)
+                        : _approvalRequired
                         ? const Color(0xFFFED7AA)
                         : const Color(0xFFE5E7EB),
                   ),
@@ -806,11 +1252,15 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                 child: Row(
                   children: [
                     Icon(
-                      _approvalRequired
+                      isDeclinedDocs
+                          ? Icons.error_outline_rounded
+                          : _approvalRequired
                           ? Icons.verified_user_outlined
                           : Icons.info_outline_rounded,
                       size: 18,
-                      color: _approvalRequired
+                      color: isDeclinedDocs
+                          ? const Color(0xFFDC2626)
+                          : _approvalRequired
                           ? const Color(0xFFEA580C)
                           : const Color(0xFF6B7280),
                     ),
@@ -821,7 +1271,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                         style: TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w700,
-                          color: _approvalRequired
+                          color: isDeclinedDocs
+                              ? const Color(0xFFB91C1C)
+                              : _approvalRequired
                               ? const Color(0xFF9A3412)
                               : const Color(0xFF374151),
                         ),
@@ -864,9 +1316,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                   ],
                 ),
                 child: ElevatedButton(
-                  onPressed: canTapAction
-                      ? (_isRegistered ? _handleViewTicket : _handleRegister)
-                      : null,
+                  onPressed: canTapAction ? _handlePrimaryAction : null,
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.transparent,
                     shadowColor: Colors.transparent,
@@ -877,7 +1327,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                       borderRadius: BorderRadius.circular(16),
                     ),
                   ),
-                  child: (_isRegistering || (!_isRegistrationResolved && !_isRegistered))
+                  child: (_isRegistering ||
+                          _isPrimaryActionInProgress ||
+                          _isOpeningRequirements ||
+                          (!_isRegistrationResolved && !_isRegistered))
                       ? const PulseConnectLoader(size: 14, color: Colors.white)
                       : AnimatedSwitcher(
                           duration: const Duration(milliseconds: 280),
@@ -885,27 +1338,21 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                           switchOutCurve: Curves.easeInCubic,
                           child: Row(
                             key: ValueKey(
-                              _isRegistered ? 'ticket_action' : 'register_action',
+                              _isRegistered
+                                  ? 'ticket_action'
+                                  : (_needsRequirementsAction
+                                        ? 'requirements_action'
+                                        : 'register_action'),
                             ),
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
                               Icon(
-                                _isRegistered
-                                    ? Icons.confirmation_num_rounded
-                                    : (_approvalRequired
-                                          ? Icons.lock_clock_rounded
-                                          : Icons.how_to_reg_rounded),
+                                _primaryActionIcon(),
                                 size: 20,
                               ),
                               const SizedBox(width: 10),
                               Text(
-                                _isRegistered
-                                    ? 'See Ticket'
-                                    : (_canRegisterNow
-                                          ? 'Register'
-                                          : (_approvalRequired
-                                                ? 'Approval Required'
-                                                : 'Registration Closed')),
+                                _primaryActionLabel(),
                                 style: const TextStyle(
                                   fontSize: 16,
                                   fontWeight: FontWeight.w800,
