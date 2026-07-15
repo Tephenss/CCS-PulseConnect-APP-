@@ -115,7 +115,7 @@ class _TeacherProposalRequirementsPageState
 
   void _startAutoRefresh() {
     _refreshTimer?.cancel();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 6), (_) {
+    _refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (!mounted || _isLoading || _isUploading || _isSubmitting) return;
       if (_requirementsFeatureUnavailable || _proposalStage == 'approved') {
         return;
@@ -273,40 +273,43 @@ class _TeacherProposalRequirementsPageState
     });
 
     try {
-      final extension = path.extension(file.path).toLowerCase().replaceFirst('.', '');
+      final extension = path
+          .extension(file.path)
+          .toLowerCase()
+          .replaceFirst('.', '');
       final safeExtension = extension.isEmpty ? 'jpg' : extension;
       final storagePath =
           '$_teacherId/$_eventId/$requirementId-${DateTime.now().millisecondsSinceEpoch}.$safeExtension';
 
-      await _supabase.storage.from('proposal-documents').upload(
-        storagePath,
-        file,
-        fileOptions: FileOptions(
-          cacheControl: '0',
-          upsert: true,
-          contentType: _detectMimeType(file.path),
-        ),
-      );
+      await _supabase.storage
+          .from('proposal-documents')
+          .upload(
+            storagePath,
+            file,
+            fileOptions: FileOptions(
+              cacheControl: '0',
+              upsert: true,
+              contentType: _detectMimeType(file.path),
+            ),
+          );
 
-      final publicUrl =
-          _supabase.storage.from('proposal-documents').getPublicUrl(storagePath);
+      final publicUrl = _supabase.storage
+          .from('proposal-documents')
+          .getPublicUrl(storagePath);
 
-      await _supabase.from('event_proposal_documents').upsert(
-        {
-          'event_id': _eventId,
-          'requirement_id': requirementId,
-          'teacher_id': _teacherId,
-          'file_name': path.basename(file.path),
-          'file_path': storagePath,
-          'file_url': publicUrl,
-          'mime_type': _detectMimeType(file.path),
-          'admin_visible': false,
-          'visible_at': null,
-          'uploaded_at': DateTime.now().toUtc().toIso8601String(),
-          'updated_at': DateTime.now().toUtc().toIso8601String(),
-        },
-        onConflict: 'requirement_id,teacher_id',
-      );
+      await _supabase.from('event_proposal_documents').upsert({
+        'event_id': _eventId,
+        'requirement_id': requirementId,
+        'teacher_id': _teacherId,
+        'file_name': path.basename(file.path),
+        'file_path': storagePath,
+        'file_url': publicUrl,
+        'mime_type': _detectMimeType(file.path),
+        'admin_visible': false,
+        'visible_at': null,
+        'uploaded_at': DateTime.now().toUtc().toIso8601String(),
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+      }, onConflict: 'requirement_id,teacher_id');
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -315,9 +318,9 @@ class _TeacherProposalRequirementsPageState
       await _loadData();
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Upload failed: $error')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Upload failed: $error')));
     } finally {
       if (mounted) {
         setState(() {
@@ -361,9 +364,9 @@ class _TeacherProposalRequirementsPageState
       await _loadData();
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Submit failed: $error')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Submit failed: $error')));
     } finally {
       if (mounted) {
         setState(() => _isSubmitting = false);
@@ -371,7 +374,9 @@ class _TeacherProposalRequirementsPageState
     }
   }
 
-  Future<void> _viewUploadedRequirement(Map<String, dynamic> requirement) async {
+  Future<void> _viewUploadedRequirement(
+    Map<String, dynamic> requirement,
+  ) async {
     final requirementId = requirement['id']?.toString() ?? '';
     final submission = _submissionsByRequirement[requirementId];
     final fileUrl = submission?['file_url']?.toString().trim() ?? '';
@@ -719,7 +724,7 @@ class _TeacherProposalRequirementsPageState
                     ),
                     if (_requirements.isEmpty) ...[
                       const SizedBox(height: 18),
-                      _buildWaitingCard()
+                      _buildWaitingCard(),
                     ] else ...[
                       const SizedBox(height: 18),
                       Container(

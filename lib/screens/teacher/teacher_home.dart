@@ -11,6 +11,7 @@ import 'teacher_profile.dart';
 import 'teacher_scan.dart';
 import 'teacher_sections.dart';
 import '../../services/notification_service.dart';
+import '../../services/event_live_service.dart';
 import '../../services/offline_backup_service.dart';
 import '../../services/offline_sync_service.dart';
 import '../../widgets/notifications_modal.dart';
@@ -44,11 +45,17 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   bool _usingCachedUpcomingEvents = false;
   int _unreadCount = 0;
   bool _isOpeningNotifications = false;
-  DateTime _calendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
+  DateTime _calendarMonth = DateTime(
+    DateTime.now().year,
+    DateTime.now().month,
+    1,
+  );
   final _notifService = NotificationService();
   final PageController _headerPageController = PageController();
   int _currentHeaderSlide = 0;
   StreamSubscription<int>? _unreadSubscription;
+  StreamSubscription<String>? _eventLiveSubscription;
+  Timer? _homeLiveFallbackTimer;
   RealtimeChannel? _scannerAccessChannel;
   Timer? _scannerAccessGuardTimer;
 
@@ -61,8 +68,37 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
+      if (!mounted) return;
+      unawaited(_refreshTeacherHomeLive(reason));
+    });
+    _homeLiveFallbackTimer = Timer.periodic(
+      const Duration(seconds: 40),
+      (_) => unawaited(_refreshTeacherHomeLive('fallback')),
+    );
     _loadData();
     _subscribeToNotifications();
+  }
+
+  Future<void> _refreshTeacherHomeLive(String reason) async {
+    if (!mounted || _user == null) return;
+    final teacherId = _user?['id']?.toString() ?? '';
+    if (teacherId.isEmpty) return;
+
+    if (reason == 'inbox' || reason.startsWith('push')) {
+      unawaited(_refreshUnreadCount());
+    }
+
+    final accessible = await _eventService.getTeacherAccessibleEvents(
+      teacherId,
+      forceFresh: reason != 'fallback',
+    );
+    final events = _teacherActiveUpcomingEvents(accessible);
+    if (!mounted) return;
+    setState(() {
+      _upcomingEvents = events;
+      _usingCachedUpcomingEvents = false;
+    });
   }
 
   void _subscribeToNotifications() {
@@ -136,8 +172,9 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     final actorId = teacherId.trim();
     if (actorId.isEmpty) return;
 
-    _scannerAccessChannel =
-        _supabase.channel('public:teacher_home_scan_access:$actorId');
+    _scannerAccessChannel = _supabase.channel(
+      'public:teacher_home_scan_access:$actorId',
+    );
     _scannerAccessChannel!.onPostgresChanges(
       event: PostgresChangeEvent.all,
       schema: 'public',
@@ -154,8 +191,11 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     _scannerAccessChannel!.subscribe();
 
     _scannerAccessGuardTimer = Timer.periodic(
-      const Duration(seconds: 3),
-      (_) => unawaited(_refreshScannerAccessGuard(actorId)),
+      const Duration(seconds: 45),
+      (_) {
+        if (!mounted || _currentIndex != 2) return;
+        unawaited(_refreshScannerAccessGuard(actorId));
+      },
     );
   }
 
@@ -181,12 +221,13 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   Future<void> _loadData() async {
     final user = await _authService.getCurrentUser();
     unawaited(_primeOfflineReadiness(user));
-    
+
     // Initialize Realtime once user is known
     String teacherId = '';
     if (user != null) {
       final userId = user['id']?.toString() ?? '';
       if (userId.isNotEmpty) {
+        EventLiveService.instance.start(userId: userId);
         _notifService.initRealtime(userId);
         teacherId = userId;
       }
@@ -271,6 +312,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _refreshUnreadCount();
+      unawaited(_refreshTeacherHomeLive('resume'));
       final teacherId = (_user?['id']?.toString() ?? '').trim();
       if (teacherId.isNotEmpty) {
         unawaited(_refreshScannerAccessGuard(teacherId));
@@ -282,6 +324,8 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _unreadSubscription?.cancel();
+    _eventLiveSubscription?.cancel();
+    _homeLiveFallbackTimer?.cancel();
     _scannerAccessGuardTimer?.cancel();
     _scannerAccessChannel?.unsubscribe();
     _headerPageController.dispose();
@@ -290,10 +334,14 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    // Events/Sections/Profile stay alive so cached data survives tab switches.
+    // Scan is only mounted while selected so the camera does not linger.
     final screens = [
       _buildHomeContent(),
       const TeacherEventsTab(),
-      const TeacherScanScreen(),
+      _currentIndex == 2
+          ? const TeacherScanScreen()
+          : const SizedBox.shrink(),
       const TeacherSections(),
       TeacherProfile(user: _user, onUpdate: _loadData),
     ];
@@ -311,19 +359,12 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
           children: [
             _isLoading
                 ? const Center(child: PulseConnectLoader())
-                : AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 400),
-                    switchInCurve: Curves.easeInOut,
-                    switchOutCurve: Curves.easeInOut,
-                    transitionBuilder: (Widget child, Animation<double> animation) {
-                      return FadeTransition(opacity: animation, child: child);
-                    },
-                    child: Container(
-                      key: ValueKey<int>(_currentIndex),
-                      child: screens[_currentIndex],
-                    ),
+                : IndexedStack(
+                    index: _currentIndex,
+                    sizing: StackFit.expand,
+                    children: screens,
                   ),
-            
+
             // New Floating Navigation Bar (Matches user design)
             if (!_isLoading)
               Positioned(
@@ -338,9 +379,13 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                         height: 64,
                         padding: const EdgeInsets.symmetric(horizontal: 12),
                         decoration: BoxDecoration(
-                          color: Colors.white, // Solid white for better visibility
+                          color:
+                              Colors.white, // Solid white for better visibility
                           borderRadius: BorderRadius.circular(32),
-                          border: Border.all(color: Colors.grey.shade200, width: 1),
+                          border: Border.all(
+                            color: Colors.grey.shade200,
+                            width: 1,
+                          ),
                           boxShadow: [
                             BoxShadow(
                               color: Colors.black.withValues(alpha: 0.25),
@@ -354,7 +399,11 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                           children: [
                             _buildNavItem(Icons.home_rounded, 'Home', 0),
-                            _buildNavItem(Icons.event_note_rounded, 'Events', 1),
+                            _buildNavItem(
+                              Icons.event_note_rounded,
+                              'Events',
+                              1,
+                            ),
                             _buildNavItem(Icons.groups_rounded, 'Sections', 3),
                             _buildNavItem(Icons.person_rounded, 'Profile', 4),
                           ],
@@ -380,7 +429,11 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                             ),
                           ],
                         ),
-                        child: const Icon(Icons.qr_code_scanner_rounded, color: Colors.white, size: 28),
+                        child: const Icon(
+                          Icons.qr_code_scanner_rounded,
+                          color: Colors.white,
+                          size: 28,
+                        ),
                       ),
                     ),
                   ],
@@ -390,7 +443,6 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
         ),
       ),
     );
-
   }
 
   Widget _buildNavItem(IconData icon, String label, int index) {
@@ -405,7 +457,9 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
           vertical: 8,
         ),
         decoration: BoxDecoration(
-          color: isActive ? _teacherPrimary.withValues(alpha: 0.10) : Colors.transparent,
+          color: isActive
+              ? _teacherPrimary.withValues(alpha: 0.10)
+              : Colors.transparent,
           borderRadius: BorderRadius.circular(20),
         ),
         child: Row(
@@ -442,200 +496,237 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
-        SliverToBoxAdapter(
-          child: Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [_teacherDark, _teacherPrimary],
+          SliverToBoxAdapter(
+            child: Container(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [_teacherDark, _teacherPrimary],
+                ),
+                borderRadius: BorderRadius.vertical(
+                  bottom: Radius.circular(28),
+                ),
               ),
-              borderRadius: BorderRadius.vertical(bottom: Radius.circular(28)),
-            ),
-            child: SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        SafeCircleAvatar(
-                          size: 50,
-                          imagePathOrUrl: _user?['photo_url']?.toString(),
-                          fallbackText: firstName.isNotEmpty
-                              ? firstName[0].toUpperCase()
-                              : 'T',
-                          backgroundColor: _teacherMid,
-                          textColor: Colors.white,
-                          borderColor: const Color(0xFFD4A843),
-                          borderWidth: 2,
-                          textStyle: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w800,
-                            fontSize: 20,
+              child: SafeArea(
+                bottom: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          SafeCircleAvatar(
+                            size: 50,
+                            imagePathOrUrl: _user?['photo_url']?.toString(),
+                            fallbackText: firstName.isNotEmpty
+                                ? firstName[0].toUpperCase()
+                                : 'T',
+                            backgroundColor: _teacherMid,
+                            textColor: Colors.white,
+                            borderColor: const Color(0xFFD4A843),
+                            borderWidth: 2,
+                            textStyle: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 20,
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                _getGreeting(),
-                                style: TextStyle(
-                                  color: Colors.white.withValues(alpha: 0.7),
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  letterSpacing: 0.5,
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  _getGreeting(),
+                                  style: TextStyle(
+                                    color: Colors.white.withValues(alpha: 0.7),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: 0.5,
+                                  ),
                                 ),
-                              ),
-                              AnimatedGreetingText(
-                                text: firstName,
-                                style: const TextStyle(
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.w800,
+                                AnimatedGreetingText(
+                                  text: firstName,
+                                  style: const TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                  baseColor: Colors.white,
+                                  scanColor: const Color(
+                                    0xFF93C5FD,
+                                  ), // Soft blue glow for Teacher
                                 ),
-                                baseColor: Colors.white,
-                                scanColor: const Color(0xFF93C5FD), // Soft blue glow for Teacher
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
-                        // Notification Bell at the top!
-                        Container(
-                          margin: const EdgeInsets.only(left: 12),
-                          width: 48,
-                          height: 48,
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.10),
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: Stack(
-                            clipBehavior: Clip.none,
-                            children: [
-                              Positioned.fill(
-                                child: IconButton(
-                                  padding: const EdgeInsets.all(10),
-                                  splashRadius: 22,
-                                  icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
-                                  onPressed: _isOpeningNotifications ? null : _openNotificationsModal,
+                          // Notification Bell at the top!
+                          Container(
+                            margin: const EdgeInsets.only(left: 12),
+                            width: 48,
+                            height: 48,
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.10),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: [
+                                Positioned.fill(
+                                  child: IconButton(
+                                    padding: const EdgeInsets.all(10),
+                                    splashRadius: 22,
+                                    icon: const Icon(
+                                      Icons.notifications_none_rounded,
+                                      color: Colors.white,
+                                    ),
+                                    onPressed: _isOpeningNotifications
+                                        ? null
+                                        : _openNotificationsModal,
+                                  ),
                                 ),
-                              ),
-                              if (_unreadCount > 0)
-                                Positioned(
-                                  top: -4,
-                                  right: -4,
-                                  child: IgnorePointer(
-                                    child: Container(
-                                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFEF4444),
-                                        borderRadius: BorderRadius.circular(999),
-                                        border: Border.all(color: _teacherMid, width: 1.5),
-                                      ),
-                                      constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
-                                      child: Text(
-                                        _unreadCount > 99 ? '99+' : _unreadCount.toString(),
-                                        textAlign: TextAlign.center,
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w800,
+                                if (_unreadCount > 0)
+                                  Positioned(
+                                    top: -4,
+                                    right: -4,
+                                    child: IgnorePointer(
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 5,
+                                          vertical: 2,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFFEF4444),
+                                          borderRadius: BorderRadius.circular(
+                                            999,
+                                          ),
+                                          border: Border.all(
+                                            color: _teacherMid,
+                                            width: 1.5,
+                                          ),
+                                        ),
+                                        constraints: const BoxConstraints(
+                                          minWidth: 18,
+                                          minHeight: 18,
+                                        ),
+                                        child: Text(
+                                          _unreadCount > 99
+                                              ? '99+'
+                                              : _unreadCount.toString(),
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w800,
+                                          ),
                                         ),
                                       ),
                                     ),
                                   ),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 24),
-                    _buildHeaderSlider(),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-
-        // Upcoming Events Title
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 16, 24, 12), // Reduced top padding
-            child: Row(
-              children: [
-                const Text('Upcoming Events', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F2937))),
-                const Spacer(),
-                GestureDetector(
-                  onTap: () => setState(() => _currentIndex = 1),
-                  child: const Text(
-                    'View All',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: _teacherMid,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-
-        _upcomingEvents.isEmpty
-            ? SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24),
-                  child: Container(
-                    padding: const EdgeInsets.all(40),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.grey.shade200),
-                    ),
-                    child: Column(
-                      children: [
-                        Icon(Icons.event_busy_rounded, size: 48, color: Colors.grey.shade300),
-                        const SizedBox(height: 12),
-                        Text(
-                          _usingCachedUpcomingEvents
-                              ? 'No cached upcoming events'
-                              : 'No upcoming events',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            color: Colors.grey.shade600,
-                          ),
-                        ),
-                        if (_usingCachedUpcomingEvents) ...[
-                          const SizedBox(height: 8),
-                          Text(
-                            'Reconnect once to refresh the latest event list.',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: Colors.grey.shade500,
-                              fontSize: 12,
+                              ],
                             ),
                           ),
                         ],
-                      ],
-                    ),
+                      ),
+                      const SizedBox(height: 24),
+                      _buildHeaderSlider(),
+                    ],
                   ),
                 ),
-              )
-            : SliverList(
-                delegate: SliverChildBuilderDelegate(
-                  (context, index) {
+              ),
+            ),
+          ),
+
+          // Upcoming Events Title
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(
+                24,
+                16,
+                24,
+                12,
+              ), // Reduced top padding
+              child: Row(
+                children: [
+                  const Text(
+                    'Upcoming Events',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF1F2937),
+                    ),
+                  ),
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: () => setState(() => _currentIndex = 1),
+                    child: const Text(
+                      'View All',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: _teacherMid,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          _upcomingEvents.isEmpty
+              ? SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Container(
+                      padding: const EdgeInsets.all(40),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.grey.shade200),
+                      ),
+                      child: Column(
+                        children: [
+                          Icon(
+                            Icons.event_busy_rounded,
+                            size: 48,
+                            color: Colors.grey.shade300,
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            _usingCachedUpcomingEvents
+                                ? 'No cached upcoming events'
+                                : 'No upcoming events',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: Colors.grey.shade600,
+                            ),
+                          ),
+                          if (_usingCachedUpcomingEvents) ...[
+                            const SizedBox(height: 8),
+                            Text(
+                              'Reconnect once to refresh the latest event list.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.grey.shade500,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                )
+              : SliverList(
+                  delegate: SliverChildBuilderDelegate((context, index) {
                     final event = _upcomingEvents[index];
                     return _buildEventCard(event);
-                  },
-                  childCount: _upcomingEvents.length,
+                  }, childCount: _upcomingEvents.length),
                 ),
-              ),
-          const SliverToBoxAdapter(child: SizedBox(height: 100)), // Space for floating nav
+          const SliverToBoxAdapter(
+            child: SizedBox(height: 100),
+          ), // Space for floating nav
         ],
       ),
     );
@@ -649,10 +740,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
           child: PageView(
             controller: _headerPageController,
             onPageChanged: (idx) => setState(() => _currentHeaderSlide = idx),
-            children: [
-              _buildMacbookSlide(),
-              _buildMiniCalendar(),
-            ],
+            children: [_buildMacbookSlide(), _buildMiniCalendar()],
           ),
         ),
         const SizedBox(height: 12),
@@ -667,7 +755,9 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
               width: isActive ? 20 : 8,
               height: 8,
               decoration: BoxDecoration(
-                color: isActive ? const Color(0xFFD4A843) : Colors.white.withValues(alpha: 0.3),
+                color: isActive
+                    ? const Color(0xFFD4A843)
+                    : Colors.white.withValues(alpha: 0.3),
                 borderRadius: BorderRadius.circular(4),
               ),
             );
@@ -718,10 +808,22 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
           // Card swap widget - Max ZOOM version
           CardSwapWidget(
             items: const [
-              CardSwapItem(imagePath: 'assets/sample summit/image1.jpg', label: 'CCS SUMMIT'),
-              CardSwapItem(imagePath: 'assets/sample GA/image1.jpg', label: 'GENERAL ASSEMBLY'),
-              CardSwapItem(imagePath: 'assets/sample exhibit/image1.jpg', label: 'CCS EXHIBIT'),
-              CardSwapItem(imagePath: 'assets/sample CV/image1.jpg', label: 'COMPANY VISIT'),
+              CardSwapItem(
+                imagePath: 'assets/sample summit/image1.jpg',
+                label: 'CCS SUMMIT',
+              ),
+              CardSwapItem(
+                imagePath: 'assets/sample GA/image1.jpg',
+                label: 'GENERAL ASSEMBLY',
+              ),
+              CardSwapItem(
+                imagePath: 'assets/sample exhibit/image1.jpg',
+                label: 'CCS EXHIBIT',
+              ),
+              CardSwapItem(
+                imagePath: 'assets/sample CV/image1.jpg',
+                label: 'COMPANY VISIT',
+              ),
             ],
             cardWidth: 250,
             cardHeight: 140,
@@ -739,8 +841,13 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   Widget _buildMiniCalendar() {
     final now = DateTime.now();
     final monthName = DateFormat('MMMM yyyy').format(_calendarMonth);
-    final daysInMonth = DateTime(_calendarMonth.year, _calendarMonth.month + 1, 0).day;
-    final firstWeekday = DateTime(_calendarMonth.year, _calendarMonth.month, 1).weekday % 7;
+    final daysInMonth = DateTime(
+      _calendarMonth.year,
+      _calendarMonth.month + 1,
+      0,
+    ).day;
+    final firstWeekday =
+        DateTime(_calendarMonth.year, _calendarMonth.month, 1).weekday % 7;
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 4),
@@ -757,10 +864,17 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               IconButton(
-                icon: const Icon(Icons.chevron_left_rounded, color: Colors.white),
+                icon: const Icon(
+                  Icons.chevron_left_rounded,
+                  color: Colors.white,
+                ),
                 onPressed: () {
                   setState(() {
-                    _calendarMonth = DateTime(_calendarMonth.year, _calendarMonth.month - 1, 1);
+                    _calendarMonth = DateTime(
+                      _calendarMonth.year,
+                      _calendarMonth.month - 1,
+                      1,
+                    );
                   });
                 },
               ),
@@ -773,10 +887,17 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                 ),
               ),
               IconButton(
-                icon: const Icon(Icons.chevron_right_rounded, color: Colors.white),
+                icon: const Icon(
+                  Icons.chevron_right_rounded,
+                  color: Colors.white,
+                ),
                 onPressed: () {
                   setState(() {
-                    _calendarMonth = DateTime(_calendarMonth.year, _calendarMonth.month + 1, 1);
+                    _calendarMonth = DateTime(
+                      _calendarMonth.year,
+                      _calendarMonth.month + 1,
+                      1,
+                    );
                   });
                 },
               ),
@@ -790,119 +911,176 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
             children: ['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) {
               return SizedBox(
                 width: 32,
-                child: Text(d, textAlign: TextAlign.center, style: TextStyle(color: Colors.white.withValues(alpha: 0.5), fontWeight: FontWeight.w600, fontSize: 11)),
+                child: Text(
+                  d,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.5),
+                    fontWeight: FontWeight.w600,
+                    fontSize: 11,
+                  ),
+                ),
               );
             }).toList(),
           ),
           const SizedBox(height: 8),
 
           // Calendar Grid
-          ...List.generate(
-            ((daysInMonth + firstWeekday + 6) / 7).ceil(),
-            (week) {
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: List.generate(7, (weekday) {
-                    final day = week * 7 + weekday - firstWeekday + 1;
-                    if (day < 1 || day > daysInMonth) return const SizedBox(width: 32, height: 32);
+          ...List.generate(((daysInMonth + firstWeekday + 6) / 7).ceil(), (
+            week,
+          ) {
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: List.generate(7, (weekday) {
+                  final day = week * 7 + weekday - firstWeekday + 1;
+                  if (day < 1 || day > daysInMonth)
+                    return const SizedBox(width: 32, height: 32);
 
-                    final isToday = day == now.day && _calendarMonth.month == now.month && _calendarMonth.year == now.year;
-                    
-                    // Check if any event falls on this day
-                    final eventsOnThisDay = _upcomingEvents.where((e) {
-                      final startAt = e['start_at'] as String?;
-                      if (startAt == null) return false;
-                      try {
-                        final d = parseStoredEventDateTime(startAt);
-                        if (d == null) return false;
-                        return d.day == day && d.month == _calendarMonth.month && d.year == _calendarMonth.year;
-                      } catch (_) { return false; }
-                    }).toList();
-                    
-                    final hasEvent = eventsOnThisDay.isNotEmpty;
+                  final isToday =
+                      day == now.day &&
+                      _calendarMonth.month == now.month &&
+                      _calendarMonth.year == now.year;
 
-                    Widget dayWidget = Container(
-                      width: 32, height: 32,
-                      decoration: BoxDecoration(shape: BoxShape.circle, color: isToday ? const Color(0xFFD4A843) : Colors.transparent),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            '$day',
-                            style: TextStyle(
-                              color: isToday ? _teacherDark : Colors.white.withValues(alpha: 0.86),
-                              fontWeight: isToday ? FontWeight.w800 : FontWeight.w500,
-                              fontSize: 12,
+                  // Check if any event falls on this day
+                  final eventsOnThisDay = _upcomingEvents.where((e) {
+                    final startAt = e['start_at'] as String?;
+                    if (startAt == null) return false;
+                    try {
+                      final d = parseStoredEventDateTime(startAt);
+                      if (d == null) return false;
+                      return d.day == day &&
+                          d.month == _calendarMonth.month &&
+                          d.year == _calendarMonth.year;
+                    } catch (_) {
+                      return false;
+                    }
+                  }).toList();
+
+                  final hasEvent = eventsOnThisDay.isNotEmpty;
+
+                  Widget dayWidget = Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: isToday
+                          ? const Color(0xFFD4A843)
+                          : Colors.transparent,
+                    ),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          '$day',
+                          style: TextStyle(
+                            color: isToday
+                                ? _teacherDark
+                                : Colors.white.withValues(alpha: 0.86),
+                            fontWeight: isToday
+                                ? FontWeight.w800
+                                : FontWeight.w500,
+                            fontSize: 12,
+                          ),
+                        ),
+                        if (hasEvent)
+                          Container(
+                            width: 4,
+                            height: 4,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: isToday
+                                  ? _teacherDark
+                                  : const Color(0xFFD4A843),
                             ),
                           ),
-                          if (hasEvent)
-                            Container(
-                              width: 4,
-                              height: 4,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: isToday ? _teacherDark : const Color(0xFFD4A843),
-                              ),
-                            ),
-                        ],
-                      ),
-                    );
+                      ],
+                    ),
+                  );
 
-                    if (hasEvent) {
-                      dayWidget = GestureDetector(
-                        onTap: () {
-                          showDialog(
-                            context: context,
-                            builder: (context) {
-                              return AlertDialog(
-                                title: const Text('Events on this Date', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18)),
-                                content: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: eventsOnThisDay.map((e) => ListTile(
-                                    contentPadding: EdgeInsets.zero,
-                                    leading: const Icon(Icons.event_rounded, color: _teacherMid),
-                                    title: Text(e['title'] ?? 'Event', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
-                                    subtitle: Text(
-                                      e['start_at'] != null
-                                          ? (() {
-                                              final parsed = parseStoredEventDateTime(e['start_at']);
-                                              return parsed != null ? DateFormat('hh:mm a').format(parsed) : '';
-                                            })()
-                                          : '',
-                                    ),
-                                    onTap: () {
-                                      Navigator.pop(context);
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (_) => TeacherEventManage(event: e),
-                                        ),
-                                      );
-                                    },
-                                  )).toList(),
+                  if (hasEvent) {
+                    dayWidget = GestureDetector(
+                      onTap: () {
+                        showDialog(
+                          context: context,
+                          builder: (context) {
+                            return AlertDialog(
+                              title: const Text(
+                                'Events on this Date',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 18,
                                 ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(context),
-                                    child: const Text('Close', style: TextStyle(color: _teacherMid)),
+                              ),
+                              content: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: eventsOnThisDay
+                                    .map(
+                                      (e) => ListTile(
+                                        contentPadding: EdgeInsets.zero,
+                                        leading: const Icon(
+                                          Icons.event_rounded,
+                                          color: _teacherMid,
+                                        ),
+                                        title: Text(
+                                          e['title'] ?? 'Event',
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w700,
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                        subtitle: Text(
+                                          e['start_at'] != null
+                                              ? (() {
+                                                  final parsed =
+                                                      parseStoredEventDateTime(
+                                                        e['start_at'],
+                                                      );
+                                                  return parsed != null
+                                                      ? DateFormat(
+                                                          'hh:mm a',
+                                                        ).format(parsed)
+                                                      : '';
+                                                })()
+                                              : '',
+                                        ),
+                                        onTap: () {
+                                          Navigator.pop(context);
+                                          Navigator.push(
+                                            context,
+                                            MaterialPageRoute(
+                                              builder: (_) =>
+                                                  TeacherEventManage(event: e),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                    )
+                                    .toList(),
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(context),
+                                  child: const Text(
+                                    'Close',
+                                    style: TextStyle(color: _teacherMid),
                                   ),
-                                ],
-                              );
-                            }
-                          );
-                        },
-                        child: dayWidget,
-                      );
-                    }
+                                ),
+                              ],
+                            );
+                          },
+                        );
+                      },
+                      child: dayWidget,
+                    );
+                  }
 
-                    return dayWidget;
-                  }),
-                ),
-              );
-            },
-          ),
+                  return dayWidget;
+                }),
+              ),
+            );
+          }),
         ],
       ),
     );
@@ -922,9 +1100,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
         onTap: () {
           Navigator.push(
             context,
-            MaterialPageRoute(
-              builder: (_) => TeacherEventManage(event: event),
-            ),
+            MaterialPageRoute(builder: (_) => TeacherEventManage(event: event)),
           );
         },
         child: Container(
@@ -933,17 +1109,45 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
             color: Colors.white,
             borderRadius: BorderRadius.circular(18),
             border: Border.all(color: Colors.grey.shade200),
-            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 12, offset: const Offset(0, 4))],
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.04),
+                blurRadius: 12,
+                offset: const Offset(0, 4),
+              ),
+            ],
           ),
           child: Row(
             children: [
               Container(
-                width: 56, padding: const EdgeInsets.symmetric(vertical: 10),
-                decoration: BoxDecoration(color: _teacherMid, borderRadius: BorderRadius.circular(14)),
+                width: 56,
+                padding: const EdgeInsets.symmetric(vertical: 10),
+                decoration: BoxDecoration(
+                  color: _teacherMid,
+                  borderRadius: BorderRadius.circular(14),
+                ),
                 child: Column(
                   children: [
-                    Text(startDate != null ? DateFormat('dd').format(startDate) : '--', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800, fontSize: 20)),
-                    Text(startDate != null ? DateFormat('MMM').format(startDate).toUpperCase() : '---', style: TextStyle(color: Colors.white.withValues(alpha: 0.7), fontWeight: FontWeight.w600, fontSize: 11)),
+                    Text(
+                      startDate != null
+                          ? DateFormat('dd').format(startDate)
+                          : '--',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 20,
+                      ),
+                    ),
+                    Text(
+                      startDate != null
+                          ? DateFormat('MMM').format(startDate).toUpperCase()
+                          : '---',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.7),
+                        fontWeight: FontWeight.w600,
+                        fontSize: 11,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -952,24 +1156,58 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(title, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15, color: Color(0xFF1F2937)), maxLines: 1, overflow: TextOverflow.ellipsis),
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 15,
+                        color: Color(0xFF1F2937),
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                     const SizedBox(height: 4),
                     if (startDate != null)
-                      Text(DateFormat('hh:mm a').format(startDate), style: TextStyle(color: Colors.grey.shade600, fontSize: 12, fontWeight: FontWeight.w500)),
+                      Text(
+                        DateFormat('hh:mm a').format(startDate),
+                        style: TextStyle(
+                          color: Colors.grey.shade600,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
                     if (location.isNotEmpty) ...[
                       const SizedBox(height: 2),
                       Row(
                         children: [
-                          Icon(Icons.location_on_outlined, size: 13, color: Colors.grey.shade500),
+                          Icon(
+                            Icons.location_on_outlined,
+                            size: 13,
+                            color: Colors.grey.shade500,
+                          ),
                           const SizedBox(width: 4),
-                          Expanded(child: Text(location, style: TextStyle(color: Colors.grey.shade500, fontSize: 11), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                          Expanded(
+                            child: Text(
+                              location,
+                              style: TextStyle(
+                                color: Colors.grey.shade500,
+                                fontSize: 11,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
                         ],
                       ),
                     ],
                   ],
                 ),
               ),
-              Icon(Icons.chevron_right_rounded, color: Colors.grey.shade400, size: 24),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: Colors.grey.shade400,
+                size: 24,
+              ),
             ],
           ),
         ),
@@ -977,6 +1215,3 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     );
   }
 }
-
-
-

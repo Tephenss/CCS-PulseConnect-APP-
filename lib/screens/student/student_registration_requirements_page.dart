@@ -7,6 +7,7 @@ import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../services/event_service.dart';
+import '../../services/event_live_service.dart';
 import '../../utils/course_theme_utils.dart';
 import '../../widgets/custom_loader.dart';
 
@@ -28,6 +29,7 @@ class StudentRegistrationRequirementsPage extends StatefulWidget {
 class _StudentRegistrationRequirementsPageState
     extends State<StudentRegistrationRequirementsPage> {
   final _eventService = EventService();
+  StreamSubscription<String>? _eventLiveSubscription;
 
   String _studentId = '';
   bool _isLoading = true;
@@ -52,7 +54,41 @@ class _StudentRegistrationRequirementsPageState
   @override
   void initState() {
     super.initState();
+    _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
+      if (!mounted) return;
+      final eventId = widget.eventId;
+      final relevant = reason.contains(eventId) ||
+          reason.contains('student_submissions') ||
+          reason.contains('student_requirements') ||
+          reason.startsWith('push:student_requirements');
+      if (!relevant) return;
+
+      if (reason.contains('student_requirements_approved') &&
+          reason.contains(eventId)) {
+        setState(() {
+          _status = 'approved';
+          _statusMessage = 'Your documents were approved. You may now register.';
+          _declineReason = '';
+        });
+      } else if (reason.contains('student_requirements_declined') &&
+          reason.contains(eventId)) {
+        setState(() {
+          _status = 'declined';
+          _statusMessage =
+              'Your documents were declined. Please update and resubmit.';
+        });
+      }
+
+      _eventService.clearStudentRequirementsCache(eventId);
+      unawaited(_loadData(silent: true));
+    });
     _loadData();
+  }
+
+  @override
+  void dispose() {
+    _eventLiveSubscription?.cancel();
+    super.dispose();
   }
 
   String get _eventTitle =>

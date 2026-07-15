@@ -6,6 +6,12 @@ import 'package:http/http.dart' as http;
 import '../config/env.dart';
 
 class MobileBackendService {
+  static const Duration _defaultTimeout = Duration(seconds: 15);
+  static const Duration _registrationTimeout = Duration(seconds: 45);
+  // Keep short — details button must not wait on a hung PHP host.
+  static const Duration _requirementsTimeout = Duration(seconds: 5);
+  static const Duration _emailTimeout = Duration(seconds: 45);
+
   static bool get isConfigured {
     final uri = _baseUri;
     if (uri == null) return false;
@@ -71,8 +77,9 @@ class MobileBackendService {
 
   static Future<Map<String, dynamic>> post(
     String path,
-    Map<String, dynamic> body,
-  ) async {
+    Map<String, dynamic> body, {
+    Duration? timeout,
+  }) async {
     if (!isConfigured) {
       return {
         'ok': false,
@@ -88,7 +95,7 @@ class MobileBackendService {
     try {
       final response = await http
           .post(uri, headers: _headers(), body: jsonEncode(body))
-          .timeout(const Duration(seconds: 5));
+          .timeout(timeout ?? _defaultTimeout);
 
       final parsed = _tryDecodeJsonResponse(response.body);
       if (parsed == null) {
@@ -144,11 +151,15 @@ class MobileBackendService {
   static String normalizeTransportError(String raw) {
     final message = raw.trim();
     final lower = message.toLowerCase();
+    if (lower.contains('timeoutexception') ||
+        lower.contains('future not completed') ||
+        lower.contains('timed out')) {
+      return 'The server is taking longer than expected. Check your connection and try again.';
+    }
     if (lower.contains('failed host lookup') ||
         lower.contains('socketexception') ||
         lower.contains('network is unreachable') ||
-        lower.contains('connection refused') ||
-        lower.contains('timed out')) {
+        lower.contains('connection refused')) {
       return 'Unable to reach ccspulseconnect.com. Check your internet connection.';
     }
     if (lower.contains('handshake') || lower.contains('certificate')) {
@@ -170,19 +181,27 @@ class MobileBackendService {
     required String email,
     required String fullName,
   }) {
-    return post('/api/mobile_email_verification_send.php', {
-      'user_id': userId,
-      'email': email.trim().toLowerCase(),
-      'full_name': fullName.trim(),
-    });
+    return post(
+      '/api/mobile_email_verification_send.php',
+      {
+        'user_id': userId,
+        'email': email.trim().toLowerCase(),
+        'full_name': fullName.trim(),
+      },
+      timeout: _emailTimeout,
+    );
   }
 
   Future<Map<String, dynamic>> sendPasswordResetCode({
     required String email,
   }) {
-    return post('/api/mobile_password_reset_send.php', {
-      'email': email.trim().toLowerCase(),
-    });
+    return post(
+      '/api/mobile_password_reset_send.php',
+      {
+        'email': email.trim().toLowerCase(),
+      },
+      timeout: _emailTimeout,
+    );
   }
 
   Future<Map<String, dynamic>> sendUnderReviewEmail({
@@ -190,21 +209,29 @@ class MobileBackendService {
     required String email,
     required String fullName,
   }) {
-    return post('/api/mobile_email_under_review_send.php', {
-      'user_id': userId,
-      'email': email.trim().toLowerCase(),
-      'full_name': fullName.trim(),
-    });
+    return post(
+      '/api/mobile_email_under_review_send.php',
+      {
+        'user_id': userId,
+        'email': email.trim().toLowerCase(),
+        'full_name': fullName.trim(),
+      },
+      timeout: _emailTimeout,
+    );
   }
 
   Future<Map<String, dynamic>> registerForEvent({
     required String eventId,
     required String userId,
   }) {
-    return post('/api/mobile_register_event.php', {
-      'event_id': eventId.trim(),
-      'user_id': userId.trim(),
-    });
+    return post(
+      '/api/mobile_register_event.php',
+      {
+        'event_id': eventId.trim(),
+        'user_id': userId.trim(),
+      },
+      timeout: _registrationTimeout,
+    );
   }
 
   Future<Map<String, dynamic>> getEventRegistrationInfo({
@@ -216,27 +243,39 @@ class MobileBackendService {
     if (trimmedUserId.isNotEmpty) {
       payload['user_id'] = trimmedUserId;
     }
-    return post('/api/mobile_event_registration_info.php', payload);
+    return post(
+      '/api/mobile_event_registration_info.php',
+      payload,
+      timeout: _requirementsTimeout,
+    );
   }
 
   Future<Map<String, dynamic>> getStudentRequirementsInfo({
     required String eventId,
     required String userId,
   }) {
-    return post('/api/mobile_student_requirements_info.php', {
-      'event_id': eventId.trim(),
-      'user_id': userId.trim(),
-    });
+    return post(
+      '/api/mobile_student_requirements_info.php',
+      {
+        'event_id': eventId.trim(),
+        'user_id': userId.trim(),
+      },
+      timeout: _requirementsTimeout,
+    );
   }
 
   Future<Map<String, dynamic>> submitStudentRequirements({
     required String eventId,
     required String userId,
   }) {
-    return post('/api/mobile_student_requirements_submit.php', {
-      'event_id': eventId.trim(),
-      'user_id': userId.trim(),
-    });
+    return post(
+      '/api/mobile_student_requirements_submit.php',
+      {
+        'event_id': eventId.trim(),
+        'user_id': userId.trim(),
+      },
+      timeout: _requirementsTimeout,
+    );
   }
 
   Future<Map<String, dynamic>> uploadStudentRequirementFile({

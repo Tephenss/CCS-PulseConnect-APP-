@@ -4,7 +4,6 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'auth_service.dart';
 import 'event_service.dart';
-import 'push_notification_service.dart';
 import '../config/env.dart';
 
 enum NotificationType { info, success, warning, error, event }
@@ -36,23 +35,57 @@ class NotificationService {
 
   factory NotificationService() => _instance;
 
+  /// Wired from [PushNotificationService.initialize] to avoid import cycles.
+  static Future<void> Function({
+    required String title,
+    required String body,
+    String? eventId,
+    String? payload,
+  })? showEventToast;
+
+  static Future<void> Function({
+    required String title,
+    required String body,
+  })? showCertificateToast;
+
   final _supabase = Supabase.instance.client;
   final EventService _eventService = EventService();
-  final PushNotificationService _pushNotificationService =
-      PushNotificationService();
   final _unreadController = StreamController<int>.broadcast();
   Stream<int> get unreadCountStream => _unreadController.stream;
 
   RealtimeChannel? _notifChannel;
   Timer? _pollTimer;
+  Timer? _refreshDebounceTimer;
   String? _activeUserId;
   List<AppNotification> _cachedNotifications = [];
+  List<AppNotification>? _cachedDerivedNotifications;
   DateTime? _lastRefreshAt;
+  DateTime? _lastDerivedFetchAt;
   bool _isRefreshing = false;
+  bool _pendingForceRefresh = false;
+  final Map<String, DateTime> _effectiveEndCache = {};
+
+  static const Duration _refreshCacheTtl = Duration(seconds: 8);
+  static const Duration _derivedFetchTtl = Duration(seconds: 20);
+  static const String _eventNotificationColumns =
+      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_structure,event_mode,event_for,allow_registration,cover_image_url,location,event_type';
+  static const String _eventNotificationColumnsFallback =
+      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for,cover_image_url';
 
   bool get _isCacheFresh =>
       _lastRefreshAt != null &&
-      DateTime.now().difference(_lastRefreshAt!) < const Duration(seconds: 8);
+      DateTime.now().difference(_lastRefreshAt!) < _refreshCacheTtl;
+
+  bool get _isDerivedFresh =>
+      _cachedDerivedNotifications != null &&
+      _lastDerivedFetchAt != null &&
+      DateTime.now().difference(_lastDerivedFetchAt!) < _derivedFetchTtl;
+
+  void invalidateLiveCaches() {
+    _cachedDerivedNotifications = null;
+    _lastDerivedFetchAt = null;
+    _lastRefreshAt = null;
+  }
 
   String _shownInteractiveNotificationsKey(String userId) =>
       'shown_local_interactive_notifications_$userId';
@@ -76,6 +109,7 @@ class NotificationService {
   void dispose() {
     _notifChannel?.unsubscribe();
     _pollTimer?.cancel();
+    _refreshDebounceTimer?.cancel();
   }
 
   /// Initializes realtime listeners for notifications.
@@ -86,7 +120,9 @@ class NotificationService {
     final bool needsRebind = _notifChannel == null || _activeUserId != userId;
     if (!needsRebind) {
       _startPolling();
-      unawaited(refresh(force: true));
+      Future<void>.delayed(const Duration(milliseconds: 400), () {
+        unawaited(refresh(force: true));
+      });
       return;
     }
 
@@ -98,9 +134,27 @@ class NotificationService {
 
     _notifChannel = _supabase.channel('public:notifications_changes:$userId');
 
-    void scheduleRefresh() {
-      unawaited(refresh(force: true));
+    void scheduleRefresh({bool force = true}) {
+      _refreshDebounceTimer?.cancel();
+      _refreshDebounceTimer = Timer(const Duration(milliseconds: 120), () {
+        unawaited(refresh(force: force));
+      });
     }
+
+    // Listen for persisted inbox rows (catch-up after login / logged-out delivery).
+    _notifChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
+      table: 'user_notifications',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'user_id',
+        value: userId,
+      ),
+      callback: (payload) {
+        scheduleRefresh();
+      },
+    );
 
     // Listen for any changes in events (since notifs are derived from these)
     _notifChannel!.onPostgresChanges(
@@ -108,7 +162,9 @@ class NotificationService {
       schema: 'public',
       table: 'events',
       callback: (payload) {
-        scheduleRefresh();
+        EventService.invalidateEventListCache();
+        invalidateLiveCaches();
+        scheduleRefresh(force: true);
       },
     );
 
@@ -217,13 +273,15 @@ class NotificationService {
 
     _notifChannel!.subscribe();
     _startPolling();
-    unawaited(refresh(force: true));
+    Future<void>.delayed(const Duration(milliseconds: 400), () {
+      unawaited(refresh(force: true));
+    });
   }
 
   void _startPolling() {
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(seconds: 12), (_) {
-      unawaited(refresh());
+    _pollTimer = Timer.periodic(const Duration(seconds: 40), (_) {
+      unawaited(refresh(force: false));
     });
   }
 
@@ -236,10 +294,44 @@ class NotificationService {
   bool _eventUsesSessionFlow(Map<String, dynamic> event) {
     final structure = event['event_structure']?.toString().toLowerCase() ?? '';
     final mode = event['event_mode']?.toString().toLowerCase() ?? '';
-    return event['uses_sessions'] == true ||
-        structure == 'one_seminar' ||
+    return structure == 'one_seminar' ||
         structure == 'two_seminars' ||
         mode == 'seminar_based';
+  }
+
+  Future<List<dynamic>> _loadEventsForNotifications() async {
+    try {
+      return await _supabase
+          .from('events')
+          .select(_eventNotificationColumns)
+          .inFilter('status', [
+            'published',
+            'draft',
+            'pending',
+            'approved',
+            'archived',
+            'expired',
+            'finished',
+          ])
+          .order('updated_at', ascending: false)
+          .limit(80);
+    } catch (e) {
+      debugPrint('Notifications: events fallback select: $e');
+      return await _supabase
+          .from('events')
+          .select(_eventNotificationColumnsFallback)
+          .inFilter('status', [
+            'published',
+            'draft',
+            'pending',
+            'approved',
+            'archived',
+            'expired',
+            'finished',
+          ])
+          .order('updated_at', ascending: false)
+          .limit(80);
+    }
   }
 
   DateTime? _tryParseLocalDate(dynamic raw) {
@@ -385,8 +477,9 @@ class NotificationService {
 
   Future<DateTime> _resolveEffectiveEventEnd(
     Map<String, dynamic> event,
-    DateTime fallback,
-  ) async {
+    DateTime fallback, {
+    Map<String, List<Map<String, dynamic>>>? sessionsByEventId,
+  }) async {
     if (!_eventUsesSessionFlow(event)) {
       return fallback;
     }
@@ -395,7 +488,13 @@ class NotificationService {
       final eventId = event['id']?.toString() ?? '';
       if (eventId.isEmpty) return fallback;
 
-      final sessions = await _eventService.getEventSessions(eventId);
+      final cachedEnd = _effectiveEndCache[eventId];
+      if (cachedEnd != null) {
+        return cachedEnd;
+      }
+
+      final sessions = sessionsByEventId?[eventId] ??
+          await _eventService.getEventSessions(eventId);
       if (sessions.isEmpty) return fallback;
 
       var effectiveEnd = fallback;
@@ -408,9 +507,40 @@ class NotificationService {
         }
       }
 
+      _effectiveEndCache[eventId] = effectiveEnd;
       return effectiveEnd;
     } catch (_) {
       return fallback;
+    }
+  }
+
+  Future<Map<String, List<Map<String, dynamic>>>> _batchFetchEventSessions(
+    Iterable<String> eventIds,
+  ) async {
+    final ids = eventIds
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList();
+    if (ids.isEmpty) {
+      return {};
+    }
+
+    try {
+      final rows = await _supabase
+          .from('event_sessions')
+          .select('event_id,end_at,start_at')
+          .inFilter('event_id', ids);
+
+      final grouped = <String, List<Map<String, dynamic>>>{};
+      for (final raw in List<Map<String, dynamic>>.from(rows)) {
+        final eventId = raw['event_id']?.toString().trim() ?? '';
+        if (eventId.isEmpty) continue;
+        grouped.putIfAbsent(eventId, () => []).add(raw);
+      }
+      return grouped;
+    } catch (_) {
+      return {};
     }
   }
 
@@ -530,21 +660,27 @@ class NotificationService {
       }
 
       if (isCertificateReady) {
-        await _pushNotificationService.showLocalCertificateNotification(
-          title: notification.title,
-          body: notification.message,
-        );
+        final showCert = showCertificateToast;
+        if (showCert != null) {
+          await showCert(
+            title: notification.title,
+            body: notification.message,
+          );
+        }
       } else {
         final payload =
             isProposalRequirementsRequested && notification.eventId != null
             ? 'proposal_requirements_requested:${notification.eventId!.trim()}'
             : null;
-        await _pushNotificationService.showLocalEventNotification(
-          title: notification.title,
-          body: notification.message,
-          eventId: notification.eventId,
-          payload: payload,
-        );
+        final showEvent = showEventToast;
+        if (showEvent != null) {
+          await showEvent(
+            title: notification.title,
+            body: notification.message,
+            eventId: notification.eventId,
+            payload: payload,
+          );
+        }
       }
       shownIds.add(notification.id);
       didChange = true;
@@ -580,7 +716,14 @@ class NotificationService {
   }
 
   Future<void> refresh({bool force = false}) async {
-    if (_isRefreshing) return;
+    if (_isRefreshing) {
+      // Don't drop force refreshes that arrive while a fetch is in flight
+      // (realtime + FCM often overlap) — queue one follow-up pass.
+      if (force) {
+        _pendingForceRefresh = true;
+      }
+      return;
+    }
     if (!force && _isCacheFresh) {
       _emitUnreadCount();
       return;
@@ -591,7 +734,9 @@ class NotificationService {
       final previousNotifications = List<AppNotification>.from(
         _cachedNotifications,
       );
-      final nextNotifications = await _fetchNotifications();
+      final nextNotifications = await _fetchNotifications(
+        forceDerived: force || !_isDerivedFresh,
+      );
       await _showFreshInteractiveNotifications(
         previousNotifications,
         nextNotifications,
@@ -601,6 +746,10 @@ class NotificationService {
       _emitUnreadCount();
     } finally {
       _isRefreshing = false;
+      if (_pendingForceRefresh) {
+        _pendingForceRefresh = false;
+        unawaited(refresh(force: true));
+      }
     }
   }
 
@@ -611,7 +760,70 @@ class NotificationService {
     return List<AppNotification>.from(_cachedNotifications);
   }
 
-  Future<List<AppNotification>> _fetchNotifications() async {
+  NotificationType _notificationTypeFromInbox(String rawType) {
+    switch (rawType.trim().toLowerCase()) {
+      case 'success':
+        return NotificationType.success;
+      case 'warning':
+        return NotificationType.warning;
+      case 'error':
+        return NotificationType.error;
+      case 'event':
+        return NotificationType.event;
+      default:
+        return NotificationType.info;
+    }
+  }
+
+  Future<List<AppNotification>> _fetchInboxNotifications(String userId) async {
+    if (userId.isEmpty) {
+      return [];
+    }
+
+    try {
+      final rows = await _supabase
+          .from('user_notifications')
+          .select('id,title,body,notification_type,event_id,data,created_at,updated_at')
+          .eq('user_id', userId)
+          .order('created_at', ascending: false)
+          .limit(50);
+
+      final notifications = <AppNotification>[];
+      for (final raw in List<Map<String, dynamic>>.from(rows)) {
+        final row = _asStringMap(raw);
+        final id = row['id']?.toString().trim() ?? '';
+        if (id.isEmpty) {
+          continue;
+        }
+
+        final createdRaw =
+            row['updated_at']?.toString() ?? row['created_at']?.toString() ?? '';
+        final timestamp = _tryParseLocalDate(createdRaw) ?? DateTime.now();
+        final eventId = row['event_id']?.toString().trim();
+        final inboxType = row['notification_type']?.toString() ?? 'info';
+
+        notifications.add(
+          AppNotification(
+            id: 'inbox_$id',
+            title: row['title']?.toString() ?? 'Notification',
+            message: row['body']?.toString() ?? '',
+            timestamp: timestamp,
+            type: _notificationTypeFromInbox(inboxType),
+            eventId: eventId != null && eventId.isNotEmpty ? eventId : null,
+          ),
+        );
+      }
+
+      return notifications;
+    } catch (e) {
+      debugPrint('Notifications: inbox fetch error: $e');
+      return [];
+    }
+  }
+
+  Future<List<AppNotification>> _fetchNotifications({
+    bool forceDerived = false,
+  }) async {
     List<AppNotification> notifications = [];
     final now = DateTime.now();
 
@@ -627,6 +839,58 @@ class NotificationService {
           (userData['id']?.toString().trim().isNotEmpty == true)
               ? userData['id'].toString().trim()
               : (_activeUserId ?? '');
+
+      final inboxNotifications =
+          await _fetchInboxNotifications(currentUserId);
+      notifications.addAll(inboxNotifications);
+
+      if (!forceDerived && _isDerivedFresh) {
+        notifications.addAll(_cachedDerivedNotifications!);
+        await _applyNotificationReadStates(notifications, currentUserId);
+        notifications.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+        if (notifications.length > 50) {
+          notifications = notifications.sublist(0, 50);
+        }
+        return notifications;
+      }
+
+      final derivedNotifications = await _fetchDerivedNotifications(
+        role: role,
+        currentUserId: currentUserId,
+        now: now,
+        inboxNotifications: inboxNotifications,
+      );
+      _cachedDerivedNotifications = derivedNotifications;
+      _lastDerivedFetchAt = DateTime.now();
+      notifications.addAll(derivedNotifications);
+      await _applyNotificationReadStates(notifications, currentUserId);
+      notifications.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+      if (notifications.length > 50) {
+        notifications = notifications.sublist(0, 50);
+      }
+      return notifications;
+    } catch (e) {
+      debugPrint('Notifications: fatal fetch error: $e');
+      if (_cachedDerivedNotifications != null) {
+        notifications.addAll(_cachedDerivedNotifications!);
+      }
+      return notifications;
+    }
+  }
+
+  Future<List<AppNotification>> _fetchDerivedNotifications({
+    required String role,
+    required String currentUserId,
+    required DateTime now,
+    required List<AppNotification> inboxNotifications,
+  }) async {
+    List<AppNotification> notifications = [];
+    try {
+      final authService = AuthService();
+      final inboxEventIds = <String>{
+        for (final item in inboxNotifications)
+          if (item.eventId != null && item.eventId!.isNotEmpty) item.eventId!,
+      };
       final registeredEventIds = <String>{};
       final teacherAssignedEventIds = <String, DateTime?>{};
       final approvedRegistrationRows = <Map<String, dynamic>>[];
@@ -724,13 +988,23 @@ class NotificationService {
 
       List<dynamic> events = const [];
       try {
-        events = await _supabase
-            .from('events')
-            .select()
-            .order('start_at', ascending: true);
+        events = await _loadEventsForNotifications();
       } catch (e) {
         debugPrint('Notifications: failed to load events: $e');
       }
+
+      final seminarEventIds = <String>{};
+      for (final rawEvent in events) {
+        if (rawEvent is! Map) continue;
+        final event = Map<String, dynamic>.from(rawEvent);
+        if (_eventUsesSessionFlow(event)) {
+          final eventId = event['id']?.toString().trim() ?? '';
+          if (eventId.isNotEmpty) {
+            seminarEventIds.add(eventId);
+          }
+        }
+      }
+      final sessionsByEventId = await _batchFetchEventSessions(seminarEventIds);
 
       final eventsById = <String, Map<String, dynamic>>{};
       for (final rawEvent in events) {
@@ -764,7 +1038,11 @@ class NotificationService {
             continue;
           }
 
-          final effectiveEndAt = await _resolveEffectiveEventEnd(event, endAt);
+          final effectiveEndAt = await _resolveEffectiveEventEnd(
+            event,
+            endAt,
+            sessionsByEventId: sessionsByEventId,
+          );
           final status = event['status'];
           final title = event['title'];
           final eventId = event['id'].toString();
@@ -784,7 +1062,6 @@ class NotificationService {
           final requirementsSubmittedAt =
               _tryParseLocalDate(event['requirements_submitted_at']) ??
               updatedAt;
-          final allowsOpenRegistration = _eventAllowsOpenRegistration(event);
           final description = event['description'] ?? '';
 
           // Check if event has actually ended
@@ -911,22 +1188,29 @@ class NotificationService {
           }
 
           if (status == 'published') {
-          // New Published Event / Registration Open
-          // Visible to Students and Assigned Teachers as long as the event hasn't finished yet
+          // New Published Event — show for targeted students/teachers even if registration is closed.
+          final studentQualified = role == 'student' &&
+              _eventService.isStudentAllowedForEvent(
+                event,
+                yearLevel: studentYearLevel,
+                courseCode: studentCourseCode,
+              );
           bool shouldNotify = (role == 'teacher' && isTeacherAssigned) ||
-              (role == 'student' && allowsOpenRegistration);
-          
-          if (shouldNotify && !isFinished && now.difference(updatedAt).inDays <= 7) {
-            notifications.add(AppNotification(
-              id: 'pub_${eventId}_${updatedAt.millisecondsSinceEpoch}',
-              title: role == 'student' ? 'Registration Open!' : 'Event Published!',
-              message: role == 'student' 
-                  ? 'Registration is now available for "$title".'
-                  : 'The event "$title" has been published and is now visible to students.',
-              timestamp: updatedAt,
-              type: NotificationType.info,
-              eventId: eventId,
-            ));
+              studentQualified;
+
+          if (shouldNotify && !isFinished && now.difference(updatedAt).inDays <= 30) {
+            if (!inboxEventIds.contains(eventId)) {
+              notifications.add(AppNotification(
+                id: 'pub_${eventId}_${updatedAt.millisecondsSinceEpoch}',
+                title: role == 'student' ? 'Registration Open!' : 'Event Published!',
+                message: role == 'student'
+                    ? 'Registration is now available for "$title".'
+                    : 'The event "$title" has been published and is now visible to students.',
+                timestamp: updatedAt,
+                type: NotificationType.info,
+                eventId: eventId,
+              ));
+            }
           }
 
           if (!isFinished) {
@@ -1259,46 +1543,7 @@ class NotificationService {
       }
 
       // Fetch read status tracking from Supabase
-      DateTime lastReadDate = DateTime(2000);
-      List<String> readIds = [];
-      try {
-        final userId = userData['id'];
-        
-        // Get watermark
-        final watermarkResponse = await _supabase
-            .from('user_notification_watermarks')
-            .select('last_read_at')
-            .eq('user_id', userId)
-            .maybeSingle();
-            
-        if (watermarkResponse != null) {
-          lastReadDate = DateTime.parse(watermarkResponse['last_read_at'] as String).toLocal();
-        }
-
-        // Get individual read IDs
-        final readsResponse = await _supabase
-            .from('user_notification_reads')
-            .select('notification_id')
-            .eq('user_id', userId);
-            
-        readIds = (readsResponse as List).map((row) => row['notification_id'] as String).toList();
-      } catch (e) {
-         debugPrint("Error fetching Supabase read statuses: $e");
-      }
-      
-      for (var notif in notifications) {
-        if (readIds.contains(notif.id)) {
-          notif.isRead = true;
-          continue;
-        }
-
-        final isScannerAssigned = notif.id.startsWith('scan_assign_');
-        if (!isScannerAssigned &&
-            (notif.timestamp.isBefore(lastReadDate) ||
-                notif.timestamp.isAtSameMomentAs(lastReadDate))) {
-          notif.isRead = true;
-        }
-      }
+      await _applyNotificationReadStates(notifications, currentUserId);
 
       // Sort by timestamp descending (newest first)
       // If timestamps are equal, put manual actions (pub/reg_closed) on top
@@ -1307,8 +1552,8 @@ class NotificationService {
         if (cmp != 0) return cmp;
         
         // Priority for specific IDs if timestamps are within the same minute
-        bool aIsManual = a.id.startsWith('pub_') || a.id.startsWith('reg_closed_') || a.id.startsWith('reject_') || a.id.startsWith('approved_');
-        bool bIsManual = b.id.startsWith('pub_') || b.id.startsWith('reg_closed_') || b.id.startsWith('reject_') || b.id.startsWith('approved_');
+        bool aIsManual = a.id.startsWith('pub_') || a.id.startsWith('reg_closed_') || a.id.startsWith('reject_') || a.id.startsWith('approved_') || a.id.startsWith('inbox_');
+        bool bIsManual = b.id.startsWith('pub_') || b.id.startsWith('reg_closed_') || b.id.startsWith('reject_') || b.id.startsWith('approved_') || b.id.startsWith('inbox_');
         aIsManual = aIsManual || a.id.startsWith('reg_approved_');
         bIsManual = bIsManual || b.id.startsWith('reg_approved_');
         if (aIsManual && !bIsManual) return -1;
@@ -1324,8 +1569,58 @@ class NotificationService {
 
       return notifications;
     } catch (e) {
-      debugPrint('Notifications: fatal fetch error: $e');
-      return [];
+      debugPrint('Notifications: derived fetch error: $e');
+      return _cachedDerivedNotifications ?? notifications;
+    }
+  }
+
+  Future<void> _applyNotificationReadStates(
+    List<AppNotification> notifications,
+    String currentUserId,
+  ) async {
+    if (currentUserId.isEmpty || notifications.isEmpty) {
+      return;
+    }
+
+    DateTime lastReadDate = DateTime(2000);
+    List<String> readIds = [];
+    try {
+      final watermarkResponse = await _supabase
+          .from('user_notification_watermarks')
+          .select('last_read_at')
+          .eq('user_id', currentUserId)
+          .maybeSingle();
+
+      if (watermarkResponse != null) {
+        lastReadDate = DateTime.parse(
+          watermarkResponse['last_read_at'] as String,
+        ).toLocal();
+      }
+
+      final readsResponse = await _supabase
+          .from('user_notification_reads')
+          .select('notification_id')
+          .eq('user_id', currentUserId);
+
+      readIds = (readsResponse as List)
+          .map((row) => row['notification_id'] as String)
+          .toList();
+    } catch (e) {
+      debugPrint('Error fetching Supabase read statuses: $e');
+    }
+
+    for (final notif in notifications) {
+      if (readIds.contains(notif.id)) {
+        notif.isRead = true;
+        continue;
+      }
+
+      final isScannerAssigned = notif.id.startsWith('scan_assign_');
+      if (!isScannerAssigned &&
+          (notif.timestamp.isBefore(lastReadDate) ||
+              notif.timestamp.isAtSameMomentAs(lastReadDate))) {
+        notif.isRead = true;
+      }
     }
   }
 

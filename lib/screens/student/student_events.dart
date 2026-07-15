@@ -1,10 +1,12 @@
 import 'dart:async';
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
+import '../../services/event_live_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'student_event_details.dart';
 import 'student_event_evaluation.dart';
@@ -35,6 +37,7 @@ class _StudentEventsState extends State<StudentEvents>
 
   late TabController _tabController;
   Timer? _refreshTimer;
+  StreamSubscription<String>? _eventLiveSubscription;
   bool _isRefreshingEvents = false;
 
   @override
@@ -43,8 +46,12 @@ class _StudentEventsState extends State<StudentEvents>
     WidgetsBinding.instance.addObserver(this);
     _tabController = TabController(length: 2, vsync: this);
     _tabController.addListener(_handleTabSelection);
-    _refreshTimer = Timer.periodic(const Duration(seconds: 12), (_) {
-      _reloadEventsSilently();
+    _eventLiveSubscription = EventLiveService.instance.changes.listen((_) {
+      if (!mounted || _isRefreshingEvents) return;
+      unawaited(_loadEvents(showLoader: false, forceFresh: true));
+    });
+    _refreshTimer = Timer.periodic(const Duration(seconds: 40), (_) {
+      _reloadEventsSilently(forceFresh: false);
     });
     _loadEvents();
   }
@@ -52,6 +59,7 @@ class _StudentEventsState extends State<StudentEvents>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _eventLiveSubscription?.cancel();
     _refreshTimer?.cancel();
     _tabController.removeListener(_handleTabSelection);
     _tabController.dispose();
@@ -61,7 +69,7 @@ class _StudentEventsState extends State<StudentEvents>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _reloadEventsSilently();
+      _loadEvents(showLoader: false, forceFresh: true);
     }
   }
 
@@ -72,15 +80,19 @@ class _StudentEventsState extends State<StudentEvents>
     }
   }
 
-  Future<void> _reloadEventsSilently() async {
+  Future<void> _reloadEventsSilently({bool forceFresh = false}) async {
     if (!mounted || _isRefreshingEvents) return;
-    await _loadEvents(showLoader: false);
+    await _loadEvents(showLoader: false, forceFresh: forceFresh);
   }
 
-  Future<void> _loadEvents({bool showLoader = true}) async {
+  Future<void> _loadEvents({
+    bool showLoader = true,
+    bool forceFresh = false,
+  }) async {
     if (_isRefreshingEvents) return;
     _isRefreshingEvents = true;
-    if (showLoader && mounted) {
+    final hasCachedList = _activeEvents.isNotEmpty || _expiredEvents.isNotEmpty;
+    if (showLoader && !hasCachedList && mounted) {
       setState(() => _isLoading = true);
     }
     try {
@@ -100,11 +112,13 @@ class _StudentEventsState extends State<StudentEvents>
         _eventService.getActiveEvents(
           yearLevel: yearLevel,
           courseCode: courseCode,
+          forceFresh: forceFresh,
         ),
         userId.isNotEmpty
             ? _eventService.getExpiredEventsOpenForEvaluation(
                 studentId: userId,
                 yearLevel: yearLevel,
+                forceFresh: forceFresh,
               )
             : Future.value(<Map<String, dynamic>>[]),
       ]);
@@ -137,12 +151,24 @@ class _StudentEventsState extends State<StudentEvents>
           _applyFilters();
           _isLoading = false;
         });
+        _precacheEventCovers([...active, ...expired]);
       }
     } finally {
       _isRefreshingEvents = false;
       if (mounted && _isLoading) {
         setState(() => _isLoading = false);
       }
+    }
+  }
+
+  void _precacheEventCovers(List<Map<String, dynamic>> events) {
+    if (!mounted) return;
+    for (final event in events) {
+      final url = (event['cover_image_url'] ?? '').toString().trim();
+      if (url.isEmpty) continue;
+      unawaited(
+        precacheImage(CachedNetworkImageProvider(url), context),
+      );
     }
   }
 
@@ -511,7 +537,7 @@ class _StudentEventsState extends State<StudentEvents>
     }
 
     return RefreshIndicator(
-      onRefresh: _loadEvents,
+      onRefresh: () => _loadEvents(forceFresh: true),
       color: primaryDark,
       child: ListView.builder(
         // Extra bottom space so the last card isn't hidden behind the floating nav bar.

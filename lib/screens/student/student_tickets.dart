@@ -1,9 +1,12 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
 import '../../services/event_service.dart';
+import '../../services/event_live_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'student_ticket_view.dart';
 import '../../utils/event_time_utils.dart';
@@ -21,15 +24,38 @@ class _StudentTicketsState extends State<StudentTickets> {
   static const String _downloadedTicketKeyPrefix = 'downloaded_tickets_';
   List<Map<String, dynamic>> _tickets = [];
   bool _isLoading = true;
+  StreamSubscription<String>? _eventLiveSubscription;
+  Timer? _fallbackRefreshTimer;
 
   @override
   void initState() {
     super.initState();
+    _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
+      if (!mounted) return;
+      if (reason == 'tickets' ||
+          reason == 'registrations' ||
+          reason == 'events' ||
+          reason == 'sessions') {
+        unawaited(_loadTickets(forceFresh: true));
+      }
+    });
+    _fallbackRefreshTimer = Timer.periodic(
+      const Duration(seconds: 40),
+      (_) => unawaited(_loadTickets(forceFresh: false)),
+    );
     _loadTickets();
   }
 
-  Future<void> _loadTickets() async {
-    if (mounted) {
+  @override
+  void dispose() {
+    _eventLiveSubscription?.cancel();
+    _fallbackRefreshTimer?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadTickets({bool forceFresh = false}) async {
+    final hadCachedTickets = _tickets.isNotEmpty;
+    if (mounted && !hadCachedTickets) {
       setState(() => _isLoading = true);
     }
 
@@ -37,7 +63,7 @@ class _StudentTicketsState extends State<StudentTickets> {
     final userId = prefs.getString('user_id') ?? '';
     final allTickets = userId.isEmpty
         ? <Map<String, dynamic>>[]
-        : await _eventService.getMyTickets(userId);
+        : await _eventService.getMyTickets(userId, forceFresh: forceFresh);
 
     // Keep online list behavior: show active events only.
     // Also require an actual ticket id from Supabase; registration rows without
@@ -45,10 +71,11 @@ class _StudentTicketsState extends State<StudentTickets> {
     final activeOnlineTickets = allTickets
         .where((t) => _isTicketActive(t) && _hasTicketId(t))
         .map((ticket) {
-      final normalized = Map<String, dynamic>.from(ticket);
-      normalized['local_cached'] = false;
-      return normalized;
-    }).toList();
+          final normalized = Map<String, dynamic>.from(ticket);
+          normalized['local_cached'] = false;
+          return normalized;
+        })
+        .toList();
 
     // Downloaded tickets are kept in app storage and shown even offline.
     final offlineTickets = _readOfflineTickets(prefs, userId);
@@ -84,8 +111,8 @@ class _StudentTicketsState extends State<StudentTickets> {
     final ticketId = ticketData is List && ticketData.isNotEmpty
         ? (ticketData[0]['id'] ?? '').toString()
         : ticketData is Map
-            ? (ticketData['id'] ?? '').toString()
-            : '';
+        ? (ticketData['id'] ?? '').toString()
+        : '';
     return ticketId.trim().isNotEmpty;
   }
 
@@ -94,8 +121,8 @@ class _StudentTicketsState extends State<StudentTickets> {
     final ticketId = ticketData is List && ticketData.isNotEmpty
         ? (ticketData[0]['id'] ?? '').toString()
         : ticketData is Map
-            ? (ticketData['id'] ?? '').toString()
-            : '';
+        ? (ticketData['id'] ?? '').toString()
+        : '';
     if (ticketId.isNotEmpty) return 'ticket:$ticketId';
 
     final event = ticketMap['events'];
@@ -132,7 +159,8 @@ class _StudentTicketsState extends State<StudentTickets> {
   ) {
     if (userId.isEmpty) return <Map<String, dynamic>>[];
 
-    final rows = prefs.getStringList('$_downloadedTicketKeyPrefix$userId') ?? <String>[];
+    final rows =
+        prefs.getStringList('$_downloadedTicketKeyPrefix$userId') ?? <String>[];
     final parsed = <Map<String, dynamic>>[];
     for (final row in rows) {
       try {
@@ -174,7 +202,8 @@ class _StudentTicketsState extends State<StudentTickets> {
           ? _ticketUniqueKey(normalized)
           : 'online_${fallback++}';
       final alreadyOffline = merged.containsKey(key);
-      normalized['local_cached'] = alreadyOffline || normalized['local_cached'] == true;
+      normalized['local_cached'] =
+          alreadyOffline || normalized['local_cached'] == true;
       merged[key] = normalized;
     }
 
@@ -195,24 +224,28 @@ class _StudentTicketsState extends State<StudentTickets> {
         backgroundColor: chromeColor,
         title: const Text(
           'My Tickets',
-          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 20, color: Colors.white),
+          style: TextStyle(
+            fontWeight: FontWeight.w800,
+            fontSize: 20,
+            color: Colors.white,
+          ),
         ),
       ),
       body: _isLoading
           ? const Center(child: PulseConnectLoader())
           : _tickets.isEmpty
-              ? _buildEmptyState()
-              : RefreshIndicator(
-                  onRefresh: _loadTickets,
-                  color: chromeColor,
-                  child: ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
-                    itemCount: _tickets.length,
-                    itemBuilder: (context, index) {
-                      return _buildTicketCard(_tickets[index]);
-                    },
-                  ),
-                ),
+          ? _buildEmptyState()
+          : RefreshIndicator(
+              onRefresh: _loadTickets,
+              color: chromeColor,
+              child: ListView.builder(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+                itemCount: _tickets.length,
+                itemBuilder: (context, index) {
+                  return _buildTicketCard(_tickets[index]);
+                },
+              ),
+            ),
     );
   }
 
@@ -221,8 +254,11 @@ class _StudentTicketsState extends State<StudentTickets> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.confirmation_num_outlined,
-              size: 64, color: Colors.grey.shade300),
+          Icon(
+            Icons.confirmation_num_outlined,
+            size: 64,
+            color: Colors.grey.shade300,
+          ),
           const SizedBox(height: 16),
           Text(
             'No tickets yet',
@@ -253,7 +289,9 @@ class _StudentTicketsState extends State<StudentTickets> {
     final ticketData = ticket['tickets'];
     final ticketId = ticketData is List && ticketData.isNotEmpty
         ? ticketData[0]['id']?.toString() ?? ''
-        : ticketData is Map ? ticketData['id']?.toString() ?? '' : '';
+        : ticketData is Map
+        ? ticketData['id']?.toString() ?? ''
+        : '';
 
     final startDate = parseStoredEventDateTime(startAt);
     final endDate = parseStoredEventDateTime(endAt);
@@ -265,17 +303,16 @@ class _StudentTicketsState extends State<StudentTickets> {
     final Color themePrimary = Theme.of(context).colorScheme.primary;
     final List<Color> ticketGradient =
         CourseThemeUtils.studentTicketGradientFromPrimary(themePrimary);
-    final Color chromeColor =
-        CourseThemeUtils.studentChromeFromPrimary(themePrimary);
+    final Color chromeColor = CourseThemeUtils.studentChromeFromPrimary(
+      themePrimary,
+    );
     final Color accentColor = Theme.of(context).colorScheme.secondary;
 
     return GestureDetector(
       onTap: () async {
         await Navigator.push(
           context,
-          MaterialPageRoute(
-            builder: (_) => StudentTicketView(ticket: ticket),
-          ),
+          MaterialPageRoute(builder: (_) => StudentTicketView(ticket: ticket)),
         );
         _loadTickets();
       },
@@ -349,7 +386,11 @@ class _StudentTicketsState extends State<StudentTickets> {
                                 fontSize: 20,
                                 letterSpacing: -0.5,
                                 shadows: [
-                                  Shadow(color: Colors.black26, offset: Offset(0, 2), blurRadius: 4),
+                                  Shadow(
+                                    color: Colors.black26,
+                                    offset: Offset(0, 2),
+                                    blurRadius: 4,
+                                  ),
                                 ],
                               ),
                               maxLines: 1,
@@ -367,7 +408,13 @@ class _StudentTicketsState extends State<StudentTickets> {
                                       fontSize: 12,
                                       letterSpacing: 1.2,
                                       shadows: [
-                                        Shadow(color: accentColor.withValues(alpha: 0.3), offset: const Offset(0, 1), blurRadius: 2),
+                                        Shadow(
+                                          color: accentColor.withValues(
+                                            alpha: 0.3,
+                                          ),
+                                          offset: const Offset(0, 1),
+                                          blurRadius: 2,
+                                        ),
                                       ],
                                     ),
                                     maxLines: 1,
@@ -377,16 +424,29 @@ class _StudentTicketsState extends State<StudentTickets> {
                                 if (isLocalCached) ...[
                                   const SizedBox(width: 8),
                                   Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 7,
+                                      vertical: 3,
+                                    ),
                                     decoration: BoxDecoration(
-                                      color: Colors.white.withValues(alpha: 0.18),
+                                      color: Colors.white.withValues(
+                                        alpha: 0.18,
+                                      ),
                                       borderRadius: BorderRadius.circular(999),
-                                      border: Border.all(color: Colors.white.withValues(alpha: 0.22)),
+                                      border: Border.all(
+                                        color: Colors.white.withValues(
+                                          alpha: 0.22,
+                                        ),
+                                      ),
                                     ),
                                     child: const Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        Icon(Icons.download_done_rounded, size: 11, color: Colors.white),
+                                        Icon(
+                                          Icons.download_done_rounded,
+                                          size: 11,
+                                          color: Colors.white,
+                                        ),
                                         SizedBox(width: 3),
                                         Text(
                                           'Offline',
@@ -406,22 +466,36 @@ class _StudentTicketsState extends State<StudentTickets> {
                             const Spacer(),
                             // Date/Time
                             Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 8,
+                              ),
                               decoration: BoxDecoration(
                                 color: Colors.white.withValues(alpha: 0.15),
                                 borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
+                                border: Border.all(
+                                  color: Colors.white.withValues(alpha: 0.1),
+                                ),
                               ),
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  const Icon(Icons.calendar_today_rounded, size: 16, color: Colors.white),
+                                  const Icon(
+                                    Icons.calendar_today_rounded,
+                                    size: 16,
+                                    color: Colors.white,
+                                  ),
                                   const SizedBox(width: 8),
                                   Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
                                     children: [
                                       Text(
-                                        startDate != null ? DateFormat('MMM dd, yyyy').format(startDate) : 'TBA',
+                                        startDate != null
+                                            ? DateFormat(
+                                                'MMM dd, yyyy',
+                                              ).format(startDate)
+                                            : 'TBA',
                                         style: const TextStyle(
                                           color: Colors.white,
                                           fontSize: 12,
@@ -432,7 +506,9 @@ class _StudentTicketsState extends State<StudentTickets> {
                                         Text(
                                           '${DateFormat('hh:mm a').format(startDate)} - ${DateFormat('hh:mm a').format(endDate)}',
                                           style: TextStyle(
-                                            color: Colors.white.withValues(alpha: 0.8),
+                                            color: Colors.white.withValues(
+                                              alpha: 0.8,
+                                            ),
                                             fontSize: 10,
                                             fontWeight: FontWeight.w600,
                                           ),
@@ -446,7 +522,11 @@ class _StudentTicketsState extends State<StudentTickets> {
                             // Location
                             Row(
                               children: [
-                                Icon(Icons.location_on_rounded, size: 16, color: accentColor),
+                                Icon(
+                                  Icons.location_on_rounded,
+                                  size: 16,
+                                  color: accentColor,
+                                ),
                                 const SizedBox(width: 6),
                                 Expanded(
                                   child: Text(
@@ -474,7 +554,10 @@ class _StudentTicketsState extends State<StudentTickets> {
                     Expanded(
                       flex: 35,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+                        padding: const EdgeInsets.symmetric(
+                          vertical: 12,
+                          horizontal: 8,
+                        ),
                         child: FittedBox(
                           fit: BoxFit.scaleDown,
                           child: Column(
@@ -486,7 +569,13 @@ class _StudentTicketsState extends State<StudentTickets> {
                                   color: Colors.white,
                                   borderRadius: BorderRadius.circular(12),
                                   boxShadow: [
-                                    BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 8, offset: const Offset(0, 4)),
+                                    BoxShadow(
+                                      color: Colors.black.withValues(
+                                        alpha: 0.1,
+                                      ),
+                                      blurRadius: 8,
+                                      offset: const Offset(0, 4),
+                                    ),
                                   ],
                                 ),
                                 child: QrImageView(
@@ -507,7 +596,7 @@ class _StudentTicketsState extends State<StudentTickets> {
                               Text(
                                 'TICKET ID',
                                 style: TextStyle(
-                                  fontSize: 10, 
+                                  fontSize: 10,
                                   color: Colors.white.withValues(alpha: 0.7),
                                   fontWeight: FontWeight.w800,
                                   letterSpacing: 0.5,
@@ -552,13 +641,14 @@ class _StudentTicketsState extends State<StudentTickets> {
           child: Container(
             width: 1.5,
             margin: const EdgeInsets.symmetric(vertical: 3),
-            color: index.isEven ? Colors.white.withValues(alpha: 0.2) : Colors.transparent,
+            color: index.isEven
+                ? Colors.white.withValues(alpha: 0.2)
+                : Colors.transparent,
           ),
         ),
       ),
     );
   }
-
 }
 
 class TicketClipper extends CustomClipper<Path> {
@@ -567,11 +657,12 @@ class TicketClipper extends CustomClipper<Path> {
     Path path = Path();
     double radius = 16.0;
     double cutoutRadius = 12.0;
-    double cutoutPosition = size.width * 0.65; // Position of the vertical divider
+    double cutoutPosition =
+        size.width * 0.65; // Position of the vertical divider
 
     // Main Ticket Path
     path.moveTo(radius, 0);
-    
+
     // Top border and cutout
     path.lineTo(cutoutPosition - cutoutRadius, 0);
     path.arcToPoint(
@@ -580,14 +671,20 @@ class TicketClipper extends CustomClipper<Path> {
       clockwise: false,
     );
     path.lineTo(size.width - radius, 0);
-    
+
     // Top-right corner
-    path.arcToPoint(Offset(size.width, radius), radius: Radius.circular(radius));
+    path.arcToPoint(
+      Offset(size.width, radius),
+      radius: Radius.circular(radius),
+    );
     path.lineTo(size.width, size.height - radius);
-    
+
     // Bottom-right corner
-    path.arcToPoint(Offset(size.width - radius, size.height), radius: Radius.circular(radius));
-    
+    path.arcToPoint(
+      Offset(size.width - radius, size.height),
+      radius: Radius.circular(radius),
+    );
+
     // Bottom border and cutout
     path.lineTo(cutoutPosition + cutoutRadius, size.height);
     path.arcToPoint(
@@ -596,14 +693,17 @@ class TicketClipper extends CustomClipper<Path> {
       clockwise: false,
     );
     path.lineTo(radius, size.height);
-    
+
     // Bottom-left corner
-    path.arcToPoint(Offset(0, size.height - radius), radius: Radius.circular(radius));
+    path.arcToPoint(
+      Offset(0, size.height - radius),
+      radius: Radius.circular(radius),
+    );
     path.lineTo(0, radius);
-    
+
     // Top-left corner
     path.arcToPoint(Offset(radius, 0), radius: Radius.circular(radius));
-    
+
     return path;
   }
 

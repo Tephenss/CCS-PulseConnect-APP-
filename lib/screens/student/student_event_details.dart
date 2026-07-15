@@ -4,11 +4,50 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:async';
 import '../../services/event_service.dart';
+import '../../services/event_live_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'student_ticket_view.dart';
 import 'student_registration_requirements_page.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/course_theme_utils.dart';
+import '../../widgets/shiny_text.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+
+class _EventDetailsSnapshot {
+  final Map<String, dynamic> event;
+  final List<Map<String, dynamic>> sessions;
+  final bool isRegistered;
+  final bool isRegistrationResolved;
+  final bool isAccessDenied;
+  final bool canRegisterNow;
+  final bool approvalRequired;
+  final bool requirementsRequired;
+  final bool requirementsApproved;
+  final String requirementsStatus;
+  final String registrationMessage;
+  final bool hasStudentRequirements;
+  final int participantCount;
+  final DateTime cachedAt;
+  final String revision;
+
+  const _EventDetailsSnapshot({
+    required this.event,
+    required this.sessions,
+    required this.isRegistered,
+    required this.isRegistrationResolved,
+    required this.isAccessDenied,
+    required this.canRegisterNow,
+    required this.approvalRequired,
+    required this.requirementsRequired,
+    required this.requirementsApproved,
+    required this.requirementsStatus,
+    required this.registrationMessage,
+    required this.hasStudentRequirements,
+    required this.participantCount,
+    required this.cachedAt,
+    required this.revision,
+  });
+}
 
 class StudentEventDetails extends StatefulWidget {
   final String eventId;
@@ -26,6 +65,9 @@ class StudentEventDetails extends StatefulWidget {
 
 class _StudentEventDetailsState extends State<StudentEventDetails>
     with WidgetsBindingObserver {
+  static final Map<String, _EventDetailsSnapshot> _detailsCache = {};
+  static const Duration _detailsUiTtl = Duration(minutes: 3);
+
   final _eventService = EventService();
   final _supabase = Supabase.instance.client;
   Map<String, dynamic>? _event;
@@ -52,6 +94,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   RealtimeChannel? _approvalChannel;
   RealtimeChannel? _capacityChannel;
   String _approvalChannelUserId = '';
+  StreamSubscription<String>? _eventLiveSubscription;
 
   Color _studentPrimary(BuildContext context) =>
       Theme.of(context).colorScheme.primary;
@@ -62,16 +105,154 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _hydrateFromCacheOrInitial();
+    _eventLiveSubscription = EventLiveService.instance.changes.listen(
+      _onLiveEventPulse,
+    );
+    _loadEvent(silent: _event != null);
+    _scheduleApprovalRefresh();
+  }
+
+  void _onLiveEventPulse(String reason) {
+    if (!mounted) return;
+    final eventId = widget.eventId;
+    final targetsThisEvent =
+        reason.contains(eventId) ||
+        reason.contains('student_submissions') ||
+        reason.contains('student_requirements') ||
+        reason.contains('registration_access') ||
+        reason.startsWith('push:student_requirements');
+
+    if (!targetsThisEvent && !reason.startsWith('push:')) {
+      return;
+    }
+
+    // Optimistic UI so Under Review → Approved doesn't wait on network.
+    if (reason.contains('student_requirements_approved') &&
+        (reason.contains(eventId) || reason.endsWith(eventId))) {
+      _applyOptimisticRequirementsReview(approved: true);
+    } else if (reason.contains('student_requirements_declined') &&
+        (reason.contains(eventId) || reason.endsWith(eventId))) {
+      _applyOptimisticRequirementsReview(approved: false);
+    }
+
+    _eventService.clearStudentRequirementsCache(eventId);
+    _eventService.invalidateEventDetailCache(eventId);
+    _detailsCache.remove(eventId);
+    unawaited(_loadEvent(silent: true));
+  }
+
+  void _applyOptimisticRequirementsReview({required bool approved}) {
+    if (!mounted || _isRegistered) return;
+    setState(() {
+      _requirementsRequired = true;
+      _requirementsApproved = approved;
+      _requirementsStatus = approved ? 'approved' : 'declined';
+      if (approved) {
+        _canRegisterNow = true;
+        _registrationMessage = '';
+      } else {
+        _canRegisterNow = false;
+        if (_registrationMessage.isEmpty) {
+          _registrationMessage =
+              'Your documents were declined. Please update and resubmit.';
+        }
+      }
+      _isRegistrationResolved = true;
+    });
+    _storeDetailsSnapshot();
+    _scheduleApprovalRefresh();
+  }
+
+  void _hydrateFromCacheOrInitial() {
+    final cached = _detailsCache[widget.eventId];
+    if (cached != null &&
+        DateTime.now().difference(cached.cachedAt) <= _detailsUiTtl) {
+      _applySnapshot(cached);
+      _isLoading = false;
+      return;
+    }
+
     if (widget.initialEvent != null) {
       _event = Map<String, dynamic>.from(widget.initialEvent!);
       _isLoading = false;
       _isRegistrationResolved = false;
     }
-    _loadEvent();
+  }
+
+  void _applySnapshot(_EventDetailsSnapshot snap) {
+    _event = Map<String, dynamic>.from(snap.event);
+    _eventSessions = List<Map<String, dynamic>>.from(
+      snap.sessions.map((s) => Map<String, dynamic>.from(s)),
+    );
+    _isRegistered = snap.isRegistered;
+    _isRegistrationResolved = snap.isRegistrationResolved;
+    _isAccessDenied = snap.isAccessDenied;
+    _canRegisterNow = snap.canRegisterNow;
+    _approvalRequired = snap.approvalRequired;
+    _requirementsRequired = snap.requirementsRequired;
+    _requirementsApproved = snap.requirementsApproved;
+    _requirementsStatus = snap.requirementsStatus;
+    _registrationMessage = snap.registrationMessage;
+    _hasStudentRequirements = snap.hasStudentRequirements;
+    _participantCount = snap.participantCount;
+  }
+
+  String _detailsRevision({
+    required Map<String, dynamic> event,
+    required bool isRegistered,
+    required int participantCount,
+    required String requirementsStatus,
+    required bool requirementsApproved,
+  }) {
+    return [
+      event['updated_at']?.toString() ?? '',
+      event['cover_image_url']?.toString() ?? '',
+      event['status']?.toString() ?? '',
+      event['registered_count']?.toString() ?? '',
+      isRegistered ? '1' : '0',
+      participantCount.toString(),
+      requirementsStatus,
+      requirementsApproved ? '1' : '0',
+    ].join('|');
+  }
+
+  void _storeDetailsSnapshot() {
+    final event = _event;
+    if (event == null || !_isRegistrationResolved) return;
+
+    final revision = _detailsRevision(
+      event: event,
+      isRegistered: _isRegistered,
+      participantCount: _participantCount,
+      requirementsStatus: _requirementsStatus,
+      requirementsApproved: _requirementsApproved,
+    );
+
+    _detailsCache[widget.eventId] = _EventDetailsSnapshot(
+      event: Map<String, dynamic>.from(event),
+      sessions: _eventSessions
+          .map((s) => Map<String, dynamic>.from(s))
+          .toList(growable: false),
+      isRegistered: _isRegistered,
+      isRegistrationResolved: _isRegistrationResolved,
+      isAccessDenied: _isAccessDenied,
+      canRegisterNow: _canRegisterNow,
+      approvalRequired: _approvalRequired,
+      requirementsRequired: _requirementsRequired,
+      requirementsApproved: _requirementsApproved,
+      requirementsStatus: _requirementsStatus,
+      registrationMessage: _registrationMessage,
+      hasStudentRequirements: _hasStudentRequirements,
+      participantCount: _participantCount,
+      cachedAt: DateTime.now(),
+      revision: revision,
+    );
   }
 
   @override
   void dispose() {
+    _eventLiveSubscription?.cancel();
     _approvalRefreshTimer?.cancel();
     _capacityRefreshTimer?.cancel();
     _approvalChannel?.unsubscribe();
@@ -93,11 +274,22 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       return;
     }
 
-    _approvalRefreshTimer = Timer.periodic(const Duration(seconds: 6), (_) {
+    // Poll much faster while docs are under review so approve feels instant.
+    final pendingDocs = _requirementsRequired &&
+        !_requirementsApproved &&
+        _requirementsStatus == 'pending_review';
+    final interval = pendingDocs
+        ? const Duration(seconds: 4)
+        : const Duration(seconds: 20);
+
+    _approvalRefreshTimer = Timer.periodic(interval, (_) {
       if (!mounted) return;
       if (_isRegistered || _canRegisterNow || _isAccessDenied) {
         _approvalRefreshTimer?.cancel();
         return;
+      }
+      if (_requirementsStatus == 'pending_review') {
+        _eventService.clearStudentRequirementsCache(widget.eventId);
       }
       unawaited(_loadEvent(silent: true));
     });
@@ -111,7 +303,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       return;
     }
 
-    _capacityRefreshTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+    _capacityRefreshTimer = Timer.periodic(const Duration(seconds: 20), (_) {
       if (!mounted || _isRegistered || _suppressCapacityRefresh) {
         _capacityRefreshTimer?.cancel();
         return;
@@ -286,14 +478,15 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     if (_isRefreshingEvent) return;
     _isRefreshingEvent = true;
 
-    if (!silent && mounted) {
+    final canStaySilent = silent || _event != null;
+    if (!canStaySilent && mounted) {
       setState(() {
         _isLoading = true;
       });
     }
 
     try {
-      await _loadEventData(silent: silent).timeout(
+      await _loadEventData(silent: canStaySilent).timeout(
         const Duration(seconds: 25),
         onTimeout: () {
           if (!mounted) return;
@@ -307,7 +500,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         },
       );
     } catch (_) {
-      if (mounted && !silent) {
+      if (mounted && !canStaySilent) {
         setState(() {
           if (_event == null && widget.initialEvent != null) {
             _event = Map<String, dynamic>.from(widget.initialEvent!);
@@ -371,8 +564,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id') ?? '';
       _bindApprovalRealtime(userId);
+      final missingCover =
+          ((_event?['cover_image_url'] ?? '').toString().trim().isEmpty);
       final results = await Future.wait([
-        _eventService.getEventById(widget.eventId),
+        _eventService.getEventById(
+          widget.eventId,
+          forceFresh: missingCover,
+        ),
         _eventService.isRegistered(widget.eventId, userId),
         _eventService.getEventRegistrationSettings(widget.eventId),
         _eventService.getEventSessions(widget.eventId),
@@ -386,47 +584,93 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         baseEvent,
         registrationSettings,
       );
+      // Keep a cover we already know about if the fresh payload somehow omits it
+      final knownCover = (_event?['cover_image_url'] ??
+              widget.initialEvent?['cover_image_url'] ??
+              '')
+          .toString()
+          .trim();
+      if (knownCover.isNotEmpty &&
+          (event['cover_image_url'] ?? '').toString().trim().isEmpty) {
+        event['cover_image_url'] = knownCover;
+      }
 
-      final secondary = await Future.wait([
-        _eventService.getRegistrationSnapshot(widget.eventId),
-        _eventService.getParticipantCount(
-          widget.eventId,
-          eventHint: event.isNotEmpty ? event : null,
-        ),
-        if (!isReg && userId.isNotEmpty)
-          _eventService.getTicketForEvent(widget.eventId, userId)
-        else
-          Future<Map<String, dynamic>>.value({}),
-        if (event.isNotEmpty && !isReg && userId.isNotEmpty)
-          _eventService.getStudentRegistrationAvailability(
+      // Paint the screen ASAP — don't keep the bottom button on a spinner
+      // while secondary registration/requirements calls are still running.
+      if (mounted) {
+        setState(() {
+          if (event.isNotEmpty) {
+            _event = event;
+          }
+          _eventSessions = sessions;
+          _isRegistered = isReg;
+          _isLoading = false;
+          if (!_isRegistrationResolved) {
+            // Tentative open state until secondary finishes (or times out).
+            _isRegistrationResolved = true;
+            if (!isReg && _registrationMessage.isEmpty) {
+              _canRegisterNow = true;
+            }
+          }
+        });
+      }
+
+      List<dynamic> secondary;
+      try {
+        secondary = await Future.wait([
+          _eventService.getRegistrationSnapshot(widget.eventId),
+          _eventService.getParticipantCount(
             widget.eventId,
-            userId,
-            preloadedEvent: Map<String, dynamic>.from(event),
-          )
-        else
-          Future<Map<String, dynamic>>.value({}),
-        if (userId.isNotEmpty)
-          _eventService
-              .getStudentRequirementsInfo(widget.eventId, userId)
-              .timeout(
-                const Duration(seconds: 5),
-                onTimeout: () => {'ok': false},
-              )
-        else
-          Future<Map<String, dynamic>>.value({'ok': false}),
-        if (userId.isNotEmpty)
-          _eventService
-              .fetchEventStudentRequirementsList(
-                widget.eventId,
-                studentId: userId,
-              )
-              .timeout(
-                const Duration(seconds: 6),
-                onTimeout: () => <Map<String, dynamic>>[],
-              )
-        else
-          Future<List<Map<String, dynamic>>>.value([]),
-      ]);
+            eventHint: event.isNotEmpty ? event : null,
+          ),
+          if (!isReg && userId.isNotEmpty)
+            _eventService.getTicketForEvent(widget.eventId, userId)
+          else
+            Future<Map<String, dynamic>>.value({}),
+          if (event.isNotEmpty && !isReg && userId.isNotEmpty)
+            _eventService
+                .getStudentRegistrationAvailability(
+                  widget.eventId,
+                  userId,
+                  preloadedEvent: Map<String, dynamic>.from(event),
+                )
+                .timeout(
+                  const Duration(seconds: 6),
+                  onTimeout: () => <String, dynamic>{},
+                )
+          else
+            Future<Map<String, dynamic>>.value({}),
+          if (userId.isNotEmpty)
+            _eventService
+                .getStudentRequirementsInfo(widget.eventId, userId)
+                .timeout(
+                  const Duration(seconds: 5),
+                  onTimeout: () => {'ok': false},
+                )
+          else
+            Future<Map<String, dynamic>>.value({'ok': false}),
+          if (userId.isNotEmpty)
+            _eventService
+                .fetchEventStudentRequirementsList(
+                  widget.eventId,
+                  studentId: userId,
+                )
+                .timeout(
+                  const Duration(seconds: 4),
+                  onTimeout: () => <Map<String, dynamic>>[],
+                )
+          else
+            Future<List<Map<String, dynamic>>>.value([]),
+        ]).timeout(const Duration(seconds: 8));
+      } on TimeoutException {
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            _isRegistrationResolved = true;
+          });
+        }
+        return;
+      }
 
       final snapshot = secondary[0] as Map<String, dynamic>?;
       final count = secondary[1] as int;
@@ -527,22 +771,44 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       }
 
       if (mounted) {
+        final previous = _detailsCache[widget.eventId];
+        final nextEvent = event.isNotEmpty ? event : _event;
+        final nextRevision = nextEvent == null
+            ? ''
+            : _detailsRevision(
+                event: nextEvent,
+                isRegistered: isReg,
+                participantCount: resolvedCount,
+                requirementsStatus: requirementsStatus,
+                requirementsApproved: requirementsApproved,
+              );
+        final unchanged =
+            previous != null &&
+            previous.revision == nextRevision &&
+            (nextEvent?['cover_image_url']?.toString() ?? '')
+                .trim()
+                .isNotEmpty &&
+            DateTime.now().difference(previous.cachedAt) <= _detailsUiTtl;
+
         setState(() {
-          _event = event.isNotEmpty ? event : _event;
-          _isRegistered = isReg;
-          _isAccessDenied = accessDenied;
-          _canRegisterNow = canRegisterNow;
-          _approvalRequired = approvalRequired;
-          _requirementsRequired = requirementsRequired;
-          _requirementsApproved = requirementsApproved;
-          _requirementsStatus = requirementsStatus;
-          _registrationMessage = registrationMessage;
-          _hasStudentRequirements = hasStudentRequirements;
-          _participantCount = resolvedCount;
-          _eventSessions = sessions;
+          if (!unchanged || _event == null) {
+            _event = nextEvent;
+            _isRegistered = isReg;
+            _isAccessDenied = accessDenied;
+            _canRegisterNow = canRegisterNow;
+            _approvalRequired = approvalRequired;
+            _requirementsRequired = requirementsRequired;
+            _requirementsApproved = requirementsApproved;
+            _requirementsStatus = requirementsStatus;
+            _registrationMessage = registrationMessage;
+            _hasStudentRequirements = hasStudentRequirements;
+            _participantCount = resolvedCount;
+            _eventSessions = sessions;
+          }
           _isRegistrationResolved = true;
           _isLoading = false;
         });
+        _storeDetailsSnapshot();
         _bindCapacityRealtime();
         _scheduleCapacityRefresh();
         _scheduleApprovalRefresh();
@@ -823,6 +1089,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           _participantCount = nextCount;
           _suppressCapacityRefresh = true;
         });
+        _eventService.invalidateEventDetailCache(widget.eventId);
+        _storeDetailsSnapshot();
       }
 
       _capacityRefreshTimer?.cancel();
@@ -838,6 +1106,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     }
 
     if (mounted) {
+      setState(() => _isRegistering = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(result['error'] as String? ?? 'Registration failed'),
@@ -966,6 +1235,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final startAt = _event!['start_at'] as String?;
     final endAt = _event!['end_at'] as String?;
     final eventType = _event!['event_type'] as String? ?? '';
+    final coverImageUrl =
+        (_event!['cover_image_url'] as String? ?? '').trim();
     final eventFor = (_event!['event_for'] as String?)?.trim() ?? 'all';
     final eventSpan = _event!['event_span'] as String? ?? '';
     final graceTime = _event!['grace_time']?.toString() ?? '';
@@ -1016,91 +1287,202 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         !_isRegistered &&
         (isRegistrationClosed || (!_canRegisterNow && !_needsRequirementsAction));
 
+    const coverExpandedHeight = 248.0;
+    final topInset = MediaQuery.paddingOf(context).top;
+    final coverCollapsedHeight = topInset + kToolbarHeight;
+
     return Scaffold(
       backgroundColor: Colors.white,
       body: CustomScrollView(
-        slivers: [
-          // App Bar — Dark Maroon
-          SliverAppBar(
-            expandedHeight: 200,
-            pinned: true,
-            backgroundColor: _studentDark(context),
-            flexibleSpace: FlexibleSpaceBar(
-              background: Container(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [_studentDark(context), _studentPrimary(context)],
-                  ),
-                ),
-                child: Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
+          slivers: [
+            SliverAppBar(
+              expandedHeight: coverExpandedHeight,
+              pinned: true,
+              stretch: true,
+              elevation: 0,
+              scrolledUnderElevation: 0,
+              forceElevated: false,
+              shadowColor: Colors.transparent,
+              surfaceTintColor: Colors.transparent,
+              backgroundColor: Colors.transparent,
+              automaticallyImplyLeading: false,
+              leadingWidth: 0,
+              titleSpacing: 0,
+              flexibleSpace: LayoutBuilder(
+                builder: (context, constraints) {
+                  final minH = coverCollapsedHeight;
+                  final maxH = coverExpandedHeight;
+                  final range = (maxH - minH).clamp(1.0, 1000.0);
+                  final expandT =
+                      ((constraints.maxHeight - minH) / range).clamp(0.0, 1.0);
+                  final collapseT = 1.0 - expandT;
+
+                  return Stack(
+                    fit: StackFit.expand,
                     children: [
-                      const SizedBox(height: 40),
-                      Container(
-                        width: 64,
-                        height: 64,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Colors.white.withValues(alpha: 0.1),
-                          border: Border.all(
-                            color: const Color(
-                              0xFFD4A843,
-                            ).withValues(alpha: 0.5),
-                            width: 2,
+                      // Cover always fills the collapsing header (no solid color bar)
+                      if (coverImageUrl.isNotEmpty)
+                        CachedNetworkImage(
+                          imageUrl: coverImageUrl,
+                          width: double.infinity,
+                          height: double.infinity,
+                          fit: BoxFit.cover,
+                          alignment: Alignment.center,
+                          fadeInDuration: Duration.zero,
+                          fadeOutDuration: Duration.zero,
+                          memCacheWidth: 1200,
+                          placeholder: (context, url) => ColoredBox(
+                            color: _studentDark(context),
+                            child: const Center(
+                              child: PulseConnectLoader(
+                                size: 22,
+                                strokeWidth: 3.5,
+                                color: Color(0xFFD4A843),
+                              ),
+                            ),
                           ),
-                        ),
-                        child: const Icon(
-                          Icons.event_rounded,
-                          color: Color(0xFFD4A843),
-                          size: 32,
+                          errorWidget: (context, url, error) =>
+                              _coverFallbackGradient(context),
+                        )
+                      else
+                        _coverFallbackGradient(context),
+                      // Scrim: stronger when collapsed so toolbar icons stay readable
+                      DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              Color.lerp(
+                                const Color(0x66000000),
+                                const Color(0xB3000000),
+                                collapseT,
+                              )!,
+                              Color.lerp(
+                                const Color(0x00000000),
+                                const Color(0x66000000),
+                                collapseT,
+                              )!,
+                              Color.lerp(
+                                const Color(0xB31A0A0A),
+                                const Color(0xCC000000),
+                                collapseT,
+                              )!,
+                            ],
+                            stops: const [0.0, 0.45, 1.0],
+                          ),
                         ),
                       ),
-                      const SizedBox(height: 12),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 32),
-                        child: Text(
-                          title,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w800,
-                            fontSize: 20,
+                      // Expanded title — same shine animation as "Ready to explore?"
+                      Positioned(
+                        left: 20,
+                        right: 20,
+                        bottom: 44 + (12 * collapseT),
+                        child: Opacity(
+                          opacity: (expandT * 1.35).clamp(0.0, 1.0),
+                          child: Transform.translate(
+                            offset: Offset(0, 10 * collapseT),
+                            child: ShinyText(
+                              text: title,
+                              fontSize: 22,
+                              speed: 2.5,
+                              fontWeight: FontWeight.w900,
+                              color: const Color(0xFFB5B5B5),
+                              shineColor: Colors.white,
+                              textAlign: TextAlign.left,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              shadows: const [
+                                Shadow(
+                                  color: Color(0x99000000),
+                                  blurRadius: 8,
+                                  offset: Offset(0, 1),
+                                ),
+                              ],
+                            ),
                           ),
-                          textAlign: TextAlign.center,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      // Compact title in collapsed toolbar
+                      Positioned(
+                        left: 64,
+                        right: 20,
+                        top: topInset,
+                        height: kToolbarHeight,
+                        child: Opacity(
+                          opacity: (collapseT * 1.6 - 0.4).clamp(0.0, 1.0),
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: ShinyText(
+                              text: title,
+                              fontSize: 16,
+                              speed: 2.5,
+                              fontWeight: FontWeight.w800,
+                              color: const Color(0xFFB5B5B5),
+                              shineColor: Colors.white,
+                              textAlign: TextAlign.left,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ),
+                      ),
+                      // Back button
+                      Positioned(
+                        left: 8,
+                        top: topInset + 4,
+                        child: IconButton(
+                          icon: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.35),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Icon(
+                              Icons.arrow_back_ios_rounded,
+                              size: 18,
+                              color: Colors.white,
+                            ),
+                          ),
+                          onPressed: () => Navigator.pop(context),
+                        ),
+                      ),
+                      // White left/right curve cut — painted ON TOP of cover so it's visible
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        child: IgnorePointer(
+                          child: Opacity(
+                            opacity: expandT.clamp(0.0, 1.0),
+                            child: const SizedBox(
+                              height: 32,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.vertical(
+                                    top: Radius.circular(32),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ],
-                  ),
-                ),
+                  );
+                },
               ),
             ),
-            leading: IconButton(
-              icon: Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Icon(
-                  Icons.arrow_back_ios_rounded,
-                  size: 18,
-                  color: Colors.white,
-                ),
-              ),
-              onPressed: () => Navigator.pop(context),
-            ),
-          ),
 
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+            // Flat white sheet — curve lives only on the cover so no black crescent cut
+            SliverToBoxAdapter(
+              child: Container(
+                color: Colors.white,
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                   // Event Type Badge
                   if (eventType.isNotEmpty)
                     Container(
@@ -1205,7 +1587,6 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           ),
         ],
       ),
-
       // Bottom Register/Ticket Button
       bottomNavigationBar: Container(
         padding: const EdgeInsets.fromLTRB(24, 12, 24, 28),
@@ -1365,6 +1746,43 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _coverFallbackGradient(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            _studentDark(context),
+            _studentPrimary(context),
+          ],
+        ),
+      ),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 48),
+          child: Container(
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.white.withValues(alpha: 0.1),
+              border: Border.all(
+                color: const Color(0xFFD4A843).withValues(alpha: 0.5),
+                width: 2,
+              ),
+            ),
+            child: const Icon(
+              Icons.event_rounded,
+              color: Color(0xFFD4A843),
+              size: 32,
+            ),
+          ),
         ),
       ),
     );

@@ -190,15 +190,18 @@ class OfflineSyncService {
 
   String _nextRetryAtIso(int attemptCount) {
     final now = DateTime.now().toUtc();
+    // Faster retries under load so queued offline scans clear sooner.
     Duration delay;
     if (attemptCount <= 1) {
-      delay = const Duration(seconds: 5);
+      delay = const Duration(seconds: 2);
     } else if (attemptCount == 2) {
-      delay = const Duration(seconds: 15);
+      delay = const Duration(seconds: 5);
     } else if (attemptCount == 3) {
-      delay = const Duration(seconds: 60);
+      delay = const Duration(seconds: 15);
+    } else if (attemptCount == 4) {
+      delay = const Duration(seconds: 45);
     } else {
-      delay = const Duration(minutes: 5);
+      delay = const Duration(minutes: 3);
     }
     return now.add(delay).toIso8601String();
   }

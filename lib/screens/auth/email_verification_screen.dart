@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../main.dart';
 import '../../services/auth_service.dart';
 import '../../services/email_verification_service.dart';
+import '../../services/push_notification_service.dart';
 import '../../utils/teacher_theme_utils.dart';
 import '../../widgets/custom_loader.dart';
 import 'login_screen.dart';
@@ -234,6 +235,9 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
         PulseConnectApp.of(
           context,
         ).updateTheme(role, course: updatedUser['course']?.toString());
+        // Session is persisted only after OTP — register this device for pushes now.
+        await PushNotificationService().updateToken();
+        if (!mounted) return;
         Navigator.pushAndRemoveUntil(
           context,
           MaterialPageRoute(

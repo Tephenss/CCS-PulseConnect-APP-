@@ -1,10 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:bcrypt/bcrypt.dart';
+import 'package:crypto/crypto.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:crypto/crypto.dart';
-import 'package:bcrypt/bcrypt.dart';
 
 import 'offline_backup_service.dart';
 import 'offline_scan_store.dart';
@@ -462,16 +463,35 @@ class AuthService {
     }
   }
 
+  Future<void> _unregisterDevicePushToken({String? userId}) async {
+    try {
+      final resolvedUserId = (userId ?? '').trim();
+      String? token;
+      try {
+        token = await FirebaseMessaging.instance.getToken();
+      } catch (_) {
+        token = null;
+      }
+
+      if (token != null && token.isNotEmpty) {
+        await _supabase.from('fcm_tokens').delete().eq('token', token);
+      }
+      if (resolvedUserId.isNotEmpty) {
+        await _supabase.from('fcm_tokens').delete().eq('user_id', resolvedUserId);
+      }
+    } catch (_) {
+      // Non-fatal: logout/session clear must continue.
+    }
+  }
+
   // Logout
   Future<void> logout() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id');
 
-      // Delete FCM token from Supabase so this device stops receiving notifications
-      if (userId != null && userId.isNotEmpty) {
-        await _supabase.from('fcm_tokens').delete().eq('user_id', userId);
-      }
+      // Detach this device token + user rows so pushes stop while logged out.
+      await _unregisterDevicePushToken(userId: userId);
     } catch (e) {
       // Fail silently - still proceed with logout
     }
@@ -496,9 +516,11 @@ class AuthService {
     await _offlineBackupService.autoBackupIfConfigured();
   }
 
-  // Clear local login markers without touching remote tokens/state.
+  // Clear local login markers and detach this device from push delivery.
   Future<void> clearLocalSessionMarkers() async {
     final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+    await _unregisterDevicePushToken(userId: userId);
     await prefs.remove('user_id');
     await prefs.remove('user_role');
     await prefs.remove('user_data');

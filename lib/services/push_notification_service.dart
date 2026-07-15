@@ -11,7 +11,11 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'auth_service.dart';
+import 'event_live_service.dart';
 import 'event_service.dart';
+import 'live_ui_sync.dart';
+import 'live_ui_sync_pending.dart';
+import 'notification_service.dart';
 
 Future<void> _cacheApprovedRegistrationFromPayload(
   Map<String, dynamic> data,
@@ -94,6 +98,14 @@ Future<void> _markProposalRequirementsNotificationShown(
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
   await _cacheApprovedRegistrationFromPayload(message.data);
+  // App/UI code does not run here — stamp a pending sync so the next
+  // foreground/resume refreshes lists + bell to match the push.
+  final type = (message.data['type']?.toString() ?? '').trim();
+  final eventId = (message.data['event_id']?.toString() ?? '').trim();
+  final reason = type.isEmpty
+      ? 'push'
+      : (eventId.isEmpty ? type : '$type:$eventId');
+  await LiveUiSyncPending.mark(reason);
 }
 
 class PushNotificationService {
@@ -143,6 +155,10 @@ class PushNotificationService {
   Future<void> initialize() async {
     // 1. Register background handler
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+
+    // Wire toast helpers used by NotificationService (avoids import cycles).
+    NotificationService.showEventToast = showLocalEventNotification;
+    NotificationService.showCertificateToast = showLocalCertificateNotification;
 
     // 2. Request notification permissions (Android 13+ & iOS)
     NotificationSettings settings = await _firebaseMessaging.requestPermission(
@@ -251,11 +267,36 @@ class PushNotificationService {
 
       // 4. Foreground message listener — show local notification popup
       FirebaseMessaging.onMessage.listen((RemoteMessage message) async {
-        await _cacheRegistrationApprovalIfNeeded(message.data);
-        RemoteNotification? notification = message.notification;
+        // Never surface account pushes on Welcome/Login/OTP screens.
+        if (!await _hasLoggedInUser()) {
+          debugPrint('[FCM] Ignoring foreground push — no logged-in session.');
+          return;
+        }
+
         final route = (message.data['route']?.toString() ?? '').trim().toLowerCase();
         final eventId = (message.data['event_id']?.toString() ?? '').trim();
         final type = (message.data['type']?.toString() ?? '').trim().toLowerCase();
+
+        // Sync UI first (before local notification work) so lists/bell don't
+        // lag behind the system tray banner.
+        debugPrint('[FCM] Foreground push type=$type event=$eventId — syncing UI');
+        if ((type == 'student_requirements_approved' ||
+                type == 'student_requirements_declined') &&
+            eventId.isNotEmpty) {
+          EventLiveService.instance.pulseStudentRequirementsReview(
+            eventId: eventId,
+            type: type,
+          );
+        } else {
+          await LiveUiSync.syncNow(
+            type.isNotEmpty
+                ? (eventId.isNotEmpty ? '$type:$eventId' : type)
+                : 'notification',
+          );
+        }
+
+        await _cacheRegistrationApprovalIfNeeded(message.data);
+        RemoteNotification? notification = message.notification;
         final payload = route == 'certificates'
             ? 'route:certificates'
             : (eventId.isNotEmpty
@@ -283,38 +324,47 @@ class PushNotificationService {
           await _markProposalRequirementsNotificationShown(userId, eventId);
         }
 
-        _localNotificationsPlugin.show(
-          notification?.hashCode ?? DateTime.now().millisecondsSinceEpoch ~/ 1000,
-          notification?.title ?? fallbackTitle,
-          notification?.body ?? fallbackBody,
-          NotificationDetails(
-            android: AndroidNotificationDetails(
-              channel.id,
-              channel.name,
-              channelDescription: channel.description,
-              icon: '@mipmap/ic_launcher',
-              importance: Importance.high,
-              priority: Priority.high,
-              playSound: true,
-              styleInformation: BigTextStyleInformation(
-                notification?.body ?? fallbackBody,
-                contentTitle: notification?.title ?? fallbackTitle,
-                summaryText: 'PulseConnect',
+        try {
+          await _localNotificationsPlugin.show(
+            notification?.hashCode ??
+                DateTime.now().millisecondsSinceEpoch ~/ 1000,
+            notification?.title ?? fallbackTitle,
+            notification?.body ?? fallbackBody,
+            NotificationDetails(
+              android: AndroidNotificationDetails(
+                channel.id,
+                channel.name,
+                channelDescription: channel.description,
+                icon: '@mipmap/ic_launcher',
+                importance: Importance.high,
+                priority: Priority.high,
+                playSound: true,
+                styleInformation: BigTextStyleInformation(
+                  notification?.body ?? fallbackBody,
+                  contentTitle: notification?.title ?? fallbackTitle,
+                  summaryText: 'PulseConnect',
+                ),
+              ),
+              iOS: const DarwinNotificationDetails(
+                presentAlert: true,
+                presentBadge: true,
+                presentSound: true,
               ),
             ),
-            iOS: const DarwinNotificationDetails(
-              presentAlert: true,
-              presentBadge: true,
-              presentSound: true,
-            ),
-          ),
-          payload: payload,
-        );
+            payload: payload,
+          );
+        } catch (e) {
+          debugPrint('[FCM] Local notification show failed: $e');
+        }
       });
 
-      // Keep token row fresh when Firebase rotates it.
-      _firebaseMessaging.onTokenRefresh.listen((_) {
-        updateToken();
+      // Keep token row fresh when Firebase rotates it (only while logged in).
+      _firebaseMessaging.onTokenRefresh.listen((_) async {
+        if (await _hasLoggedInUser()) {
+          await updateToken();
+        } else {
+          await unregisterCurrentToken();
+        }
       });
     }
   }
@@ -443,17 +493,66 @@ class PushNotificationService {
       debugPrint('[FCM] Error saving FCM Token: $e');
     }
   }
+
+  /// Remove this device token from Supabase so logged-out screens stop getting pushes.
+  Future<void> unregisterCurrentToken({String? userId}) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final resolvedUserId =
+          (userId ?? prefs.getString('user_id') ?? '').trim();
+      String? token;
+      try {
+        token = await _firebaseMessaging.getToken();
+      } catch (e) {
+        debugPrint('[FCM] Could not read token for unregister: $e');
+      }
+
+      final client = Supabase.instance.client;
+      if (token != null && token.isNotEmpty) {
+        await client.from('fcm_tokens').delete().eq('token', token);
+      }
+      if (resolvedUserId.isNotEmpty) {
+        await client.from('fcm_tokens').delete().eq('user_id', resolvedUserId);
+      }
+      debugPrint('[FCM] Device token unregistered.');
+    } catch (e) {
+      debugPrint('[FCM] Error unregistering FCM Token: $e');
+    }
+  }
+
+  Future<bool> _hasLoggedInUser() async {
+    final prefs = await SharedPreferences.getInstance();
+    return (prefs.getString('user_id') ?? '').trim().isNotEmpty;
+  }
+
   /// Navigate to a specific event if the notification contains an event_id.
   /// Teachers are routed to TeacherEventManage, students to StudentEventDetails.
   Future<void> _handleNotificationClick(RemoteMessage message) async {
     await _cacheRegistrationApprovalIfNeeded(message.data);
+    final type = (message.data['type']?.toString() ?? '').trim().toLowerCase();
+    final tappedEventId = (message.data['event_id']?.toString() ?? '').trim();
+    // Tapping a push from tray means the underlying data already changed —
+    // refresh in-app state immediately when returning to the app.
+    if ((type == 'student_requirements_approved' ||
+            type == 'student_requirements_declined') &&
+        tappedEventId.isNotEmpty) {
+      EventLiveService.instance.pulseStudentRequirementsReview(
+        eventId: tappedEventId,
+        type: type,
+      );
+    } else {
+      await LiveUiSync.syncNow(
+        type.isNotEmpty
+            ? (tappedEventId.isNotEmpty ? '$type:$tappedEventId' : type)
+            : 'opened',
+      );
+    }
+
     final route = (message.data['route']?.toString() ?? '').trim().toLowerCase();
     if (route == 'certificates') {
       _openCertificatesScreen();
       return;
     }
-
-    final type = (message.data['type']?.toString() ?? '').trim().toLowerCase();
 
     String? eventId = message.data['event_id'];
     if (eventId != null && eventId.isNotEmpty) {

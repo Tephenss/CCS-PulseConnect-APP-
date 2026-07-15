@@ -11,6 +11,8 @@ class ShinyText extends StatefulWidget {
   final FontWeight fontWeight;
   final TextAlign textAlign;
   final List<Shadow>? shadows;
+  final int? maxLines;
+  final TextOverflow? overflow;
 
   const ShinyText({
     super.key,
@@ -24,6 +26,8 @@ class ShinyText extends StatefulWidget {
     this.fontWeight = FontWeight.w800,
     this.textAlign = TextAlign.left,
     this.shadows,
+    this.maxLines,
+    this.overflow,
   });
 
   @override
@@ -71,6 +75,8 @@ class _ShinyTextState extends State<ShinyText> with SingleTickerProviderStateMix
         final textWidget = Text(
           widget.text,
           textAlign: widget.textAlign,
+          maxLines: widget.maxLines,
+          overflow: widget.overflow,
           style: TextStyle(
             fontSize: widget.fontSize,
             fontWeight: widget.fontWeight,
@@ -80,13 +86,15 @@ class _ShinyTextState extends State<ShinyText> with SingleTickerProviderStateMix
         );
 
         return Stack(
-          alignment: Alignment.center,
+          alignment: Alignment.centerLeft,
           children: [
             // Background Shadow Layer (Solid Black)
             if (widget.shadows != null)
               Text(
                 widget.text,
                 textAlign: widget.textAlign,
+                maxLines: widget.maxLines,
+                overflow: widget.overflow,
                 style: TextStyle(
                   fontSize: widget.fontSize,
                   fontWeight: widget.fontWeight,
@@ -101,14 +109,15 @@ class _ShinyTextState extends State<ShinyText> with SingleTickerProviderStateMix
                 ),
               ),
 
-            // Shiny Foreground Layer
+            // Shiny Foreground Layer — horizontal left → right sweep
             ShaderMask(
               blendMode: BlendMode.srcIn,
               shaderCallback: (bounds) {
-                final double slideRotation = _controller.value * 2 - 1.0; // from -1 to 1
+                // Slide highlight from left of text to right, then loop
+                final double x = -1.6 + (_controller.value * 3.2);
                 return LinearGradient(
-                  begin: Alignment(-1.0 - slideRotation, -1.0),
-                  end: Alignment(1.0 - slideRotation, 1.0),
+                  begin: Alignment(x - 0.45, 0),
+                  end: Alignment(x + 0.45, 0),
                   colors: [
                     widget.color,
                     widget.color,
@@ -116,7 +125,7 @@ class _ShinyTextState extends State<ShinyText> with SingleTickerProviderStateMix
                     widget.color,
                     widget.color,
                   ],
-                  stops: const [0.0, 0.4, 0.5, 0.6, 1.0],
+                  stops: const [0.0, 0.35, 0.5, 0.65, 1.0],
                 ).createShader(bounds);
               },
               child: textWidget,

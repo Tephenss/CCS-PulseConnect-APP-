@@ -12,6 +12,7 @@ import 'student_profile.dart';
 import 'student_scan.dart';
 import '../welcome_screen.dart';
 import '../../services/notification_service.dart';
+import '../../services/event_live_service.dart';
 import '../../services/offline_backup_service.dart';
 import '../../services/offline_sync_service.dart';
 import '../../widgets/notifications_modal.dart';
@@ -48,6 +49,8 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   final PageController _headerPageController = PageController();
   int _currentHeaderSlide = 0;
   StreamSubscription<int>? _unreadSubscription;
+  StreamSubscription<String>? _eventLiveSubscription;
+  Timer? _homeLiveFallbackTimer;
   Timer? _absenceScopeRefreshTimer;
   RealtimeChannel? _scannerAccessChannel;
   Timer? _scannerAccessGuardTimer;
@@ -82,8 +85,60 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _startAbsenceScopeRefreshTicker();
+    _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
+      if (!mounted) return;
+      unawaited(_refreshHomeLive(reason));
+    });
+    _homeLiveFallbackTimer = Timer.periodic(
+      const Duration(seconds: 40),
+      (_) => unawaited(_refreshHomeLive('fallback')),
+    );
     _loadData();
     _subscribeToNotifications();
+  }
+
+  Future<void> _refreshHomeLive(String reason) async {
+    if (!mounted || _user == null) return;
+    final userId = _user?['id']?.toString() ?? '';
+    if (userId.isEmpty) return;
+
+    if (reason == 'inbox' || reason.startsWith('push')) {
+      unawaited(_refreshUnreadCount());
+    }
+
+    String? yearLevel;
+    String? courseCode;
+    try {
+      final scope = await _eventService.getStudentTargetScope(userId);
+      final scopedYear = (scope['yearLevel']?.toString() ?? '').trim();
+      final scopedCourse = (scope['courseCode']?.toString() ?? '').trim();
+      yearLevel = scopedYear.isEmpty || scopedYear == 'ALL' ? null : scopedYear;
+      courseCode =
+          scopedCourse.isEmpty || scopedCourse == 'ALL' ? null : scopedCourse;
+    } catch (_) {
+      // Keep compatibility fallback below.
+    }
+
+    yearLevel ??= await _authService.getStudentYearLevel();
+    courseCode ??= await _authService.getStudentCourseCode();
+
+    final activeEvents = await _eventService.getActiveEvents(
+      yearLevel: yearLevel,
+      courseCode: courseCode,
+      // Timer fallbacks respect TTL; realtime/live signals force fresh.
+      forceFresh: reason != 'fallback',
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _upcomingEvents = activeEvents.take(5).toList();
+    });
+
+    if (reason == 'registrations' ||
+        reason == 'registration_access' ||
+        reason == 'tickets') {
+      unawaited(_refreshAbsenceScopesSilently());
+    }
   }
 
   void _startAbsenceScopeRefreshTicker() {
@@ -216,12 +271,16 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     _scannerAccessChannel!.subscribe();
 
     _scannerAccessGuardTimer = Timer.periodic(
-      const Duration(seconds: 3),
-      (_) => unawaited(_refreshScannerAccessGuard(actorId)),
+      const Duration(seconds: 45),
+      (_) {
+        // Only refresh roster while Scan tab is visible.
+        if (!mounted || _currentIndex != 2) return;
+        unawaited(_refreshScannerAccessGuard(actorId));
+      },
     );
   }
 
-  Future<void> _loadData() async {
+  Future<void> _loadData({bool forceFresh = false}) async {
     final user = await _authService.getCurrentUser();
     final userId = user?['id']?.toString() ?? '';
 
@@ -230,6 +289,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     // Initialize Realtime once user is known
     if (user != null) {
       if (userId.isNotEmpty) {
+        EventLiveService.instance.start(userId: userId);
         _notifService.initRealtime(userId);
       }
     }
@@ -252,17 +312,27 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
 
     yearLevel ??= await _authService.getStudentYearLevel();
     courseCode ??= await _authService.getStudentCourseCode();
-    final activeEvents = await _eventService.getActiveEvents(
-      yearLevel: yearLevel,
-      courseCode: courseCode,
-    );
+
+    final results = await Future.wait([
+      _eventService.getActiveEvents(
+        yearLevel: yearLevel,
+        courseCode: courseCode,
+        forceFresh: forceFresh,
+      ),
+      _notifService.getUnreadCount(forceRefresh: forceFresh),
+      _authService.getSections(),
+      userId.isNotEmpty
+          ? _eventService.getStudentPendingAbsenceScopes(studentId: userId)
+          : Future.value(<Map<String, dynamic>>[]),
+    ]);
+
+    final activeEvents = List<Map<String, dynamic>>.from(results[0] as List);
     final events = activeEvents.take(5).toList();
-    final unread = await _notifService.getUnreadCount(forceRefresh: true);
-    final sections = await _authService.getSections();
+    final unread = results[1] as int;
+    final sections = List<Map<String, dynamic>>.from(results[2] as List);
+    final pendingAbsenceScopes =
+        List<Map<String, dynamic>>.from(results[3] as List);
     final filteredSections = _filterSectionsForDetectedCourse(sections, user);
-    final pendingAbsenceScopes = userId.isNotEmpty
-        ? await _eventService.getStudentPendingAbsenceScopes(studentId: userId)
-        : <Map<String, dynamic>>[];
     String? selectedAbsenceScopeKey = _selectedAbsenceScopeKey;
     if (pendingAbsenceScopes.isEmpty) {
       selectedAbsenceScopeKey = null;
@@ -325,7 +395,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _refreshUnreadCount();
-      _loadData();
+      _loadData(forceFresh: true);
       final studentId = (_user?['id']?.toString() ?? '').trim();
       if (studentId.isNotEmpty) {
         unawaited(_refreshScannerAccessGuard(studentId));
@@ -337,6 +407,8 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _unreadSubscription?.cancel();
+    _eventLiveSubscription?.cancel();
+    _homeLiveFallbackTimer?.cancel();
     _absenceScopeRefreshTimer?.cancel();
     _scannerAccessGuardTimer?.cancel();
     _scannerAccessChannel?.unsubscribe();
@@ -547,19 +619,32 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    // Note: Tab 2 (Index 2) is now the StudentScanScreen
-    final screens = [
-      _buildHomeContent(),
-      const StudentEvents(),
-      const StudentScanScreen(), 
-      const StudentTickets(),
-      StudentProfile(user: _user, onUpdate: _loadData),
-    ];
-
+    // Note: Tab 2 (Index 2) is Scan — built only while selected so the camera
+    // does not stay open. Other tabs stay alive (IndexedStack) to preserve
+    // cached lists and avoid full-screen reload spinners.
     final bool needsSection = _user != null && _user!['section_id'] == null;
     final bool needsAbsenceReason =
         _user != null && _pendingAbsenceScopes.isNotEmpty;
     final gateMode = needsSection || needsAbsenceReason;
+
+    final tabBody = needsSection
+        ? _buildSectionSelection()
+        : (needsAbsenceReason
+              ? _buildAbsenceReasonLock()
+              : IndexedStack(
+                  index: _currentIndex,
+                  sizing: StackFit.expand,
+                  children: [
+                    _buildHomeContent(),
+                    const StudentEvents(),
+                    // Keep scan out of the keep-alive stack until opened.
+                    _currentIndex == 2
+                        ? const StudentScanScreen()
+                        : const SizedBox.shrink(),
+                    const StudentTickets(),
+                    StudentProfile(user: _user, onUpdate: _loadData),
+                  ],
+                ));
 
     return PopScope(
       canPop: false,
@@ -575,23 +660,8 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
           children: [
             _isLoading
                 ? const Center(child: PulseConnectLoader())
-                : AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 400),
-                    switchInCurve: Curves.easeInOut,
-                    switchOutCurve: Curves.easeInOut,
-                    transitionBuilder: (Widget child, Animation<double> animation) {
-                      return FadeTransition(opacity: animation, child: child);
-                    },
-                    child: Container(
-                      key: ValueKey<int>(_currentIndex),
-                      child: needsSection
-                          ? _buildSectionSelection()
-                          : (needsAbsenceReason
-                              ? _buildAbsenceReasonLock()
-                              : screens[_currentIndex]),
-                    ),
-                  ),
-            
+                : tabBody,
+
             // New Floating Navigation Bar (Matches user design)
             if (!_isLoading && !needsSection && !needsAbsenceReason)
               Positioned(
@@ -1153,7 +1223,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     final firstName = _user?['first_name'] as String? ?? 'Student';
     
     return RefreshIndicator(
-      onRefresh: _loadData,
+      onRefresh: () => _loadData(forceFresh: true),
       color: _studentChrome(context),
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
@@ -1718,7 +1788,10 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (_) => StudentEventDetails(eventId: event['id'].toString()),
+              builder: (_) => StudentEventDetails(
+                eventId: event['id'].toString(),
+                initialEvent: event,
+              ),
             ),
           );
         },

@@ -163,12 +163,12 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           currentRole,
           course: userData['course']?.toString(),
         );
-        
-        await PushNotificationService().updateToken();
-        
+
         if (needsVerification) {
-          // Do not keep a logged-in session until verification is completed.
+          // Do not keep a logged-in session (or FCM token) until OTP is done.
           await _authService.clearLocalSessionMarkers();
+        } else {
+          await PushNotificationService().updateToken();
         }
 
         if (!mounted) return;

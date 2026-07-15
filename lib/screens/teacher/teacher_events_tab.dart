@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import '../../services/app_cache_service.dart';
 import '../../services/event_service.dart';
+import '../../services/event_live_service.dart';
 import '../../services/auth_service.dart';
 import 'package:intl/intl.dart';
 import '../../widgets/custom_loader.dart';
@@ -28,74 +31,100 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
   List<Map<String, dynamic>> _events = [];
   bool _isLoading = true;
   bool _usingCachedEvents = false;
+  StreamSubscription<String>? _eventLiveSubscription;
+  Timer? _fallbackRefreshTimer;
+  bool _isRefreshingEvents = false;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    _eventLiveSubscription = EventLiveService.instance.changes.listen((_) {
+      if (!mounted || _isRefreshingEvents) return;
+      unawaited(_loadEvents(forceFresh: true));
+    });
+    _fallbackRefreshTimer = Timer.periodic(
+      const Duration(seconds: 40),
+      (_) => unawaited(_loadEvents(forceFresh: false)),
+    );
     _loadEvents();
-  }
-
-  Future<void> _loadEvents() async {
-    final user = await _authService.getCurrentUser();
-    if (user == null) {
-      if (!mounted) return;
-      setState(() => _isLoading = false);
-      return;
-    }
-
-    final teacherId = user['id']?.toString() ?? '';
-    final connectivity = await _connectivity.checkConnectivity();
-    final isOffline =
-        connectivity.isEmpty ||
-        connectivity.every((result) => result == ConnectivityResult.none);
-    final cacheKey = 'teacher_accessible_events_$teacherId';
-
-    List<Map<String, dynamic>> events = <Map<String, dynamic>>[];
-    var usingCachedData = false;
-    if (teacherId.isNotEmpty) {
-      if (isOffline) {
-        events = await _appCacheService.loadJsonList(cacheKey);
-        usingCachedData = true;
-      } else {
-        final fetched = await _eventService.getTeacherAccessibleEvents(
-          teacherId,
-        );
-        if (fetched.isEmpty) {
-          final cached = await _appCacheService.loadJsonList(cacheKey);
-          final lastUpdated = await _appCacheService.lastUpdatedAt(cacheKey);
-          final cacheStillFresh =
-              cached.isNotEmpty &&
-              lastUpdated != null &&
-              DateTime.now().difference(lastUpdated) <=
-                  const Duration(hours: 24);
-          if (cacheStillFresh) {
-            events = cached;
-            usingCachedData = true;
-          } else {
-            events = fetched;
-            await _appCacheService.saveJsonList(cacheKey, events);
-          }
-        } else {
-          events = fetched;
-          await _appCacheService.saveJsonList(cacheKey, events);
-        }
-      }
-    }
-
-    if (mounted) {
-      setState(() {
-        _events = events;
-        _usingCachedEvents = usingCachedData;
-        _isLoading = false;
-      });
-    }
   }
 
   @override
   void dispose() {
+    _eventLiveSubscription?.cancel();
+    _fallbackRefreshTimer?.cancel();
     _tabController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadEvents({bool forceFresh = false}) async {
+    if (_isRefreshingEvents) return;
+    _isRefreshingEvents = true;
+    final hadCachedEvents = _events.isNotEmpty;
+    if (!hadCachedEvents && mounted) {
+      setState(() => _isLoading = true);
+    }
+    try {
+      final user = await _authService.getCurrentUser();
+      if (user == null) {
+        if (!mounted) return;
+        setState(() => _isLoading = false);
+        return;
+      }
+
+      final teacherId = user['id']?.toString() ?? '';
+      final connectivity = await _connectivity.checkConnectivity();
+      final isOffline =
+          connectivity.isEmpty ||
+          connectivity.every((result) => result == ConnectivityResult.none);
+      final cacheKey = 'teacher_accessible_events_$teacherId';
+
+      List<Map<String, dynamic>> events = <Map<String, dynamic>>[];
+      var usingCachedData = false;
+      if (teacherId.isNotEmpty) {
+        if (isOffline) {
+          events = await _appCacheService.loadJsonList(cacheKey);
+          usingCachedData = true;
+        } else {
+          final fetched = await _eventService.getTeacherAccessibleEvents(
+            teacherId,
+            forceFresh: forceFresh,
+          );
+          if (fetched.isEmpty && !forceFresh) {
+            final cached = await _appCacheService.loadJsonList(cacheKey);
+            final lastUpdated = await _appCacheService.lastUpdatedAt(cacheKey);
+            final cacheStillFresh =
+                cached.isNotEmpty &&
+                lastUpdated != null &&
+                DateTime.now().difference(lastUpdated) <=
+                    const Duration(hours: 24);
+            if (cacheStillFresh) {
+              events = cached;
+              usingCachedData = true;
+            } else {
+              events = fetched;
+              await _appCacheService.saveJsonList(cacheKey, events);
+            }
+          } else {
+            events = fetched;
+            if (events.isNotEmpty) {
+              await _appCacheService.saveJsonList(cacheKey, events);
+            }
+          }
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _events = events;
+          _usingCachedEvents = usingCachedData;
+          _isLoading = false;
+        });
+      }
+    } finally {
+      _isRefreshingEvents = false;
+    }
   }
 
   @override
@@ -223,7 +252,9 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
 
     var filteredEvents = _events.where((e) {
       // Normalize string to avoid missing events due to casing/whitespace.
-      final status = (e['status']?.toString() ?? 'pending').toLowerCase().trim();
+      final status = (e['status']?.toString() ?? 'pending')
+          .toLowerCase()
+          .trim();
 
       // Calculate if the event is truly expired based on event end time.
       final endAtStr = e['end_at'] as String?;
@@ -233,9 +264,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
 
       if (statusFilter == 'expired') {
         // Shown in Expired if time naturally passed, excluding manually archived ones
-        return (status == 'expired' ||
-                status == 'finished' ||
-                isPast) &&
+        return (status == 'expired' || status == 'finished' || isPast) &&
             status != 'archived';
       } else if (statusFilter == 'active') {
         return isTeacherActiveEvent(e, now: now);

@@ -1,4 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'dart:async';
 import 'dart:math';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
@@ -7,9 +8,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../config/env.dart';
 import '../utils/event_time_utils.dart';
 import 'mobile_backend_service.dart';
+import 'app_cache_service.dart';
 
 class EventService {
   final _supabase = Supabase.instance.client;
+  final AppCacheService _appCache = AppCacheService();
   static const Duration _manilaOffset = Duration(hours: 8);
   final Map<String, bool> _eventSessionColumnSupport = {};
   final Map<String, bool> _attendanceColumnSupport = {};
@@ -17,8 +20,78 @@ class EventService {
   DateTime? _eventSessionAttendanceSupportCheckedAtUtc;
   static final Map<String, _CachedStudentRequirements> _studentRequirementsCache =
       {};
+  static final Map<String, _ListCacheEntry> _listCache = {};
+  static const Duration _activeEventsTtl = Duration(seconds: 20);
+  static const Duration _teacherEventsTtl = Duration(seconds: 20);
+  static const Duration _expiredEvalTtl = Duration(seconds: 120);
+  static const Duration _ticketsTtl = Duration(seconds: 25);
+  static const Duration _eventByIdTtl = Duration(seconds: 60);
+  static const Duration _eventSessionsTtl = Duration(seconds: 60);
+  static const Duration _eventRegistrationSettingsTtl = Duration(seconds: 30);
+  static const String _eventListColumns =
+      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_structure,event_mode,event_for,allow_registration,cover_image_url,location,event_type,grace_time,registration_limit,is_free_event,registration_close_weeks';
+  static const String _eventListColumnsFallback =
+      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for,cover_image_url,location,event_type';
+  static const String _eventListColumnsMinimal =
+      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for';
 
   static const Duration _studentRequirementsCacheTtl = Duration(minutes: 2);
+
+  static void invalidateEventListCache({String? prefix}) {
+    if (prefix == null || prefix.trim().isEmpty) {
+      _listCache.clear();
+      final cache = AppCacheService();
+      cache.invalidateMemoryPrefix('active:');
+      cache.invalidateMemoryPrefix('teacher_accessible:');
+      cache.invalidateMemoryPrefix('expired_eval:');
+      cache.invalidateMemoryPrefix('tickets:');
+      cache.invalidateMemoryPrefix('fetch:');
+      cache.invalidateMemoryPrefix('event_by_id:');
+      cache.invalidateMemoryPrefix('event_sessions:');
+      cache.invalidateMemoryPrefix('event_reg_settings:');
+      cache.cancelInFlightPrefix('fetch:');
+      return;
+    }
+    _listCache.removeWhere((key, _) => key.startsWith(prefix));
+    AppCacheService().invalidateMemoryPrefix(prefix);
+    AppCacheService().cancelInFlightPrefix('fetch:$prefix');
+  }
+
+  void invalidateEventDetailCache(String eventId) {
+    final id = eventId.trim();
+    if (id.isEmpty) return;
+    _appCache.invalidateMemory('event_by_id:$id');
+    _appCache.invalidateMemory('event_sessions:$id');
+    _appCache.invalidateMemory('event_reg_settings:$id');
+  }
+
+  List<Map<String, dynamic>>? _readListCache(
+    String key,
+    Duration ttl, {
+    bool allowStale = false,
+    Duration staleTtl = const Duration(minutes: 30),
+  }) {
+    final entry = _listCache[key];
+    if (entry == null) {
+      return null;
+    }
+    final age = DateTime.now().difference(entry.cachedAt);
+    if (age <= ttl) {
+      return List<Map<String, dynamic>>.from(entry.data);
+    }
+    if (allowStale && age <= staleTtl) {
+      return List<Map<String, dynamic>>.from(entry.data);
+    }
+    _listCache.remove(key);
+    return null;
+  }
+
+  void _writeListCache(String key, List<Map<String, dynamic>> data) {
+    _listCache[key] = _ListCacheEntry(
+      List<Map<String, dynamic>>.from(data),
+      DateTime.now(),
+    );
+  }
 
   List<Map<String, dynamic>>? _readCachedStudentRequirements(String eventId) {
     final cached = _studentRequirementsCache[eventId];
@@ -36,9 +109,6 @@ class EventService {
     String eventId,
     List<Map<String, dynamic>> items,
   ) {
-    if (items.isEmpty) {
-      return;
-    }
     _studentRequirementsCache[eventId] = _CachedStudentRequirements(
       items: List<Map<String, dynamic>>.from(items),
       cachedAt: DateTime.now(),
@@ -1522,9 +1592,19 @@ class EventService {
   String getSessionDisplayName(Map<String, dynamic> session) =>
       _sessionDisplayName(session);
 
-  Future<List<Map<String, dynamic>>> getEventSessions(String eventId) async {
+  Future<List<Map<String, dynamic>>> getEventSessions(
+    String eventId, {
+    bool forceFresh = false,
+  }) async {
     if (eventId.trim().isEmpty) return [];
-    return _fetchSessionsForEvent(eventId);
+    final key = 'event_sessions:$eventId';
+    final cached = await _appCache.fetchOnce<List<Map<String, dynamic>>>(
+      key,
+      () async => _fetchSessionsForEvent(eventId),
+      ttl: _eventSessionsTtl,
+      forceFresh: forceFresh,
+    );
+    return List<Map<String, dynamic>>.from(cached);
   }
 
   DateTime? _effectiveEventEndAt(
@@ -2351,23 +2431,115 @@ class EventService {
   Future<List<Map<String, dynamic>>> getActiveEvents({
     String? yearLevel,
     String? courseCode,
+    bool forceFresh = false,
+  }) async {
+    final cacheKey =
+        'active:v2:${yearLevel ?? ''}:${courseCode ?? ''}';
+    if (!forceFresh) {
+      final cached = _readListCache(cacheKey, _activeEventsTtl);
+      if (cached != null) {
+        return cached;
+      }
+
+      final stale = _readListCache(
+        cacheKey,
+        _activeEventsTtl,
+        allowStale: true,
+      );
+      if (stale != null && stale.isNotEmpty) {
+        unawaited(
+          _fetchActiveEvents(
+            cacheKey,
+            yearLevel: yearLevel,
+            courseCode: courseCode,
+          ),
+        );
+        return stale;
+      }
+
+      final diskCached = await _appCache.loadJsonList(cacheKey);
+      if (diskCached.isNotEmpty) {
+        _writeListCache(cacheKey, diskCached);
+        unawaited(
+          _fetchActiveEvents(
+            cacheKey,
+            yearLevel: yearLevel,
+            courseCode: courseCode,
+          ),
+        );
+        return diskCached;
+      }
+    }
+
+    return _appCache.fetchOnce(
+      'fetch:$cacheKey',
+      () => _fetchActiveEvents(
+        cacheKey,
+        yearLevel: yearLevel,
+        courseCode: courseCode,
+      ),
+      forceFresh: forceFresh,
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchActiveEvents(
+    String cacheKey, {
+    String? yearLevel,
+    String? courseCode,
   }) async {
     try {
       final now = DateTime.now().toUtc().toIso8601String();
-      final response = await _supabase
-          .from('events')
-          .select()
-          .eq('status', 'published')
-          .gte('end_at', now)
-          .order('start_at', ascending: true);
+      final response = await _selectPublishedActiveEvents(now);
       final list = List<Map<String, dynamic>>.from(response);
-      return _filterByTargetParticipant(
+      final filtered = _filterByTargetParticipant(
         list,
         yearLevel: yearLevel,
         courseCode: courseCode,
       );
+      _writeListCache(cacheKey, filtered);
+      await _appCache.saveJsonList(cacheKey, filtered);
+      return filtered;
     } catch (e) {
-      return [];
+      final stale = _readListCache(
+        cacheKey,
+        _activeEventsTtl,
+        allowStale: true,
+        staleTtl: const Duration(hours: 24),
+      );
+      if (stale != null) {
+        return stale;
+      }
+      final diskCached = await _appCache.loadJsonList(cacheKey);
+      return diskCached;
+    }
+  }
+
+  Future<List<dynamic>> _selectPublishedActiveEvents(String nowUtc) async {
+    try {
+      return await _supabase
+          .from('events')
+          .select(_eventListColumns)
+          .eq('status', 'published')
+          .gte('end_at', nowUtc)
+          .order('start_at', ascending: true);
+    } catch (e) {
+      debugPrint('EventService: active events fallback select: $e');
+      try {
+        return await _supabase
+            .from('events')
+            .select(_eventListColumnsFallback)
+            .eq('status', 'published')
+            .gte('end_at', nowUtc)
+            .order('start_at', ascending: true);
+      } catch (e2) {
+        debugPrint('EventService: active events minimal select: $e2');
+        return await _supabase
+            .from('events')
+            .select(_eventListColumnsMinimal)
+            .eq('status', 'published')
+            .gte('end_at', nowUtc)
+            .order('start_at', ascending: true);
+      }
     }
   }
 
@@ -2424,23 +2596,46 @@ class EventService {
   }
 
   // Get event by ID
-  Future<Map<String, dynamic>?> getEventById(String eventId) async {
-    try {
-      final response = await _supabase
-          .from('events')
-          .select()
-          .eq('id', eventId)
-          .single();
-      return response;
-    } catch (e) {
-      return null;
-    }
+  Future<Map<String, dynamic>?> getEventById(
+    String eventId, {
+    bool forceFresh = false,
+  }) async {
+    final id = eventId.trim();
+    if (id.isEmpty) return null;
+
+    final key = 'event_by_id:$id';
+    return _appCache.fetchOnce<Map<String, dynamic>?>(
+      key,
+      () async {
+        try {
+          final response = await _supabase
+              .from('events')
+              .select()
+              .eq('id', id)
+              .single();
+          return Map<String, dynamic>.from(response);
+        } catch (_) {
+          return null;
+        }
+      },
+      ttl: _eventByIdTtl,
+      forceFresh: forceFresh,
+    );
   }
 
   Future<Map<String, dynamic>?> getEventRegistrationSettings(
-    String eventId,
-  ) async {
-    return _fetchRegistrationEvent(eventId);
+    String eventId, {
+    bool forceFresh = false,
+  }) async {
+    final id = eventId.trim();
+    if (id.isEmpty) return null;
+    final key = 'event_reg_settings:$id';
+    return _appCache.fetchOnce<Map<String, dynamic>?>(
+      key,
+      () => _fetchRegistrationEvent(id),
+      ttl: _eventRegistrationSettingsTtl,
+      forceFresh: forceFresh,
+    );
   }
 
   Map<String, dynamic> mergeEventRegistrationSettings(
@@ -2557,77 +2752,44 @@ class EventService {
     return int.tryParse(info['registration_count']?.toString() ?? '');
   }
 
-  Future<Map<String, dynamic>?> _fetchHostedRegistrationAvailability(
-    String eventId,
-    String studentId,
-  ) async {
-    if (!MobileBackendService.isConfigured) {
-      return null;
-    }
-
-    final info = await _mobileBackend.getEventRegistrationInfo(
-      eventId: eventId,
-      userId: studentId,
-    );
-    if (info['ok'] != true) {
-      return null;
-    }
-
-    final availability = info['availability'];
-    if (availability is! Map) {
-      return null;
-    }
-
-    final access = Map<String, dynamic>.from(availability);
-    return {
-      'allowed': access['allowed'] == true,
-      'targetAllowed': access['target_allowed'] == true,
-      'approvalRequired': access['approval_required'] == true,
-      'registrationOpenToAll': info['registration_open_to_all'] == true,
-      'requirementsRequired': access['requirements_required'] == true,
-      'requirementsComplete': access['requirements_complete'] == true,
-      'requirementsApproved': access['requirements_approved'] == true,
-      'requirementsStatus': (access['requirements_status'] as String? ?? '').trim(),
-      'requirementsDeclineReason':
-          (access['requirements_decline_reason'] as String? ?? '').trim(),
-      'message': (access['message'] as String? ?? '').trim(),
-    };
-  }
-
   Future<Map<String, dynamic>?> _fetchStudentDocumentAccessGate(
     String eventId,
     String studentId,
   ) async {
+    // Prefer local Supabase first — hosted PHP is often the slow path.
+    final requirements = await fetchEventStudentRequirementsList(
+      eventId,
+      studentId: studentId,
+    );
+    if (requirements.isNotEmpty) {
+      final localGate = await _buildStudentDocumentAccessGate(
+        eventId: eventId,
+        studentId: studentId,
+        requirements: requirements,
+      );
+      if (localGate != null) {
+        return localGate;
+      }
+    }
+
     if (MobileBackendService.isConfigured) {
       try {
         final hosted = await _fetchStudentDocumentAccessGateFromHosted(
           eventId,
           studentId,
         ).timeout(
-          const Duration(seconds: 4),
+          const Duration(seconds: 3),
           onTimeout: () => null,
         );
         if (hosted != null) {
           return hosted;
         }
       } catch (_) {
-        // Fall through to direct Supabase lookup.
+        // Ignore hosted failures.
       }
     }
 
-    final requirements = await fetchEventStudentRequirementsList(
-      eventId,
-      studentId: studentId,
-    );
-    if (requirements.isEmpty) {
-      return null;
-    }
-
-    return _buildStudentDocumentAccessGate(
-      eventId: eventId,
-      studentId: studentId,
-      requirements: requirements,
-    );
+    return null;
   }
 
   Future<Map<String, dynamic>?> _fetchStudentDocumentAccessGateFromHosted(
@@ -2863,32 +3025,7 @@ class EventService {
       return cached;
     }
 
-    final trimmedStudentId = studentId?.trim() ?? '';
-    if (MobileBackendService.isConfigured && trimmedStudentId.isNotEmpty) {
-      try {
-        final hosted = await _mobileBackend
-            .getStudentRequirementsInfo(
-              eventId: trimmedEventId,
-              userId: trimmedStudentId,
-            )
-            .timeout(
-              const Duration(seconds: 4),
-              onTimeout: () => {'ok': false},
-            );
-        if (hosted['ok'] == true) {
-          final hostedRequirements = List<Map<String, dynamic>>.from(
-            hosted['requirements'] as List? ?? const [],
-          );
-          if (hostedRequirements.isNotEmpty) {
-            _writeCachedStudentRequirements(trimmedEventId, hostedRequirements);
-            return hostedRequirements;
-          }
-        }
-      } catch (_) {
-        // Fall through to Supabase lookup.
-      }
-    }
-
+    // Supabase first — avoid blocking event details on a hung PHP host.
     try {
       final rpcRows = await _supabase.rpc(
         'get_event_student_requirements',
@@ -2916,25 +3053,19 @@ class EventService {
         return rows;
       }
     } catch (_) {
-      // No readable requirements source available.
+      // Fall through to hosted lookup.
     }
 
-    return [];
-  }
-
-  Future<Map<String, dynamic>> getStudentRequirementsInfo(
-    String eventId,
-    String studentId,
-  ) async {
-    if (MobileBackendService.isConfigured) {
+    final trimmedStudentId = studentId?.trim() ?? '';
+    if (MobileBackendService.isConfigured && trimmedStudentId.isNotEmpty) {
       try {
         final hosted = await _mobileBackend
             .getStudentRequirementsInfo(
-              eventId: eventId,
-              userId: studentId,
+              eventId: trimmedEventId,
+              userId: trimmedStudentId,
             )
             .timeout(
-              const Duration(seconds: 4),
+              const Duration(seconds: 3),
               onTimeout: () => {'ok': false},
             );
         if (hosted['ok'] == true) {
@@ -2942,29 +3073,24 @@ class EventService {
             hosted['requirements'] as List? ?? const [],
           );
           if (hostedRequirements.isNotEmpty) {
-            _writeCachedStudentRequirements(eventId, hostedRequirements);
-            final access = hosted['access'] is Map
-                ? Map<String, dynamic>.from(hosted['access'] as Map)
-                : <String, dynamic>{};
-            return {
-              ...hosted,
-              'access': {
-                'required': true,
-                'complete': access['complete'] == true,
-                'approved': access['approved'] == true,
-                'status': access['status']?.toString() ?? 'incomplete',
-                'message': access['message']?.toString() ??
-                    'Upload the required documents before registering.',
-                'decline_reason': access['decline_reason']?.toString() ?? '',
-              },
-            };
+            _writeCachedStudentRequirements(trimmedEventId, hostedRequirements);
+            return hostedRequirements;
           }
         }
       } catch (_) {
-        // Fall through to direct Supabase lookup.
+        // No readable requirements source available.
       }
     }
 
+    // Cache empty so we don't keep re-hitting slow hosts for events with no docs.
+    _writeCachedStudentRequirements(trimmedEventId, const []);
+    return [];
+  }
+
+  Future<Map<String, dynamic>> getStudentRequirementsInfo(
+    String eventId,
+    String studentId,
+  ) async {
     try {
       final requirements = await fetchEventStudentRequirementsList(
         eventId,
@@ -3014,7 +3140,46 @@ class EventService {
         };
       }
     } catch (_) {
-      // Fall through to empty requirements response.
+      // Fall through to hosted / empty.
+    }
+
+    if (MobileBackendService.isConfigured) {
+      try {
+        final hosted = await _mobileBackend
+            .getStudentRequirementsInfo(
+              eventId: eventId,
+              userId: studentId,
+            )
+            .timeout(
+              const Duration(seconds: 3),
+              onTimeout: () => {'ok': false},
+            );
+        if (hosted['ok'] == true) {
+          final hostedRequirements = List<Map<String, dynamic>>.from(
+            hosted['requirements'] as List? ?? const [],
+          );
+          if (hostedRequirements.isNotEmpty) {
+            _writeCachedStudentRequirements(eventId, hostedRequirements);
+            final access = hosted['access'] is Map
+                ? Map<String, dynamic>.from(hosted['access'] as Map)
+                : <String, dynamic>{};
+            return {
+              ...hosted,
+              'access': {
+                'required': true,
+                'complete': access['complete'] == true,
+                'approved': access['approved'] == true,
+                'status': access['status']?.toString() ?? 'incomplete',
+                'message': access['message']?.toString() ??
+                    'Upload the required documents before registering.',
+                'decline_reason': access['decline_reason']?.toString() ?? '',
+              },
+            };
+          }
+        }
+      } catch (_) {
+        // Fall through to empty requirements response.
+      }
     }
 
     return {
@@ -3397,84 +3562,17 @@ class EventService {
     return null;
   }
 
-  bool _isRegistrationClosedAvailabilityMessage(String? message) {
-    final normalized = (message ?? '').trim().toLowerCase();
-    return normalized.contains('full') || normalized.contains('closed');
-  }
-
   Future<Map<String, dynamic>> getStudentRegistrationAvailability(
     String eventId,
     String studentId, {
     Map<String, dynamic>? preloadedEvent,
   }) async {
-    final gateAndHosted = await Future.wait<dynamic>([
-      _fetchStudentDocumentAccessGate(eventId, studentId),
-      _fetchHostedRegistrationAvailability(eventId, studentId),
-    ]);
-    final documentGate = gateAndHosted[0] as Map<String, dynamic>?;
-    final hostedAvailability =
-        gateAndHosted[1] as Map<String, dynamic>?;
-    if (hostedAvailability != null) {
-      final hostedClosed = hostedAvailability['allowed'] != true &&
-          _isRegistrationClosedAvailabilityMessage(
-            hostedAvailability['message'] as String?,
-          );
-      if (hostedClosed) {
-        return hostedAvailability;
-      }
-
-      if (documentGate != null) {
-        final merged = Map<String, dynamic>.from(hostedAvailability);
-        merged['requirementsRequired'] =
-            documentGate['requirementsRequired'] == true;
-        merged['requirementsComplete'] =
-            documentGate['requirementsComplete'] == true;
-        merged['requirementsApproved'] =
-            documentGate['requirementsApproved'] == true;
-        merged['requirementsStatus'] =
-            (documentGate['requirementsStatus'] as String? ?? '').trim();
-        merged['requirementsDeclineReason'] =
-            (documentGate['requirementsDeclineReason'] as String? ?? '').trim();
-
-        if (documentGate['requirementsApproved'] != true) {
-          merged['allowed'] = false;
-          final gateMessage = (documentGate['message'] as String? ?? '').trim();
-          if (gateMessage.isNotEmpty) {
-            merged['message'] = gateMessage;
-          }
-        }
-        return merged;
-      }
-
-      final requirements = await fetchEventStudentRequirementsList(
-        eventId,
-        studentId: studentId,
-      );
-      if (requirements.isNotEmpty) {
-        final builtGate = await _buildStudentDocumentAccessGate(
-          eventId: eventId,
-          studentId: studentId,
-          requirements: requirements,
-        );
-        if (builtGate != null && builtGate['requirementsApproved'] != true) {
-          return {
-            ...hostedAvailability,
-            'allowed': false,
-            'requirementsRequired': true,
-            'requirementsComplete': builtGate['requirementsComplete'] == true,
-            'requirementsApproved': false,
-            'requirementsStatus': builtGate['requirementsStatus'] ?? 'incomplete',
-            'requirementsDeclineReason':
-                builtGate['requirementsDeclineReason'] ?? '',
-            'message': (builtGate['message'] as String? ?? '').trim().isNotEmpty
-                ? builtGate['message'] as String
-                : 'Upload the required documents before registering.',
-          };
-        }
-      }
-
-      return hostedAvailability;
-    }
+    // Local/Supabase only — hosted mobile_event_registration_info.php regularly
+    // times out on device and was blocking Event Details for seconds on every open.
+    final documentGate = await _fetchStudentDocumentAccessGate(
+      eventId,
+      studentId,
+    );
 
     final event = preloadedEvent != null
         ? Map<String, dynamic>.from(preloadedEvent)
@@ -3824,7 +3922,20 @@ class EventService {
   }
 
   // Get events the user registered for (tickets)
-  Future<List<Map<String, dynamic>>> getMyTickets(String userId) async {
+  Future<List<Map<String, dynamic>>> getMyTickets(
+    String userId, {
+    bool forceFresh = false,
+  }) async {
+    final cacheKey = 'tickets:$userId';
+    return _appCache.fetchOnce(
+      cacheKey,
+      () => _fetchMyTickets(userId),
+      ttl: _ticketsTtl,
+      forceFresh: forceFresh,
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchMyTickets(String userId) async {
     try {
       final response = await _supabase
           .from('event_registrations')
@@ -4265,7 +4376,27 @@ class EventService {
   }
 
   Future<List<Map<String, dynamic>>> getTeacherAccessibleEvents(
+    String teacherId, {
+    bool forceFresh = false,
+  }) async {
+    final cacheKey = 'teacher_accessible:$teacherId';
+    if (!forceFresh) {
+      final cached = _readListCache(cacheKey, _teacherEventsTtl);
+      if (cached != null) {
+        return cached;
+      }
+    }
+
+    return _appCache.fetchOnce(
+      'fetch:$cacheKey',
+      () => _loadTeacherAccessibleEvents(teacherId, cacheKey),
+      forceFresh: forceFresh,
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _loadTeacherAccessibleEvents(
     String teacherId,
+    String cacheKey,
   ) async {
     final merged = <String, Map<String, dynamic>>{};
 
@@ -4274,7 +4405,7 @@ class EventService {
     try {
       final created = await _supabase
           .from('events')
-          .select()
+          .select(_eventListColumns)
           .eq('created_by', teacherId);
       for (final event in List<Map<String, dynamic>>.from(created)) {
         final eventId = event['id']?.toString() ?? '';
@@ -4301,7 +4432,10 @@ class EventService {
 
       if (assignedIds.isNotEmpty) {
         final assignedEvents = List<Map<String, dynamic>>.from(
-          await _supabase.from('events').select().inFilter('id', assignedIds),
+          await _supabase
+              .from('events')
+              .select(_eventListColumns)
+              .inFilter('id', assignedIds),
         );
         for (final event in assignedEvents) {
           final eventId = event['id']?.toString() ?? '';
@@ -4321,6 +4455,7 @@ class EventService {
       final dateB = _toUtcDate(b['start_at']) ?? DateTime(2000).toUtc();
       return dateB.compareTo(dateA); // Descending (latest first)
     });
+    _writeListCache(cacheKey, list);
     return list;
   }
 
@@ -7449,16 +7584,26 @@ class EventService {
   Future<List<Map<String, dynamic>>> getExpiredEventsOpenForEvaluation({
     required String studentId,
     String? yearLevel,
+    bool forceFresh = false,
   }) async {
+    final cacheKey = 'expired_eval:$studentId:${yearLevel ?? ''}';
+    if (!forceFresh) {
+      final cached = _readListCache(cacheKey, _expiredEvalTtl);
+      if (cached != null) {
+        return cached;
+      }
+    }
+
     final nowUtc = DateTime.now().toUtc();
     List<Map<String, dynamic>> publishedEvents = [];
 
     try {
       final response = await _supabase
           .from('events')
-          .select()
+          .select(_eventListColumns)
           .inFilter('status', ['published', 'expired', 'finished', 'archived'])
-          .order('end_at', ascending: false);
+          .order('end_at', ascending: false)
+          .limit(40);
       // Evaluation visibility should follow registration + attendance eligibility,
       // not the list-level year filter, because students may already be registered
       // for older events whose targeting format changed over time.
@@ -7518,6 +7663,7 @@ class EventService {
       return bEnd.compareTo(aEnd);
     });
 
+    _writeListCache(cacheKey, visible);
     return visible;
   }
 
@@ -8090,4 +8236,11 @@ class _CachedStudentRequirements {
     required this.items,
     required this.cachedAt,
   });
+}
+
+class _ListCacheEntry {
+  final List<Map<String, dynamic>> data;
+  final DateTime cachedAt;
+
+  const _ListCacheEntry(this.data, this.cachedAt);
 }

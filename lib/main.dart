@@ -7,11 +7,11 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'config/env.dart';
-import 'screens/auth/email_verification_screen.dart';
 import 'screens/student/student_home.dart';
 import 'screens/teacher/teacher_home.dart';
 import 'screens/welcome_screen.dart';
 import 'services/auth_service.dart';
+import 'services/live_ui_sync.dart';
 import 'services/offline_backup_service.dart';
 import 'services/offline_sync_service.dart';
 import 'services/push_notification_service.dart';
@@ -45,25 +45,32 @@ void main() async {
   }
 
   final authService = AuthService();
-  final isLoggedIn = await authService.isLoggedIn();
+  var isLoggedIn = await authService.isLoggedIn();
   String role = 'student';
   String studentCourse = 'IT';
-  Map<String, dynamic>? initialUserData;
-  bool needsEmailVerification = false;
 
   if (isLoggedIn) {
     final serverUser = await authService.refreshCurrentUserFromServer();
     final userData = serverUser ?? await authService.getCurrentUser();
-    initialUserData = userData;
     role = userData?['role']?.toString().toLowerCase() ?? 'student';
     studentCourse = CourseThemeUtils.normalizeCourse(userData?['course']) == 'CS'
         ? 'CS'
         : 'IT';
-    needsEmailVerification = AuthService.requiresDailyEmailVerification(userData);
 
-    if (firebaseReady) {
+    // Daily OTP reset (12:00 AM Asia/Manila): force logout so the user
+    // must re-login from page 1 before verifying again.
+    if (AuthService.requiresDailyEmailVerification(userData)) {
+      await authService.logout();
+      isLoggedIn = false;
+      role = 'student';
+      studentCourse = 'IT';
+    } else if (firebaseReady) {
       await PushNotificationService().updateToken();
     }
+  } else if (firebaseReady) {
+    // Clear orphan device tokens left after OTP/logout so Welcome/Login
+    // screens never receive account pushes.
+    await PushNotificationService().unregisterCurrentToken();
   }
 
   runApp(
@@ -71,8 +78,6 @@ void main() async {
       isLoggedIn: isLoggedIn,
       userRole: role,
       studentCourse: studentCourse,
-      emailVerified: !needsEmailVerification,
-      initialUser: initialUserData,
     ),
   );
 }
@@ -81,8 +86,6 @@ class PulseConnectApp extends StatefulWidget {
   final bool isLoggedIn;
   final String userRole;
   final String studentCourse;
-  final bool emailVerified;
-  final Map<String, dynamic>? initialUser;
 
   static final GlobalKey<NavigatorState> navigatorKey =
       GlobalKey<NavigatorState>();
@@ -94,8 +97,6 @@ class PulseConnectApp extends StatefulWidget {
     required this.isLoggedIn,
     required this.userRole,
     required this.studentCourse,
-    this.emailVerified = false,
-    this.initialUser,
   });
 
   static PulseConnectAppState of(BuildContext context) =>
@@ -115,6 +116,8 @@ class PulseConnectAppState extends State<PulseConnectApp>
   final Connectivity _connectivity = Connectivity();
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
   Timer? _offlineWarmupTimer;
+  Timer? _dailyVerificationTimer;
+  bool _isEnforcingDailyVerification = false;
   bool? _isOffline;
   bool? _lastShownConnectivityState;
 
@@ -126,6 +129,56 @@ class PulseConnectAppState extends State<PulseConnectApp>
     _currentStudentCourse = widget.studentCourse;
     _startConnectivityMonitoring();
     _startOfflineWarmupTicker();
+    _scheduleDailyVerificationCheck();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_enforceDailyVerificationLogout());
+    });
+  }
+
+  /// Manila calendar-day boundary (UTC+8).
+  Duration _durationUntilNextManilaMidnight() {
+    const tzOffset = Duration(hours: 8);
+    final nowLocal = DateTime.now().toUtc().add(tzOffset);
+    final nextMidnight = DateTime(
+      nowLocal.year,
+      nowLocal.month,
+      nowLocal.day,
+    ).add(const Duration(days: 1));
+    final wait = nextMidnight.difference(nowLocal);
+    if (wait <= Duration.zero) {
+      return const Duration(seconds: 1);
+    }
+    return wait;
+  }
+
+  void _scheduleDailyVerificationCheck() {
+    _dailyVerificationTimer?.cancel();
+    _dailyVerificationTimer = Timer(_durationUntilNextManilaMidnight(), () {
+      unawaited(_enforceDailyVerificationLogout());
+      _scheduleDailyVerificationCheck();
+    });
+  }
+
+  Future<void> _enforceDailyVerificationLogout() async {
+    if (_isEnforcingDailyVerification) return;
+    _isEnforcingDailyVerification = true;
+    try {
+      final loggedIn = await _authService.isLoggedIn();
+      if (!loggedIn) return;
+
+      final user = await _authService.getCurrentUser();
+      if (!AuthService.requiresDailyEmailVerification(user)) return;
+
+      await _authService.logout();
+      final nav = PulseConnectApp.navigatorKey.currentState;
+      if (nav == null) return;
+      nav.pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const WelcomeScreen()),
+        (_) => false,
+      );
+    } finally {
+      _isEnforcingDailyVerification = false;
+    }
   }
 
   bool _resultsAreOffline(List<ConnectivityResult> results) {
@@ -228,6 +281,15 @@ class PulseConnectAppState extends State<PulseConnectApp>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(_reconcileConnectivityState());
+      unawaited(_enforceDailyVerificationLogout());
+      _scheduleDailyVerificationCheck();
+      // Catch up lists/bell if a push arrived while backgrounded (FCM
+      // notification payloads do not run Dart onMessage in background).
+      unawaited(() async {
+        if (await _authService.isLoggedIn()) {
+          await LiveUiSync.syncNow('resume');
+        }
+      }());
       if (_isOffline == false || _isOffline == null) {
         unawaited(_primeOfflineReadiness(syncQueue: true));
       }
@@ -246,6 +308,7 @@ class PulseConnectAppState extends State<PulseConnectApp>
     WidgetsBinding.instance.removeObserver(this);
     _connectivitySubscription?.cancel();
     _offlineWarmupTimer?.cancel();
+    _dailyVerificationTimer?.cancel();
     super.dispose();
   }
 
@@ -286,11 +349,9 @@ class PulseConnectAppState extends State<PulseConnectApp>
       debugShowCheckedModeBanner: false,
       theme: _getTheme(_currentRole, _currentStudentCourse),
       home: widget.isLoggedIn
-          ? (!widget.emailVerified && widget.initialUser != null
-                ? EmailVerificationScreen(user: widget.initialUser!)
-                : (_currentRole.toLowerCase() == 'teacher'
-                      ? const TeacherHome()
-                      : const StudentHome()))
+          ? (_currentRole.toLowerCase() == 'teacher'
+                ? const TeacherHome()
+                : const StudentHome())
           : const WelcomeScreen(),
     );
   }
