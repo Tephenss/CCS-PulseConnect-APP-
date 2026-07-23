@@ -1582,12 +1582,13 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     if (val.toLowerCase() == 'none') return 'No Target';
     final rawUpper = val.trim().toUpperCase();
     final multi = RegExp(
-      r'^COURSE\s*=\s*(ALL|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
+      r'^COURSE\s*=\s*(ALL|BSIT-SD|BSIT-BA|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
     ).firstMatch(rawUpper);
     if (multi != null) {
-      final course = multi.group(1) == 'ALL'
+      final courseRaw = multi.group(1) ?? 'ALL';
+      final course = courseRaw == 'ALL'
           ? 'All Courses'
-          : (multi.group(1) ?? 'All Courses');
+          : (courseRaw == 'BSIT' ? 'BSIT (All)' : courseRaw);
       final yearsRaw = (multi.group(2) ?? '')
           .split(',')
           .map((e) => e.trim().toUpperCase())
@@ -1603,6 +1604,10 @@ class _TeacherEventManageState extends State<TeacherEventManage>
           ? 'All Levels'
           : yearsRaw.map((y) => yearLabel[y] ?? y).join(', ');
       return '$course - $years';
+    }
+    if (rawUpper == 'BSIT') return 'BSIT (All)';
+    if (rawUpper == 'BSIT-SD' || rawUpper == 'BSIT-BA' || rawUpper == 'BSCS') {
+      return rawUpper;
     }
     final map = {
       '1': '1st Year',

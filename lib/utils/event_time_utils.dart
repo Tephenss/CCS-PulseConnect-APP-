@@ -94,6 +94,21 @@ bool isTeacherActiveEvent(
   return !isPast;
 }
 
+/// Home/calendar visibility: published or approved (ready to publish), not ended.
+bool isCalendarVisibleEvent(
+  Map<String, dynamic> event, {
+  DateTime? now,
+}) {
+  final status =
+      (event['status']?.toString() ?? 'pending').toLowerCase().trim();
+  if (status != 'published' && status != 'approved') return false;
+
+  final reference = now ?? DateTime.now().toUtc().add(kManilaOffset);
+  final endDate = parseStoredEventDateTime(event['end_at']);
+  final isPast = endDate != null && endDate.isBefore(reference);
+  return !isPast;
+}
+
 int? normalizeRegistrationCloseWeeks(dynamic value) {
   if (value == null) return null;
   final raw = value.toString().trim();
@@ -103,19 +118,23 @@ int? normalizeRegistrationCloseWeeks(dynamic value) {
   return parsed;
 }
 
+int normalizeRegistrationCloseExtendDays(dynamic value) {
+  if (value == null) return 0;
+  final raw = value.toString().trim();
+  if (raw.isEmpty) return 0;
+  final parsed = int.tryParse(raw);
+  if (parsed == null || parsed < 0 || parsed > 3) return 0;
+  return parsed;
+}
+
 bool isEventRegistrationWindowClosed(
   Map<String, dynamic> event, {
   DateTime? now,
 }) {
-  final weeks = normalizeRegistrationCloseWeeks(event['registration_close_weeks']);
-  if (weeks == null) return false;
-
-  final start = parseStoredEventDateTime(event['start_at']);
-  if (start == null) return false;
+  final lastDay = registrationLastDay(event);
+  if (lastDay == null) return false;
 
   final reference = now ?? DateTime.now().toUtc().add(kManilaOffset);
-  final startDate = DateTime(start.year, start.month, start.day);
-  final lastDay = startDate.subtract(Duration(days: weeks * 7));
   final today = DateTime(reference.year, reference.month, reference.day);
   return today.isAfter(lastDay);
 }
@@ -128,7 +147,12 @@ DateTime? registrationLastDay(Map<String, dynamic> event) {
   if (start == null) return null;
 
   final startDate = DateTime(start.year, start.month, start.day);
-  return startDate.subtract(Duration(days: weeks * 7));
+  final baseLastDay = startDate.subtract(Duration(days: weeks * 7));
+  final extendDays = normalizeRegistrationCloseExtendDays(
+    event['registration_close_extend_days'],
+  );
+  if (extendDays <= 0) return baseLastDay;
+  return baseLastDay.add(Duration(days: extendDays));
 }
 
 String formatRegistrationDeadlineLabel(
@@ -151,14 +175,20 @@ String? registrationDeadlineSubtitle(Map<String, dynamic> event) {
   if (weeks == null) return null;
 
   final weeksLabel = '$weeks week${weeks == 1 ? '' : 's'} before event starts';
+  final extendDays = normalizeRegistrationCloseExtendDays(
+    event['registration_close_extend_days'],
+  );
+  final extendLabel = extendDays > 0
+      ? ' · +$extendDays day${extendDays == 1 ? '' : 's'} extension'
+      : '';
   final limitRaw = event['registration_limit']?.toString().trim() ?? '';
   final hasLimit = limitRaw.isNotEmpty && int.tryParse(limitRaw) != null;
 
   if (hasLimit) {
-    return '$weeksLabel · May close earlier when slots are full';
+    return '$weeksLabel$extendLabel · May close earlier when slots are full';
   }
 
-  return weeksLabel;
+  return '$weeksLabel$extendLabel';
 }
 
 bool hasRegistrationDeadline(Map<String, dynamic> event) {

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:bcrypt/bcrypt.dart';
 import 'package:crypto/crypto.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -10,6 +11,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'offline_backup_service.dart';
 import 'offline_scan_store.dart';
 import 'offline_sync_service.dart';
+import 'mobile_backend_service.dart';
 
 class AuthService {
   final _supabase = Supabase.instance.client;
@@ -47,6 +49,196 @@ class AuthService {
       verifiedLocal.day,
     );
     return nowDay.isAfter(verifiedDay);
+  }
+
+  static const String _cachedPublicIpKey = 'trusted_public_ip_cache';
+  static const String _cachedPublicIpAtKey = 'trusted_public_ip_cached_at';
+
+  /// Public IP trust key shared across browsers/apps on the same network.
+  Future<String?> resolvePublicIpTrustKey({bool forceRefresh = false}) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!forceRefresh) {
+      final cached = (prefs.getString(_cachedPublicIpKey) ?? '').trim();
+      final cachedAtMs = prefs.getInt(_cachedPublicIpAtKey) ?? 0;
+      final age = DateTime.now().millisecondsSinceEpoch - cachedAtMs;
+      // Cache briefly — carrier/Wi‑Fi IP can change when switching networks.
+      if (cached.isNotEmpty && age >= 0 && age < 5 * 60 * 1000) {
+        return cached.startsWith('ip:') ? cached : 'ip:$cached';
+      }
+    }
+
+    String? ip;
+
+    // Prefer our hosted backend so web + app see the same edge IP.
+    if (MobileBackendService.isConfigured) {
+      try {
+        final res = await MobileBackendService.post(
+          '/api/mobile_client_ip.php',
+          const {},
+          timeout: const Duration(seconds: 8),
+        );
+        if (res['ok'] == true) {
+          final key = (res['device_key']?.toString() ?? '').trim();
+          if (key.startsWith('ip:')) {
+            await prefs.setString(_cachedPublicIpKey, key);
+            await prefs.setInt(
+              _cachedPublicIpAtKey,
+              DateTime.now().millisecondsSinceEpoch,
+            );
+            return key;
+          }
+          ip = (res['ip']?.toString() ?? '').trim();
+        }
+      } catch (e) {
+        debugPrint('AuthService.resolvePublicIpTrustKey backend: $e');
+      }
+    }
+
+    // Fallback: public IP lookup.
+    if (ip == null || ip.isEmpty) {
+      try {
+        final response = await http
+            .get(Uri.parse('https://api.ipify.org?format=json'))
+            .timeout(const Duration(seconds: 8));
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          final decoded = jsonDecode(response.body);
+          if (decoded is Map) {
+            ip = (decoded['ip']?.toString() ?? '').trim();
+          }
+        }
+      } catch (e) {
+        debugPrint('AuthService.resolvePublicIpTrustKey ipify: $e');
+      }
+    }
+
+    if (ip == null || ip.isEmpty) return null;
+    final key = 'ip:${ip.toLowerCase()}';
+    await prefs.setString(_cachedPublicIpKey, key);
+    await prefs.setInt(
+      _cachedPublicIpAtKey,
+      DateTime.now().millisecondsSinceEpoch,
+    );
+    return key;
+  }
+
+  /// @deprecated Prefer [resolvePublicIpTrustKey]. Kept for older call sites.
+  Future<String> getOrCreateDeviceInstallId() async {
+    final key = await resolvePublicIpTrustKey();
+    return key ?? 'ip:unknown';
+  }
+
+  /// True while [login] (or similar) is writing session state.
+  /// Mid-session OTP enforcement must not logout during this window.
+  static int _authFlowDepth = 0;
+  static bool get isAuthFlowBusy => _authFlowDepth > 0;
+
+  static Future<T> runAuthFlow<T>(Future<T> Function() action) async {
+    _authFlowDepth++;
+    try {
+      return await action();
+    } finally {
+      _authFlowDepth = (_authFlowDepth - 1).clamp(0, 1 << 30);
+    }
+  }
+
+  /// `true` trusted, `false` not trusted, `null` could not determine (IP/network).
+  Future<bool?> checkDeviceTrust(String userId) async {
+    final id = userId.trim();
+    if (id.isEmpty) return false;
+    try {
+      final deviceKey = await resolvePublicIpTrustKey();
+      if (deviceKey == null || deviceKey.isEmpty) {
+        return null;
+      }
+      final row = await _supabase
+          .from('trusted_devices')
+          .select('id')
+          .eq('user_id', id)
+          .eq('device_key', deviceKey)
+          .maybeSingle();
+      return row != null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Strict trust check for login OTP gates. Unknown IP ⇒ not trusted.
+  Future<bool> isTrustedDevice(String userId) async {
+    return (await checkDeviceTrust(userId)) == true;
+  }
+
+  /// OTP is required when the Manila day rolled over OR this public IP is new.
+  ///
+  /// [unknownTrustRequiresVerification]: when IP/trust cannot be resolved,
+  /// `true` forces OTP (login/bootstrap fail-closed), `false` keeps the
+  /// current session (mid-session enforce fail-open on transient network).
+  Future<bool> requiresEmailVerification(
+    Map<String, dynamic>? user, {
+    bool unknownTrustRequiresVerification = true,
+  }) async {
+    if (requiresDailyEmailVerification(user)) return true;
+    final userId = user?['id']?.toString().trim() ?? '';
+    if (userId.isEmpty) return true;
+    final trusted = await checkDeviceTrust(userId);
+    if (trusted == null) return unknownTrustRequiresVerification;
+    return !trusted;
+  }
+
+  /// Why OTP is required: `unverified` | `daily` | `new_ip` | null (not required).
+  Future<String?> emailVerificationGateReason(Map<String, dynamic>? user) async {
+    if (user == null) return 'unverified';
+    final isVerified = user['email_verified'] == true;
+    final verifiedAtRaw = user['email_verified_at']?.toString() ?? '';
+    if (!isVerified || verifiedAtRaw.isEmpty) return 'unverified';
+
+    if (requiresDailyEmailVerification(user)) return 'daily';
+
+    final userId = user['id']?.toString().trim() ?? '';
+    if (userId.isEmpty) return 'unverified';
+    final trusted = await checkDeviceTrust(userId);
+    // Unknown IP at login still requires OTP (fail closed).
+    if (trusted != true) return 'new_ip';
+    return null;
+  }
+
+  static String emailVerificationReasonMessage(String? reason) {
+    switch ((reason ?? '').trim().toLowerCase()) {
+      case 'daily':
+        return 'Daily security check — verification resets every day at 12:00 AM (Manila).';
+      case 'new_ip':
+      case 'new_device':
+        return 'New network/IP detected — verify once to trust this connection.';
+      case 'unverified':
+        return 'Verify your email to continue.';
+      default:
+        return 'Enter the 6-digit code sent to your email.';
+    }
+  }
+
+  Future<void> trustCurrentDevice(String userId, {String? label}) async {
+    final id = userId.trim();
+    if (id.isEmpty) return;
+    final deviceKey = await resolvePublicIpTrustKey(forceRefresh: true);
+    if (deviceKey == null || deviceKey.isEmpty) return;
+    final now = DateTime.now().toUtc().toIso8601String();
+    final platform = Platform.isAndroid
+        ? 'android'
+        : (Platform.isIOS ? 'ios' : Platform.operatingSystem);
+    try {
+      await _supabase.from('trusted_devices').upsert({
+        'user_id': id,
+        'device_key': deviceKey,
+        'platform': platform,
+        'label': (label ?? deviceKey).trim().isEmpty
+            ? deviceKey
+            : (label ?? deviceKey).trim(),
+        'last_seen_at': now,
+        'trusted_at': now,
+      }, onConflict: 'user_id,device_key');
+    } catch (e) {
+      // Non-fatal: OTP still succeeded; trust can be retried next login.
+      debugPrint('AuthService.trustCurrentDevice failed: $e');
+    }
   }
 
   /// Fresh signups can stay blocked while `pending` + verified + app pipeline.
@@ -197,6 +389,14 @@ class AuthService {
 
   // Login with email and password, checking the expected role
   Future<Map<String, dynamic>> login(
+    String email,
+    String password,
+    String expectedRole,
+  ) async {
+    return runAuthFlow(() => _loginImpl(email, password, expectedRole));
+  }
+
+  Future<Map<String, dynamic>> _loginImpl(
     String email,
     String password,
     String expectedRole,

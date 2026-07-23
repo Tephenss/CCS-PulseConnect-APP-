@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -8,6 +9,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/event_service.dart';
 import '../../services/event_live_service.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/animated_ticket_card.dart';
+import '../../widgets/circuit_ticket_icon.dart';
 import 'student_ticket_view.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/course_theme_utils.dart';
@@ -21,22 +24,35 @@ class StudentTickets extends StatefulWidget {
 
 class _StudentTicketsState extends State<StudentTickets> {
   final _eventService = EventService();
+  final Connectivity _connectivity = Connectivity();
   static const String _downloadedTicketKeyPrefix = 'downloaded_tickets_';
   List<Map<String, dynamic>> _tickets = [];
   bool _isLoading = true;
   StreamSubscription<String>? _eventLiveSubscription;
   Timer? _fallbackRefreshTimer;
 
+  Future<bool> _isOfflineNow() async {
+    try {
+      final connectivity = await _connectivity.checkConnectivity();
+      return connectivity.isEmpty ||
+          connectivity.every((result) => result == ConnectivityResult.none);
+    } catch (_) {
+      return true;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
       if (!mounted) return;
-      if (reason == 'tickets' ||
+      final offlinePulse = reason.startsWith('offline:');
+      if (offlinePulse ||
+          reason == 'tickets' ||
           reason == 'registrations' ||
           reason == 'events' ||
           reason == 'sessions') {
-        unawaited(_loadTickets(forceFresh: true));
+        unawaited(_loadTickets(forceFresh: !offlinePulse));
       }
     });
     _fallbackRefreshTimer = Timer.periodic(
@@ -61,9 +77,22 @@ class _StudentTicketsState extends State<StudentTickets> {
 
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id') ?? '';
-    final allTickets = userId.isEmpty
-        ? <Map<String, dynamic>>[]
-        : await _eventService.getMyTickets(userId, forceFresh: forceFresh);
+    final offline = await _isOfflineNow();
+    final effectiveForceFresh = forceFresh && !offline;
+
+    List<Map<String, dynamic>> allTickets = <Map<String, dynamic>>[];
+    var fetchFailed = false;
+    try {
+      allTickets = userId.isEmpty
+          ? <Map<String, dynamic>>[]
+          : await _eventService.getMyTickets(
+              userId,
+              forceFresh: effectiveForceFresh,
+            );
+    } catch (_) {
+      fetchFailed = true;
+      allTickets = <Map<String, dynamic>>[];
+    }
 
     // Keep online list behavior: show active events only.
     // Also require an actual ticket id from Supabase; registration rows without
@@ -72,7 +101,7 @@ class _StudentTicketsState extends State<StudentTickets> {
         .where((t) => _isTicketActive(t) && _hasTicketId(t))
         .map((ticket) {
           final normalized = Map<String, dynamic>.from(ticket);
-          normalized['local_cached'] = false;
+          normalized['local_cached'] = offline || fetchFailed;
           return normalized;
         })
         .toList();
@@ -80,6 +109,14 @@ class _StudentTicketsState extends State<StudentTickets> {
     // Downloaded tickets are kept in app storage and shown even offline.
     final offlineTickets = _readOfflineTickets(prefs, userId);
     final mergedTickets = _mergeTickets(activeOnlineTickets, offlineTickets);
+
+    // Never blank the screen on a sudden disconnect / failed / empty refresh.
+    if (mergedTickets.isEmpty && hadCachedTickets) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+      return;
+    }
 
     if (mounted) {
       setState(() {
@@ -219,15 +256,73 @@ class _StudentTicketsState extends State<StudentTickets> {
     );
     return Scaffold(
       backgroundColor: const Color(0xFFF9FAFB),
-      appBar: AppBar(
-        automaticallyImplyLeading: false,
-        backgroundColor: chromeColor,
-        title: const Text(
-          'My Tickets',
-          style: TextStyle(
-            fontWeight: FontWeight.w800,
-            fontSize: 20,
-            color: Colors.white,
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(100.0),
+        child: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: CourseThemeUtils.studentTicketGradientFromPrimary(
+                Theme.of(context).colorScheme.primary,
+              ),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: chromeColor.withValues(alpha: 0.3),
+                blurRadius: 15,
+                offset: const Offset(0, 8),
+              ),
+            ],
+            borderRadius: const BorderRadius.only(
+              bottomLeft: Radius.circular(32),
+              bottomRight: Radius.circular(32),
+            ),
+          ),
+          child: SafeArea(
+            bottom: false,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 24.0,
+                vertical: 16.0,
+              ),
+              child: Row(
+                children: [
+                  CircuitTicketIcon(
+                    child: const Icon(
+                      Icons.local_activity_rounded,
+                      color: Colors.white,
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'My Tickets',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 26,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Your digital event passes',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.8),
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -308,311 +403,204 @@ class _StudentTicketsState extends State<StudentTickets> {
     );
     final Color accentColor = Theme.of(context).colorScheme.secondary;
 
-    return GestureDetector(
-      onTap: () async {
-        await Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => StudentTicketView(ticket: ticket)),
-        );
-        _loadTickets();
-      },
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 20),
-        height: 188,
-        decoration: BoxDecoration(
-          boxShadow: [
-            BoxShadow(
-              color: chromeColor.withValues(alpha: 0.35),
-              blurRadius: 20,
-              offset: const Offset(0, 10),
+    // ── The inner card widget (no tap logic here) ─────────────────────
+    final cardWidget = Container(
+      height: 188,
+      decoration: BoxDecoration(
+        boxShadow: [
+          BoxShadow(
+            color: chromeColor.withValues(alpha: 0.35),
+            blurRadius: 20,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: ClipPath(
+        clipper: TicketClipper(),
+        child: Stack(
+          children: [
+            // Shiny Glossy Background
+            Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: ticketGradient,
+                  stops: const [0.0, 0.4, 0.6, 1.0],
+                ),
+              ),
             ),
-          ],
-        ),
-        child: ClipPath(
-          clipper: TicketClipper(),
-          child: Stack(
-            children: [
-              // Shiny Glossy Background
-              Container(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: ticketGradient,
-                    stops: const [0.0, 0.4, 0.6, 1.0],
-                  ),
-                ),
-              ),
 
-              // Diagonal Shine Overlay
-              Positioned.fill(
-                child: Opacity(
-                  opacity: 0.1,
-                  child: Container(
-                    decoration: const BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment(-1.0, -1.0),
-                        end: Alignment(1.0, 1.0),
-                        colors: [
-                          Colors.transparent,
-                          Colors.white,
-                          Colors.transparent,
-                        ],
-                        stops: [0.45, 0.5, 0.55],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-
-              // Content Row
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 0),
-                child: Row(
-                  children: [
-                    // Left Side: Event Info
-                    Expanded(
-                      flex: 65,
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 16, 12, 16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              title,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w900,
-                                fontSize: 20,
-                                letterSpacing: -0.5,
-                                shadows: [
-                                  Shadow(
-                                    color: Colors.black26,
-                                    offset: Offset(0, 2),
-                                    blurRadius: 4,
-                                  ),
-                                ],
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            const SizedBox(height: 4),
-                            Row(
-                              children: [
-                                Flexible(
-                                  child: Text(
-                                    eventType.toUpperCase(),
-                                    style: TextStyle(
-                                      color: accentColor,
-                                      fontWeight: FontWeight.w900,
-                                      fontSize: 12,
-                                      letterSpacing: 1.2,
-                                      shadows: [
-                                        Shadow(
-                                          color: accentColor.withValues(
-                                            alpha: 0.3,
-                                          ),
-                                          offset: const Offset(0, 1),
-                                          blurRadius: 2,
-                                        ),
-                                      ],
-                                    ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
+            // Content Row
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 0),
+              child: Row(
+                children: [
+                  // Left Side: Event Info
+                  Expanded(
+                    flex: 65,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 16, 12, 16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w900,
+                              fontSize: 20,
+                              letterSpacing: -0.5,
+                              shadows: [
+                                Shadow(
+                                  color: Colors.black26,
+                                  offset: Offset(0, 2),
+                                  blurRadius: 4,
                                 ),
-                                if (isLocalCached) ...[
-                                  const SizedBox(width: 8),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 7,
-                                      vertical: 3,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: Colors.white.withValues(
-                                        alpha: 0.18,
-                                      ),
-                                      borderRadius: BorderRadius.circular(999),
-                                      border: Border.all(
-                                        color: Colors.white.withValues(
-                                          alpha: 0.22,
-                                        ),
-                                      ),
-                                    ),
-                                    child: const Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        Icon(
-                                          Icons.download_done_rounded,
-                                          size: 11,
-                                          color: Colors.white,
-                                        ),
-                                        SizedBox(width: 3),
-                                        Text(
-                                          'Offline',
-                                          style: TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 9,
-                                            fontWeight: FontWeight.w800,
-                                            letterSpacing: 0.3,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ],
                               ],
                             ),
-                            const Spacer(),
-                            // Date/Time
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 8,
-                              ),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.15),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: Colors.white.withValues(alpha: 0.1),
-                                ),
-                              ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(
-                                    Icons.calendar_today_rounded,
-                                    size: 16,
-                                    color: Colors.white,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        startDate != null
-                                            ? DateFormat(
-                                                'MMM dd, yyyy',
-                                              ).format(startDate)
-                                            : 'TBA',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w800,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 4),
+                          Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  eventType.toUpperCase(),
+                                  style: TextStyle(
+                                    color: accentColor,
+                                    fontWeight: FontWeight.w900,
+                                    fontSize: 12,
+                                    letterSpacing: 1.2,
+                                    shadows: [
+                                      Shadow(
+                                        color: accentColor.withValues(
+                                          alpha: 0.3,
                                         ),
+                                        offset: const Offset(0, 1),
+                                        blurRadius: 2,
                                       ),
-                                      if (startDate != null && endDate != null)
-                                        Text(
-                                          '${DateFormat('hh:mm a').format(startDate)} - ${DateFormat('hh:mm a').format(endDate)}',
-                                          style: TextStyle(
-                                            color: Colors.white.withValues(
-                                              alpha: 0.8,
-                                            ),
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.w600,
-                                          ),
-                                        ),
                                     ],
                                   ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            // Location
-                            Row(
-                              children: [
-                                Icon(
-                                  Icons.location_on_rounded,
-                                  size: 16,
-                                  color: accentColor,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
                                 ),
-                                const SizedBox(width: 6),
-                                Expanded(
-                                  child: Text(
-                                    location,
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
+                              ),
+                              if (isLocalCached) ...[
+                                const SizedBox(width: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 7,
+                                    vertical: 3,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withValues(
+                                      alpha: 0.18,
                                     ),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
+                                    borderRadius: BorderRadius.circular(999),
+                                    border: Border.all(
+                                      color: Colors.white.withValues(
+                                        alpha: 0.22,
+                                      ),
+                                    ),
+                                  ),
+                                  child: const Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(
+                                        Icons.download_done_rounded,
+                                        size: 11,
+                                        color: Colors.white,
+                                      ),
+                                      SizedBox(width: 3),
+                                      Text(
+                                        'Offline',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 9,
+                                          fontWeight: FontWeight.w800,
+                                          letterSpacing: 0.3,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ],
+                            ],
+                          ),
+                          const Spacer(),
+                          // Date/Time
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 8,
                             ),
-                          ],
-                        ),
-                      ),
-                    ),
-
-                    // Vertical Divider
-                    _buildDashedDivider(),
-
-                    // Right Side: QR Code
-                    Expanded(
-                      flex: 35,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          vertical: 12,
-                          horizontal: 8,
-                        ),
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.all(6),
-                                decoration: BoxDecoration(
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: Colors.white.withValues(alpha: 0.1),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.calendar_today_rounded,
+                                  size: 16,
                                   color: Colors.white,
-                                  borderRadius: BorderRadius.circular(12),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withValues(
-                                        alpha: 0.1,
+                                ),
+                                const SizedBox(width: 8),
+                                Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      startDate != null
+                                          ? DateFormat(
+                                              'MMM dd, yyyy',
+                                            ).format(startDate)
+                                          : 'TBA',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w800,
                                       ),
-                                      blurRadius: 8,
-                                      offset: const Offset(0, 4),
                                     ),
+                                    if (startDate != null && endDate != null)
+                                      Text(
+                                        '${DateFormat('hh:mm a').format(startDate)} - ${DateFormat('hh:mm a').format(endDate)}',
+                                        style: TextStyle(
+                                          color: Colors.white.withValues(
+                                            alpha: 0.8,
+                                          ),
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
                                   ],
                                 ),
-                                child: QrImageView(
-                                  data: 'PULSE-$ticketId',
-                                  version: QrVersions.auto,
-                                  size: 75,
-                                  eyeStyle: QrEyeStyle(
-                                    eyeShape: QrEyeShape.square,
-                                    color: chromeColor,
-                                  ),
-                                  dataModuleStyle: QrDataModuleStyle(
-                                    dataModuleShape: QrDataModuleShape.square,
-                                    color: chromeColor,
-                                  ),
-                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          // Location
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.location_on_rounded,
+                                size: 16,
+                                color: accentColor,
                               ),
-                              const SizedBox(height: 10),
-                              Text(
-                                'TICKET ID',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: Colors.white.withValues(alpha: 0.7),
-                                  fontWeight: FontWeight.w800,
-                                  letterSpacing: 0.5,
-                                ),
-                              ),
-                              const SizedBox(height: 2),
-                              SizedBox(
-                                width: 100,
+                              const SizedBox(width: 6),
+                              Expanded(
                                 child: Text(
-                                  ticketIdDisplay,
-                                  textAlign: TextAlign.center,
+                                  location,
                                   style: const TextStyle(
                                     color: Colors.white,
                                     fontSize: 12,
-                                    fontWeight: FontWeight.w900,
-                                    letterSpacing: 0.5,
+                                    fontWeight: FontWeight.w600,
                                   ),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
@@ -620,14 +608,112 @@ class _StudentTicketsState extends State<StudentTickets> {
                               ),
                             ],
                           ),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  // Vertical Divider
+                  _buildDashedDivider(),
+
+                  // Right Side: QR Code
+                  Expanded(
+                    flex: 35,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 12,
+                        horizontal: 8,
+                      ),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(12),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withValues(
+                                      alpha: 0.1,
+                                    ),
+                                    blurRadius: 8,
+                                    offset: const Offset(0, 4),
+                                  ),
+                                ],
+                              ),
+                              child: QrImageView(
+                                data: 'PULSE-$ticketId',
+                                version: QrVersions.auto,
+                                size: 75,
+                                eyeStyle: QrEyeStyle(
+                                  eyeShape: QrEyeShape.square,
+                                  color: chromeColor,
+                                ),
+                                dataModuleStyle: QrDataModuleStyle(
+                                  dataModuleShape: QrDataModuleShape.square,
+                                  color: chromeColor,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Text(
+                              'TICKET ID',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: Colors.white.withValues(alpha: 0.7),
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            SizedBox(
+                              width: 100,
+                              child: Text(
+                                ticketIdDisplay,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 0.5,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    // ── Wrap in the 3-D rocking + shimmer animation ────────────────────
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 20),
+      child: GestureDetector(
+        onTap: () async {
+          await Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => StudentTicketView(ticket: ticket),
+            ),
+          );
+          _loadTickets();
+        },
+        child: AnimatedTicketCard(
+          floatDuration: const Duration(milliseconds: 2400),
+          shimmerDuration: const Duration(seconds: 3),
+          child: cardWidget,
         ),
       ),
     );

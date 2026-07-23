@@ -15,11 +15,14 @@ import '../teacher/teacher_home.dart';
 class EmailVerificationScreen extends StatefulWidget {
   final Map<String, dynamic> user;
   final bool postRegistrationReviewFlow;
+  /// `unverified` | `daily` | `new_ip` — controls helper copy.
+  final String? gateReason;
 
   const EmailVerificationScreen({
     super.key,
     required this.user,
     this.postRegistrationReviewFlow = false,
+    this.gateReason,
   });
 
   @override
@@ -377,6 +380,19 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                                         color: Colors.white,
                                         fontWeight: FontWeight.w600,
                                         fontSize: 14,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 10),
+                                    Text(
+                                      AuthService.emailVerificationReasonMessage(
+                                        widget.gateReason,
+                                      ),
+                                      style: TextStyle(
+                                        color: Colors.white.withValues(
+                                          alpha: 0.7,
+                                        ),
+                                        fontSize: 12,
+                                        height: 1.35,
                                       ),
                                     ),
                                     const SizedBox(height: 18),

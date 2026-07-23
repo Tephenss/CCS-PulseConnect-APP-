@@ -347,11 +347,13 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
     if (raw == 'NONE') return 'No Target';
 
     final multi = RegExp(
-      r'^COURSE\s*=\s*(ALL|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
+      r'^COURSE\s*=\s*(ALL|BSIT-SD|BSIT-BA|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
     ).firstMatch(raw);
     if (multi != null) {
       final courseRaw = multi.group(1) ?? 'ALL';
-      final course = courseRaw == 'ALL' ? 'All Courses' : courseRaw;
+      final course = courseRaw == 'ALL'
+          ? 'All Courses'
+          : (courseRaw == 'BSIT' ? 'BSIT (All)' : courseRaw);
       final yearsRaw = (multi.group(2) ?? '')
           .split(',')
           .map((e) => e.trim().toUpperCase())
@@ -376,8 +378,10 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
       return '$course - ${year}Y';
     }
 
-    if (raw == 'BSIT') return 'IT Students';
-    if (raw == 'BSCS') return 'CS Students';
+    if (raw == 'BSIT') return 'BSIT (All)';
+    if (raw == 'BSIT-SD') return 'BSIT-SD';
+    if (raw == 'BSIT-BA') return 'BSIT-BA';
+    if (raw == 'BSCS') return 'BSCS';
 
     const yearMap = {
       '1': '1st Year',

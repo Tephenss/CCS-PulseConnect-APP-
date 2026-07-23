@@ -40,6 +40,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   final _supabase = Supabase.instance.client;
   Map<String, dynamic>? _user;
   List<Map<String, dynamic>> _upcomingEvents = [];
+  List<Map<String, dynamic>> _calendarEvents = [];
   int _currentIndex = 0;
   bool _isLoading = true;
   bool _usingCachedUpcomingEvents = false;
@@ -94,9 +95,11 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
       forceFresh: reason != 'fallback',
     );
     final events = _teacherActiveUpcomingEvents(accessible);
+    final calendarEvents = _teacherCalendarEvents(accessible);
     if (!mounted) return;
     setState(() {
       _upcomingEvents = events;
+      _calendarEvents = calendarEvents;
       _usingCachedUpcomingEvents = false;
     });
   }
@@ -218,6 +221,21 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     return filtered.sublist(0, limit);
   }
 
+  List<Map<String, dynamic>> _teacherCalendarEvents(
+    List<Map<String, dynamic>> source,
+  ) {
+    final now = DateTime.now().toUtc().add(kManilaOffset);
+    final filtered = source
+        .where((event) => isCalendarVisibleEvent(event, now: now))
+        .toList();
+    filtered.sort((a, b) {
+      final dateA = parseStoredEventDateTime(a['start_at']) ?? DateTime(2100);
+      final dateB = parseStoredEventDateTime(b['start_at']) ?? DateTime(2100);
+      return dateA.compareTo(dateB);
+    });
+    return filtered;
+  }
+
   Future<void> _loadData() async {
     final user = await _authService.getCurrentUser();
     unawaited(_primeOfflineReadiness(user));
@@ -241,17 +259,20 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     final cacheKey = 'teacher_home_upcoming_events_$teacherId';
 
     List<Map<String, dynamic>> events = <Map<String, dynamic>>[];
+    List<Map<String, dynamic>> calendarEvents = <Map<String, dynamic>>[];
     var usingCachedData = false;
     if (teacherId.isNotEmpty) {
       if (isOffline) {
         final cached = await _appCacheService.loadJsonList(cacheKey);
         events = _teacherActiveUpcomingEvents(cached);
+        calendarEvents = _teacherCalendarEvents(cached);
         usingCachedData = true;
       } else {
         final accessible = await _eventService.getTeacherAccessibleEvents(
           teacherId,
         );
         events = _teacherActiveUpcomingEvents(accessible);
+        calendarEvents = _teacherCalendarEvents(accessible);
 
         if (events.isEmpty) {
           final cached = await _appCacheService.loadJsonList(cacheKey);
@@ -263,11 +284,16 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                   const Duration(hours: 24);
           if (cacheStillFresh) {
             events = _teacherActiveUpcomingEvents(cached);
+            calendarEvents = _teacherCalendarEvents(cached);
             usingCachedData = true;
           }
         }
 
-        await _appCacheService.saveJsonList(cacheKey, events);
+        await _appCacheService.saveJsonList(
+          cacheKey,
+          accessible,
+          preserveNonEmptyOnEmpty: true,
+        );
       }
     }
 
@@ -276,6 +302,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
       setState(() {
         _user = user;
         _upcomingEvents = events;
+        _calendarEvents = calendarEvents;
         _usingCachedUpcomingEvents = usingCachedData;
         _unreadCount = unread;
         _isLoading = false;
@@ -944,7 +971,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                       _calendarMonth.year == now.year;
 
                   // Check if any event falls on this day
-                  final eventsOnThisDay = _upcomingEvents.where((e) {
+                  final eventsOnThisDay = _calendarEvents.where((e) {
                     final startAt = e['start_at'] as String?;
                     if (startAt == null) return false;
                     try {
@@ -985,15 +1012,54 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                           ),
                         ),
                         if (hasEvent)
-                          Container(
-                            width: 4,
-                            height: 4,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: isToday
-                                  ? _teacherDark
-                                  : const Color(0xFFD4A843),
-                            ),
+                          Builder(
+                            builder: (_) {
+                              final hasPublished = eventsOnThisDay.any((e) {
+                                final s = (e['status']?.toString() ?? '')
+                                    .toLowerCase()
+                                    .trim();
+                                return s == 'published';
+                              });
+                              final hasUnpublished = eventsOnThisDay.any((e) {
+                                final s = (e['status']?.toString() ?? '')
+                                    .toLowerCase()
+                                    .trim();
+                                return s != 'published';
+                              });
+                              return Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (hasPublished)
+                                    Container(
+                                      width: 4,
+                                      height: 4,
+                                      decoration: const BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: Color(0xFFFACC15),
+                                      ),
+                                    ),
+                                  if (hasPublished && hasUnpublished)
+                                    const SizedBox(width: 2),
+                                  if (hasUnpublished)
+                                    Container(
+                                      width: 4,
+                                      height: 4,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: Colors.white,
+                                        border: isToday
+                                            ? Border.all(
+                                                color: _teacherDark
+                                                    .withValues(alpha: 0.35),
+                                                width: 0.5,
+                                              )
+                                            : null,
+                                      ),
+                                    ),
+                                ],
+                              );
+                            },
                           ),
                       ],
                     ),

@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'app_cache_service.dart';
 import 'event_service.dart';
 import 'notification_service.dart';
 
@@ -13,6 +15,7 @@ class EventLiveService {
 
   final _supabase = Supabase.instance.client;
   final _controller = StreamController<String>.broadcast();
+  final Connectivity _connectivity = Connectivity();
 
   RealtimeChannel? _channel;
   String? _activeUserId;
@@ -21,13 +24,43 @@ class EventLiveService {
 
   Stream<String> get changes => _controller.stream;
 
+  Future<bool> _isOfflineNow() async {
+    try {
+      final results = await _connectivity.checkConnectivity();
+      return results.isEmpty ||
+          results.every((result) => result == ConnectivityResult.none);
+    } catch (_) {
+      // Prefer offline-safe behavior when connectivity status is unknown.
+      return true;
+    }
+  }
+
   void _schedule(
     String reason, {
     Duration delay = const Duration(milliseconds: 120),
   }) {
     _debounceTimer?.cancel();
-    _debounceTimer = Timer(delay, () {
-      EventService.invalidateEventListCache();
+    _debounceTimer = Timer(delay, () async {
+      // While offline, keep warm memory/disk caches and only soft-signal UI
+      // so screens can reload from cache without wiping lists.
+      final offline = await _isOfflineNow();
+      if (offline) {
+        if (!_controller.isClosed) {
+          _controller.add('offline:$reason');
+        }
+        return;
+      }
+
+      // Soft-invalidate only in-flight fetch coalescing — keep disk + warm memory
+      // until a successful refresh replaces them. Hard-clearing memory during
+      // flaky connectivity made tickets/events flash empty offline.
+      AppCacheService().cancelInFlightPrefix('fetch:');
+      // Archive/delete/publish must drop list caches so empty fetches can clear UI.
+      if (reason == 'events' ||
+          reason.startsWith('events:') ||
+          reason.startsWith('push:')) {
+        EventService.invalidateEventListCache();
+      }
       // Requirement review status lives outside list cache — clear it on live pulses.
       if (reason.contains('student_requirements') ||
           reason.contains('student_submissions') ||

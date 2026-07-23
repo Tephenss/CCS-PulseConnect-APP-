@@ -40,6 +40,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   final _supabase = Supabase.instance.client;
   Map<String, dynamic>? _user;
   List<Map<String, dynamic>> _upcomingEvents = [];
+  List<Map<String, dynamic>> _calendarEvents = [];
   int _currentIndex = 0;
   bool _isLoading = true;
   int _unreadCount = 0;
@@ -106,15 +107,21 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
       unawaited(_refreshUnreadCount());
     }
 
+    final offline = await _hasNoConnectivity();
+    final offlinePulse = reason.startsWith('offline:');
+
     String? yearLevel;
     String? courseCode;
+    String? specialization;
     try {
       final scope = await _eventService.getStudentTargetScope(userId);
       final scopedYear = (scope['yearLevel']?.toString() ?? '').trim();
       final scopedCourse = (scope['courseCode']?.toString() ?? '').trim();
+      final scopedSpec = (scope['specialization']?.toString() ?? '').trim();
       yearLevel = scopedYear.isEmpty || scopedYear == 'ALL' ? null : scopedYear;
       courseCode =
           scopedCourse.isEmpty || scopedCourse == 'ALL' ? null : scopedCourse;
+      specialization = scopedSpec.isEmpty ? null : scopedSpec;
     } catch (_) {
       // Keep compatibility fallback below.
     }
@@ -125,18 +132,34 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     final activeEvents = await _eventService.getActiveEvents(
       yearLevel: yearLevel,
       courseCode: courseCode,
-      // Timer fallbacks respect TTL; realtime/live signals force fresh.
-      forceFresh: reason != 'fallback',
+      specialization: specialization,
+      // Timer/offline pulses respect cache; live signals force fresh only online.
+      forceFresh: !offline && !offlinePulse && reason != 'fallback',
+    );
+    final calendarEvents = await _eventService.getCalendarEvents(
+      yearLevel: yearLevel,
+      courseCode: courseCode,
+      specialization: specialization,
+      forceFresh: !offline && !offlinePulse && reason != 'fallback',
     );
 
     if (!mounted) return;
+    // Only keep prior cards while offline — online empty means deleted/archived.
+    if (activeEvents.isEmpty && _upcomingEvents.isNotEmpty && offline) {
+      return;
+    }
     setState(() {
       _upcomingEvents = activeEvents.take(5).toList();
+      if (!(calendarEvents.isEmpty && _calendarEvents.isNotEmpty && offline)) {
+        _calendarEvents = calendarEvents;
+      }
     });
 
     if (reason == 'registrations' ||
         reason == 'registration_access' ||
-        reason == 'tickets') {
+        reason == 'tickets' ||
+        reason.contains('registrations') ||
+        reason.contains('tickets')) {
       unawaited(_refreshAbsenceScopesSilently());
     }
   }
@@ -225,9 +248,13 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   }
 
   Future<bool> _hasNoConnectivity() async {
-    final connectivity = await _connectivity.checkConnectivity();
-    return connectivity.isEmpty ||
-        connectivity.every((result) => result == ConnectivityResult.none);
+    try {
+      final connectivity = await _connectivity.checkConnectivity();
+      return connectivity.isEmpty ||
+          connectivity.every((result) => result == ConnectivityResult.none);
+    } catch (_) {
+      return true;
+    }
   }
 
   Future<void> _refreshScannerAccessGuard(String studentId) async {
@@ -283,6 +310,9 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   Future<void> _loadData({bool forceFresh = false}) async {
     final user = await _authService.getCurrentUser();
     final userId = user?['id']?.toString() ?? '';
+    final hadCachedEvents = _upcomingEvents.isNotEmpty;
+    final offline = await _hasNoConnectivity();
+    final effectiveForceFresh = forceFresh && !offline;
 
     unawaited(_primeOfflineReadiness(user));
     
@@ -297,14 +327,17 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
 
     String? yearLevel;
     String? courseCode;
+    String? specialization;
     if (userId.isNotEmpty) {
       try {
         final scope = await _eventService.getStudentTargetScope(userId);
         final scopedYear = (scope['yearLevel']?.toString() ?? '').trim();
         final scopedCourse = (scope['courseCode']?.toString() ?? '').trim();
+        final scopedSpec = (scope['specialization']?.toString() ?? '').trim();
         yearLevel = scopedYear.isEmpty || scopedYear == 'ALL' ? null : scopedYear;
         courseCode =
             scopedCourse.isEmpty || scopedCourse == 'ALL' ? null : scopedCourse;
+        specialization = scopedSpec.isEmpty ? null : scopedSpec;
       } catch (_) {
         // Keep compatibility fallback below.
       }
@@ -317,9 +350,16 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
       _eventService.getActiveEvents(
         yearLevel: yearLevel,
         courseCode: courseCode,
-        forceFresh: forceFresh,
+        specialization: specialization,
+        forceFresh: effectiveForceFresh,
       ),
-      _notifService.getUnreadCount(forceRefresh: forceFresh),
+      _eventService.getCalendarEvents(
+        yearLevel: yearLevel,
+        courseCode: courseCode,
+        specialization: specialization,
+        forceFresh: effectiveForceFresh,
+      ),
+      _notifService.getUnreadCount(forceRefresh: effectiveForceFresh),
       _authService.getSections(),
       userId.isNotEmpty
           ? _eventService.getStudentPendingAbsenceScopes(studentId: userId)
@@ -327,11 +367,12 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     ]);
 
     final activeEvents = List<Map<String, dynamic>>.from(results[0] as List);
+    final calendarEvents = List<Map<String, dynamic>>.from(results[1] as List);
     final events = activeEvents.take(5).toList();
-    final unread = results[1] as int;
-    final sections = List<Map<String, dynamic>>.from(results[2] as List);
+    final unread = results[2] as int;
+    final sections = List<Map<String, dynamic>>.from(results[3] as List);
     final pendingAbsenceScopes =
-        List<Map<String, dynamic>>.from(results[3] as List);
+        List<Map<String, dynamic>>.from(results[4] as List);
     final filteredSections = _filterSectionsForDetectedCourse(sections, user);
     String? selectedAbsenceScopeKey = _selectedAbsenceScopeKey;
     if (pendingAbsenceScopes.isEmpty) {
@@ -350,7 +391,12 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     if (mounted) {
       setState(() {
         _user = user;
-        _upcomingEvents = events;
+        if (!(events.isEmpty && hadCachedEvents)) {
+          _upcomingEvents = events;
+        }
+        if (!(calendarEvents.isEmpty && _calendarEvents.isNotEmpty && offline)) {
+          _calendarEvents = calendarEvents;
+        }
         _unreadCount = unread;
         _sections = filteredSections;
         if (_selectedSectionId != null &&
@@ -655,8 +701,11 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
         }
       },
       child: Scaffold(
-        backgroundColor: gateMode ? const Color(0xFF09090B) : const Color(0xFFF9FAFB),
-        body: Stack(
+        backgroundColor: gateMode ? const Color(0xFF09090B) : Colors.white,
+        body: ColoredBox(
+          color: gateMode ? const Color(0xFF09090B) : Colors.white,
+          child: Stack(
+          clipBehavior: Clip.hardEdge,
           children: [
             _isLoading
                 ? const Center(child: PulseConnectLoader())
@@ -725,6 +774,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                 ),
               ),
           ],
+        ),
         ),
       ),
     );
@@ -1656,7 +1706,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
 
                     final isToday = day == now.day && _calendarMonth.month == now.month && _calendarMonth.year == now.year;
 
-                    final eventsOnThisDay = _upcomingEvents.where((e) {
+                    final eventsOnThisDay = _calendarEvents.where((e) {
                       final startAt = e['start_at'] as String?;
                       if (startAt == null) return false;
                       try {
@@ -1695,16 +1745,57 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                             ),
                           ),
                           if (hasEvent)
-                            Container(
-                              margin: const EdgeInsets.only(top: 2),
-                              width: 4,
-                              height: 4,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: isToday
-                                    ? _studentDark(context)
-                                    : Colors.white,
-                              ),
+                            Builder(
+                              builder: (_) {
+                                final hasPublished = eventsOnThisDay.any((e) {
+                                  final s = (e['status']?.toString() ?? '')
+                                      .toLowerCase()
+                                      .trim();
+                                  return s == 'published';
+                                });
+                                final hasUnpublished = eventsOnThisDay.any((e) {
+                                  final s = (e['status']?.toString() ?? '')
+                                      .toLowerCase()
+                                      .trim();
+                                  return s != 'published';
+                                });
+                                return Padding(
+                                  padding: const EdgeInsets.only(top: 2),
+                                  child: Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (hasPublished)
+                                        Container(
+                                          width: 4,
+                                          height: 4,
+                                          decoration: const BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: Color(0xFFFACC15),
+                                          ),
+                                        ),
+                                      if (hasPublished && hasUnpublished)
+                                        const SizedBox(width: 2),
+                                      if (hasUnpublished)
+                                        Container(
+                                          width: 4,
+                                          height: 4,
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: Colors.white,
+                                            border: isToday
+                                                ? Border.all(
+                                                    color: _studentDark(context)
+                                                        .withValues(alpha: 0.35),
+                                                    width: 0.5,
+                                                  )
+                                                : null,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                );
+                              },
                             ),
                         ],
                       ),

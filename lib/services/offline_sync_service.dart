@@ -738,6 +738,37 @@ class OfflineSyncService {
       final liveContext = isTeacher
           ? await _eventService.getTeacherScanContext(actor)
           : await _eventService.getStudentScanContext(actor);
+      final liveStatus =
+          (liveContext['status']?.toString() ?? '').trim().toLowerCase();
+      final liveOk = liveContext['ok'] == true;
+
+      // Network/error responses must never wipe a warm offline roster.
+      if (!liveOk || liveStatus == 'error') {
+        final existing = await getCachedScannerContext(
+          actorId: actor,
+          isTeacher: isTeacher,
+        );
+        if (existing != null) {
+          return {
+            'ok': true,
+            'status': existing['status']?.toString() ?? 'closed',
+            'ticket_count': 0,
+            'roster_ready': true,
+            'kept_cache': true,
+            'error': liveContext['message']?.toString() ??
+                'Kept offline scanner cache after a failed refresh.',
+          };
+        }
+        return {
+          'ok': false,
+          'status': 'error',
+          'ticket_count': 0,
+          'roster_ready': false,
+          'error': liveContext['message']?.toString() ??
+              'Unable to refresh scanner snapshot right now.',
+        };
+      }
+
       final existingPayload = await _loadRawContextPayload(actorKey);
       final effectivePayload = _selectPreferredContextPayload(
         existingPayload: existingPayload,
@@ -749,9 +780,13 @@ class OfflineSyncService {
       final scannerEnabled = resolvedPayload['scanner_enabled'] == true;
 
       if (contextStatus.toLowerCase() == 'no_assignment') {
-        await _store.deleteContextCache(actorKey);
-        await _store.clearTicketCacheForActor(actorKey);
-        await _backupService.autoBackupIfConfigured(force: true);
+        // Only clear when the live server response authoritatively confirms
+        // there is no assignment (ok:true). Keep prior cache otherwise.
+        if (liveOk && liveStatus == 'no_assignment') {
+          await _store.deleteContextCache(actorKey);
+          await _store.clearTicketCacheForActor(actorKey);
+          await _backupService.autoBackupIfConfigured(force: true);
+        }
         return {
           'ok': false,
           'status': contextStatus,
@@ -995,11 +1030,17 @@ class OfflineSyncService {
     final resolvedPayload = _resolveContextStatusLocally(effectivePayload);
     final status = (resolvedPayload['status']?.toString() ?? 'closed').trim();
     final scannerEnabled = resolvedPayload['scanner_enabled'] == true;
+    final liveOk = contextPayload['ok'] == true;
+    final liveStatus =
+        (contextPayload['status']?.toString() ?? '').trim().toLowerCase();
 
     if (status.toLowerCase() == 'no_assignment') {
-      await _store.deleteContextCache(actorKey);
-      await _store.clearTicketCacheForActor(actorKey);
-      await _backupService.autoBackupIfConfigured(force: true);
+      // Never wipe warm offline data from a transient/error payload.
+      if (liveOk && liveStatus == 'no_assignment') {
+        await _store.deleteContextCache(actorKey);
+        await _store.clearTicketCacheForActor(actorKey);
+        await _backupService.autoBackupIfConfigured(force: true);
+      }
       return;
     }
 

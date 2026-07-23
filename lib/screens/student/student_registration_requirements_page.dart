@@ -1,13 +1,17 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as path;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../services/event_service.dart';
 import '../../services/event_live_service.dart';
+import '../../services/native_document_picker.dart';
 import '../../utils/course_theme_utils.dart';
 import '../../widgets/custom_loader.dart';
 
@@ -265,12 +269,112 @@ class _StudentRegistrationRequirementsPageState
     });
   }
 
+  static const _allowedExtensions = <String>{
+    'pdf',
+    'doc',
+    'docx',
+    'jpg',
+    'jpeg',
+    'png',
+    'webp',
+  };
+
+  Future<Uint8List?> _readPickedBytes(PlatformFile picked) async {
+    final inline = picked.bytes;
+    if (inline != null && inline.isNotEmpty) {
+      return Uint8List.fromList(inline);
+    }
+
+    final stream = picked.readStream;
+    if (stream != null) {
+      final builder = BytesBuilder(copy: false);
+      await for (final chunk in stream) {
+        builder.add(chunk);
+      }
+      final bytes = builder.takeBytes();
+      if (bytes.isNotEmpty) return bytes;
+    }
+
+    final filePath = picked.path;
+    if (filePath != null && filePath.trim().isNotEmpty) {
+      final file = File(filePath);
+      if (await file.exists()) {
+        return file.readAsBytes();
+      }
+    }
+
+    return null;
+  }
+
   Future<void> _pickAndUpload(Map<String, dynamic> requirement) async {
     if (!_canUpload || _isUploading) return;
 
     final requirementId = requirement['id']?.toString() ?? '';
     if (requirementId.isEmpty) return;
 
+    String fileName = 'document.pdf';
+    Uint8List? bytes;
+
+    try {
+      if (Platform.isAndroid) {
+        // Native SAF picker is more stable on Oppo/ColorOS than file_picker.
+        final native = await NativeDocumentPicker.pickAndroid();
+        if (native == null) return;
+        fileName = native.name.trim().isNotEmpty
+            ? native.name.trim()
+            : 'document.pdf';
+        bytes = native.bytes;
+      } else {
+        final result = await FilePicker.platform.pickFiles(
+          type: FileType.any,
+          allowMultiple: false,
+          withData: false,
+          withReadStream: true,
+          compressionQuality: 0,
+        );
+        if (result == null || result.files.isEmpty) return;
+        final picked = result.files.first;
+        fileName = picked.name.trim().isNotEmpty
+            ? picked.name.trim()
+            : 'document.pdf';
+        bytes = await _readPickedBytes(picked);
+      }
+    } on PlatformException catch (error) {
+      if (!mounted) return;
+      final message = (error.message ?? error.code).trim();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            message.isEmpty
+                ? 'Unable to open file picker.'
+                : message,
+          ),
+        ),
+      );
+      return;
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Unable to open file picker: $error')),
+      );
+      return;
+    }
+
+    final extension =
+        path.extension(fileName).toLowerCase().replaceFirst('.', '');
+    if (!_allowedExtensions.contains(extension)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Unsupported file. Use PDF, DOC, DOCX, JPG, PNG, or WEBP.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    if (!mounted) return;
     setState(() {
       _isUploading = true;
       _uploadingRequirementId = requirementId;
@@ -278,15 +382,6 @@ class _StudentRegistrationRequirementsPageState
     });
 
     try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: const ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'webp'],
-        withData: true,
-      );
-      if (result == null || result.files.isEmpty) return;
-
-      final picked = result.files.first;
-      final bytes = picked.bytes;
       if (bytes == null || bytes.isEmpty) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
@@ -294,10 +389,6 @@ class _StudentRegistrationRequirementsPageState
         );
         return;
       }
-
-      final fileName = picked.name.trim().isNotEmpty
-          ? picked.name.trim()
-          : 'document.pdf';
 
       final upload = await _trackUploadProgress(
         _eventService.uploadStudentRequirementDocument(

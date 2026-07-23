@@ -371,9 +371,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   String _encodeTargetParticipant(String courseValue, List<String> yearValues) {
     final course = courseValue.trim().toUpperCase();
     final years = _normalizeTargetYears(yearValues);
-    final normalizedCourse = ['ALL', 'BSIT', 'BSCS'].contains(course)
-        ? course
-        : 'ALL';
+    const allowedCourses = ['ALL', 'BSIT', 'BSIT-SD', 'BSIT-BA', 'BSCS'];
+    final normalizedCourse = allowedCourses.contains(course) ? course : 'ALL';
 
     if (normalizedCourse == 'ALL' &&
         years.length == 1 &&
@@ -854,10 +853,12 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                   _buildLabel('Target Course'),
                   _buildDropdown(
                     value: _targetCourse,
-                    items: ['ALL', 'BSIT', 'BSCS'],
+                    items: ['ALL', 'BSIT', 'BSIT-SD', 'BSIT-BA', 'BSCS'],
                     itemLabels: {
                       'ALL': 'All Courses',
-                      'BSIT': 'BSIT',
+                      'BSIT': 'BSIT (All)',
+                      'BSIT-SD': 'BSIT-SD',
+                      'BSIT-BA': 'BSIT-BA',
                       'BSCS': 'BSCS',
                     },
                     onChanged: (v) => setState(() => _targetCourse = v!),

@@ -4,6 +4,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'mobile_backend_service.dart';
+import 'auth_service.dart';
 
 class EmailVerificationService {
   final _supabase = Supabase.instance.client;
@@ -122,13 +123,27 @@ class EmailVerificationService {
       return {'ok': false, 'error': 'Invalid verification code.'};
     }
 
+    final updatedPayload = <String, dynamic>{
+      'email_verified': true,
+      'email_verified_at': now.toIso8601String(),
+    };
+
+    // Only move preverify → pending on first-time registration OTP.
+    // Daily / new-device re-verification must not lock approved accounts.
+    final current = await _supabase
+        .from('users')
+        .select('account_status')
+        .eq('id', userId)
+        .maybeSingle();
+    final currentStatus =
+        (current?['account_status']?.toString() ?? '').trim().toLowerCase();
+    if (currentStatus == 'preverify' || currentStatus.isEmpty) {
+      updatedPayload['account_status'] = 'pending';
+    }
+
     final updatedUser = await _supabase
         .from('users')
-        .update({
-          'email_verified': true,
-          'email_verified_at': now.toIso8601String(),
-          'account_status': 'pending',
-        })
+        .update(updatedPayload)
         .eq('id', userId)
         .select()
         .single();
@@ -137,6 +152,11 @@ class EmailVerificationService {
         .from('email_verification_codes')
         .delete()
         .eq('user_id', userId);
+
+    // Trust this public IP after successful OTP (daily + new-IP gate).
+    try {
+      await AuthService().trustCurrentDevice(userId);
+    } catch (_) {}
 
     if (persistLocalUser) {
       final prefs = await SharedPreferences.getInstance();

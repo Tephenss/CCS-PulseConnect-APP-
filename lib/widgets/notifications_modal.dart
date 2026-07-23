@@ -404,12 +404,25 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
     }
 
     if (role == 'student' && event != null) {
-      final yearLevel = await _auth.getStudentYearLevel();
-      final courseCode = await _auth.getStudentCourseCode();
+      final user = await _auth.getCurrentUser();
+      final userId = user?['id']?.toString().trim() ?? '';
+      String? yearLevel;
+      String? courseCode;
+      String? specialization;
+      if (userId.isNotEmpty) {
+        final scope = await _eventService.getStudentTargetScope(userId);
+        yearLevel = scope['yearLevel'];
+        courseCode = scope['courseCode'];
+        specialization = scope['specialization'];
+      } else {
+        yearLevel = await _auth.getStudentYearLevel();
+        courseCode = await _auth.getStudentCourseCode();
+      }
       final allowed = _eventService.isStudentAllowedForEvent(
         event,
         yearLevel: yearLevel,
         courseCode: courseCode,
+        specialization: specialization,
       );
       if (!allowed) {
         if (!mounted) return;

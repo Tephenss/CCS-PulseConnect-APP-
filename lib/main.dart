@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -20,6 +22,23 @@ import 'utils/teacher_theme_utils.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Never leave Flutter debug outlines on (green widget/size borders).
+  debugPaintSizeEnabled = false;
+  debugPaintBaselinesEnabled = false;
+  debugPaintLayerBordersEnabled = false;
+  debugPaintPointersEnabled = false;
+  debugRepaintRainbowEnabled = false;
+
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.light,
+      systemNavigationBarColor: Colors.white,
+      systemNavigationBarDividerColor: Colors.transparent,
+      systemNavigationBarIconBrightness: Brightness.dark,
+    ),
+  );
 
   try {
     await OfflineBackupService().autoRestoreIfNeeded();
@@ -57,15 +76,26 @@ void main() async {
         ? 'CS'
         : 'IT';
 
-    // Daily OTP reset (12:00 AM Asia/Manila): force logout so the user
-    // must re-login from page 1 before verifying again.
-    if (AuthService.requiresDailyEmailVerification(userData)) {
+    // Daily OTP reset (12:00 AM Asia/Manila) OR known-untrusted IP:
+    // force logout so the user must re-login + verify before entering home.
+    // If public IP cannot be resolved yet, keep the session (avoid false logout).
+    // Note: mid-session enforce (resume/idle) is daily-only — see
+    // [_enforceDailyVerificationLogout] — so IP churn won't kick open screens.
+    if (await authService.requiresEmailVerification(
+      userData,
+      unknownTrustRequiresVerification: false,
+    )) {
       await authService.logout();
       isLoggedIn = false;
       role = 'student';
       studentCourse = 'IT';
     } else if (firebaseReady) {
       await PushNotificationService().updateToken();
+      // Keep trust fresh while this install stays active.
+      final uid = userData?['id']?.toString().trim() ?? '';
+      if (uid.isNotEmpty) {
+        unawaited(authService.trustCurrentDevice(uid));
+      }
     }
   } else if (firebaseReady) {
     // Clear orphan device tokens left after OTP/logout so Welcome/Login
@@ -161,13 +191,34 @@ class PulseConnectAppState extends State<PulseConnectApp>
 
   Future<void> _enforceDailyVerificationLogout() async {
     if (_isEnforcingDailyVerification) return;
+    if (AuthService.isAuthFlowBusy) return;
     _isEnforcingDailyVerification = true;
     try {
       final loggedIn = await _authService.isLoggedIn();
       if (!loggedIn) return;
+      if (AuthService.isAuthFlowBusy) return;
 
       final user = await _authService.getCurrentUser();
-      if (!AuthService.requiresDailyEmailVerification(user)) return;
+      // Transient prefs/session read failure — never kick a live session.
+      if (user == null) return;
+
+      // Mid-session: ONLY Manila 12:00 AM day rollover forces re-login.
+      // Do NOT logout for IP/network changes while the user is idle on a page
+      // (carrier IP churn / brief offline was sending people to Welcome).
+      final verifiedAtRaw = (user['email_verified_at']?.toString() ?? '').trim();
+      if (verifiedAtRaw.isEmpty) {
+        // Incomplete cached profile — keep session; login gate still enforces OTP.
+        return;
+      }
+      if (!AuthService.requiresDailyEmailVerification(user)) {
+        // Still online on a trusted day — refresh trust quietly (no logout).
+        final uid = user['id']?.toString().trim() ?? '';
+        if (uid.isNotEmpty) {
+          unawaited(_authService.trustCurrentDevice(uid));
+        }
+        return;
+      }
+      if (AuthService.isAuthFlowBusy) return;
 
       await _authService.logout();
       final nav = PulseConnectApp.navigatorKey.currentState;
@@ -348,6 +399,13 @@ class PulseConnectAppState extends State<PulseConnectApp>
       title: 'CCS PulseConnect',
       debugShowCheckedModeBanner: false,
       theme: _getTheme(_currentRole, _currentStudentCourse),
+      builder: (context, child) {
+        // Seal the root so no theme/seed color can peek through as edge lines.
+        return ColoredBox(
+          color: Colors.white,
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
       home: widget.isLoggedIn
           ? (_currentRole.toLowerCase() == 'teacher'
                 ? const TeacherHome()
@@ -373,14 +431,23 @@ class PulseConnectAppState extends State<PulseConnectApp>
         secondary: secondaryColor,
         surface: Colors.white,
         brightness: Brightness.light,
+      ).copyWith(
+        surface: Colors.white,
+        surfaceContainerLowest: Colors.white,
+        surfaceContainerLow: const Color(0xFFF8F9FA),
+        surfaceContainer: const Color(0xFFF3F4F6),
+        surfaceContainerHigh: const Color(0xFFE5E7EB),
+        surfaceContainerHighest: const Color(0xFFE5E7EB),
+        surfaceTint: Colors.transparent,
       ),
       textTheme: GoogleFonts.interTextTheme(),
-      scaffoldBackgroundColor: const Color(0xFFF8F9FA),
+      scaffoldBackgroundColor: Colors.white,
       appBarTheme: AppBarTheme(
         backgroundColor: primaryColor,
         foregroundColor: Colors.white,
         elevation: 0,
         centerTitle: true,
+        surfaceTintColor: Colors.transparent,
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(

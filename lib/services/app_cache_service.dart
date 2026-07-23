@@ -136,7 +136,20 @@ class AppCacheService {
     return result;
   }
 
-  Future<void> saveJsonList(String key, List<Map<String, dynamic>> rows) async {
+  Future<void> saveJsonList(
+    String key,
+    List<Map<String, dynamic>> rows, {
+    bool preserveNonEmptyOnEmpty = false,
+  }) async {
+    if (preserveNonEmptyOnEmpty && rows.isEmpty) {
+      final existing = await loadJsonList(key);
+      if (existing.isNotEmpty) {
+        // Keep prior offline/warm data when a refresh returns empty.
+        writeMemory(key, List<Map<String, dynamic>>.from(existing));
+        return;
+      }
+    }
+
     writeMemory(key, List<Map<String, dynamic>>.from(rows));
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_dataKey(key), jsonEncode(rows));

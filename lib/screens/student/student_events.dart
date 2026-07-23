@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -24,6 +25,7 @@ class StudentEvents extends StatefulWidget {
 class _StudentEventsState extends State<StudentEvents>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final _eventService = EventService();
+  final Connectivity _connectivity = Connectivity();
   List<Map<String, dynamic>> _activeEvents = [];
   List<Map<String, dynamic>> _expiredEvents = [];
   List<Map<String, dynamic>> _filteredActive = [];
@@ -40,20 +42,33 @@ class _StudentEventsState extends State<StudentEvents>
   StreamSubscription<String>? _eventLiveSubscription;
   bool _isRefreshingEvents = false;
 
+  Future<bool> _isOfflineNow() async {
+    try {
+      final connectivity = await _connectivity.checkConnectivity();
+      return connectivity.isEmpty ||
+          connectivity.every((result) => result == ConnectivityResult.none);
+    } catch (_) {
+      return true;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _tabController = TabController(length: 2, vsync: this);
     _tabController.addListener(_handleTabSelection);
-    _eventLiveSubscription = EventLiveService.instance.changes.listen((_) {
+    _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
       if (!mounted || _isRefreshingEvents) return;
-      unawaited(_loadEvents(showLoader: false, forceFresh: true));
+      final offlinePulse = reason.startsWith('offline:');
+      unawaited(
+        _loadEvents(showLoader: false, forceFresh: !offlinePulse),
+      );
     });
     _refreshTimer = Timer.periodic(const Duration(seconds: 40), (_) {
-      _reloadEventsSilently(forceFresh: false);
+      _reloadEventsSilently(forceFresh: true);
     });
-    _loadEvents();
+    _loadEvents(forceFresh: true);
   }
 
   @override
@@ -96,6 +111,8 @@ class _StudentEventsState extends State<StudentEvents>
       setState(() => _isLoading = true);
     }
     try {
+      final offline = await _isOfflineNow();
+      final effectiveForceFresh = forceFresh && !offline;
       final prefs = await SharedPreferences.getInstance();
 
       // Instead of using SharedPreferences directly for yearLevel,
@@ -107,23 +124,37 @@ class _StudentEventsState extends State<StudentEvents>
           : (prefs.getString('user_id') ?? '');
       final yearLevel = await authService.getStudentYearLevel();
       final courseCode = await authService.getStudentCourseCode();
+      String? specialization;
+      if (userId.isNotEmpty) {
+        final scope = await _eventService.getStudentTargetScope(userId);
+        specialization = (scope['specialization']?.toString() ?? '').trim();
+        if (specialization.isEmpty) specialization = null;
+      }
 
       final results = await Future.wait([
         _eventService.getActiveEvents(
           yearLevel: yearLevel,
           courseCode: courseCode,
-          forceFresh: forceFresh,
+          specialization: specialization,
+          forceFresh: effectiveForceFresh,
         ),
         userId.isNotEmpty
             ? _eventService.getExpiredEventsOpenForEvaluation(
                 studentId: userId,
                 yearLevel: yearLevel,
-                forceFresh: forceFresh,
+                forceFresh: effectiveForceFresh,
               )
             : Future.value(<Map<String, dynamic>>[]),
       ]);
       final active = List<Map<String, dynamic>>.from(results[0] as List);
       final expired = List<Map<String, dynamic>>.from(results[1] as List);
+
+      // Only keep prior lists on a true offline blip — never when online empty
+      // (archived/deleted events must clear from the UI).
+      if (active.isEmpty && expired.isEmpty && hasCachedList && offline) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
 
       final evaluatedMap = <String, bool>{};
       if (userId.isNotEmpty && expired.isNotEmpty) {
@@ -888,12 +919,13 @@ class _StudentEventsState extends State<StudentEvents>
     if (val.toLowerCase() == 'none') return 'No Target';
     final rawUpper = val.trim().toUpperCase();
     final multi = RegExp(
-      r'^COURSE\s*=\s*(ALL|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
+      r'^COURSE\s*=\s*(ALL|BSIT-SD|BSIT-BA|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
     ).firstMatch(rawUpper);
     if (multi != null) {
-      final course = multi.group(1) == 'ALL'
+      final courseRaw = multi.group(1) ?? 'ALL';
+      final course = courseRaw == 'ALL'
           ? 'All Courses'
-          : (multi.group(1) ?? 'All Courses');
+          : (courseRaw == 'BSIT' ? 'BSIT (All)' : courseRaw);
       final yearsRaw = (multi.group(2) ?? '')
           .split(',')
           .map((e) => e.trim().toUpperCase())
@@ -910,6 +942,10 @@ class _StudentEventsState extends State<StudentEvents>
           : yearsRaw.map((y) => yearLabel[y] ?? y).join(', ');
       return '$course - $years';
     }
+    if (rawUpper == 'BSIT') return 'BSIT (All)';
+    if (rawUpper == 'BSIT-SD') return 'BSIT-SD';
+    if (rawUpper == 'BSIT-BA') return 'BSIT-BA';
+    if (rawUpper == 'BSCS') return 'BSCS';
     final map = {
       '1': '1st Year',
       '2': '2nd Year',

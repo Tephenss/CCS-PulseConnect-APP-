@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'app_cache_service.dart';
 import 'auth_service.dart';
 import 'event_service.dart';
 import '../config/env.dart';
@@ -161,8 +162,12 @@ class NotificationService {
       event: PostgresChangeEvent.all,
       schema: 'public',
       table: 'events',
-      callback: (payload) {
-        EventService.invalidateEventListCache();
+      callback: (payload) async {
+        final offline = await EventService.isLikelyOffline();
+        if (!offline) {
+          // Soft: cancel in-flight only — disk cache stays for offline reopen.
+          AppCacheService().cancelInFlightPrefix('fetch:');
+        }
         invalidateLiveCaches();
         scheduleRefresh(force: true);
       },
@@ -897,10 +902,23 @@ class NotificationService {
       final approvedSignalRows = <Map<String, dynamic>>[];
       String? studentYearLevel;
       String? studentCourseCode;
+      String? studentSpecialization;
 
       if (role == 'student') {
-        studentYearLevel = await authService.getStudentYearLevel();
-        studentCourseCode = await authService.getStudentCourseCode();
+        if (currentUserId.isNotEmpty) {
+          final scope = await _eventService.getStudentTargetScope(currentUserId);
+          final scopedYear = (scope['yearLevel']?.toString() ?? '').trim();
+          final scopedCourse = (scope['courseCode']?.toString() ?? '').trim();
+          final scopedSpec = (scope['specialization']?.toString() ?? '').trim();
+          studentYearLevel =
+              scopedYear.isEmpty || scopedYear == 'ALL' ? null : scopedYear;
+          studentCourseCode =
+              scopedCourse.isEmpty || scopedCourse == 'ALL' ? null : scopedCourse;
+          studentSpecialization = scopedSpec.isEmpty ? null : scopedSpec;
+        } else {
+          studentYearLevel = await authService.getStudentYearLevel();
+          studentCourseCode = await authService.getStudentCourseCode();
+        }
       }
 
       if (role == 'student' && currentUserId.isNotEmpty) {
@@ -1027,6 +1045,7 @@ class NotificationService {
                 event,
                 yearLevel: studentYearLevel,
                 courseCode: studentCourseCode,
+                specialization: studentSpecialization,
               )) {
             continue;
           }
@@ -1194,6 +1213,7 @@ class NotificationService {
                 event,
                 yearLevel: studentYearLevel,
                 courseCode: studentCourseCode,
+                specialization: studentSpecialization,
               );
           bool shouldNotify = (role == 'teacher' && isTeacherAssigned) ||
               studentQualified;

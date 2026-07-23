@@ -90,6 +90,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
             builder: (_) => EmailVerificationScreen(
               user: user,
               postRegistrationReviewFlow: true,
+              gateReason: 'unverified',
             ),
           ),
         );

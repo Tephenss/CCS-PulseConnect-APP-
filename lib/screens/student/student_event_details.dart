@@ -88,9 +88,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   int _participantCount = 0;
   List<Map<String, dynamic>> _eventSessions = [];
   bool _isRefreshingEvent = false;
+  bool _pendingForceRefresh = false;
   bool _suppressCapacityRefresh = false;
+  int _eventLoadToken = 0;
   Timer? _approvalRefreshTimer;
   Timer? _capacityRefreshTimer;
+  Timer? _registrationAccessRefreshTimer;
+  Timer? _livePulseDebounce;
   RealtimeChannel? _approvalChannel;
   RealtimeChannel? _capacityChannel;
   String _approvalChannelUserId = '';
@@ -118,6 +122,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final eventId = widget.eventId;
     final targetsThisEvent =
         reason.contains(eventId) ||
+        reason == 'events' ||
+        reason.startsWith('events:') ||
         reason.contains('student_submissions') ||
         reason.contains('student_requirements') ||
         reason.contains('registration_access') ||
@@ -139,7 +145,12 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     _eventService.clearStudentRequirementsCache(eventId);
     _eventService.invalidateEventDetailCache(eventId);
     _detailsCache.remove(eventId);
-    unawaited(_loadEvent(silent: true));
+    // Coalesce bursts of realtime/push pulses — avoid stacking full reloads.
+    _livePulseDebounce?.cancel();
+    _livePulseDebounce = Timer(const Duration(milliseconds: 450), () {
+      if (!mounted || _isRefreshingEvent) return;
+      unawaited(_loadEvent(silent: true, forceFresh: true));
+    });
   }
 
   void _applyOptimisticRequirementsReview({required bool approved}) {
@@ -170,13 +181,42 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         DateTime.now().difference(cached.cachedAt) <= _detailsUiTtl) {
       _applySnapshot(cached);
       _isLoading = false;
+      final paid = _event != null && !_eventLooksFree(_event!);
+      // Keep a known Settle Payment / docs CTA visible — never leave an endless
+      // spinner while a background refresh is still in flight.
+      if (paid &&
+          _approvalRequired &&
+          !_canRegisterNow &&
+          !_isRegistered) {
+        _isRegistrationResolved = true;
+      } else if (_requirementsRequired &&
+          !_requirementsApproved &&
+          !_isRegistered) {
+        _isRegistrationResolved = true;
+      } else if (_isRegistered &&
+          !(_requirementsRequired && !_requirementsApproved)) {
+        // Cached "See Ticket" can race ahead of docs — confirm first.
+        _isRegistrationResolved = false;
+      }
       return;
     }
 
     if (widget.initialEvent != null) {
       _event = Map<String, dynamic>.from(widget.initialEvent!);
       _isLoading = false;
-      _isRegistrationResolved = false;
+      // Paid events: show Settle Payment immediately (disabled), then confirm.
+      if (!_eventLooksFree(_event!)) {
+        _approvalRequired = true;
+        _canRegisterNow = false;
+        _requirementsRequired = false;
+        _isRegistrationResolved = true;
+        if (_registrationMessage.isEmpty) {
+          _registrationMessage =
+              'Settle your payment first with the authorized person assigned for this event.';
+        }
+      } else {
+        _isRegistrationResolved = false;
+      }
     }
   }
 
@@ -204,16 +244,22 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     required int participantCount,
     required String requirementsStatus,
     required bool requirementsApproved,
+    bool? canRegisterNow,
+    bool? approvalRequired,
   }) {
     return [
       event['updated_at']?.toString() ?? '',
       event['cover_image_url']?.toString() ?? '',
       event['status']?.toString() ?? '',
       event['registered_count']?.toString() ?? '',
+      event['allow_registration']?.toString() ?? '',
+      event['is_free_event']?.toString() ?? '',
       isRegistered ? '1' : '0',
       participantCount.toString(),
       requirementsStatus,
       requirementsApproved ? '1' : '0',
+      canRegisterNow == true ? '1' : '0',
+      approvalRequired == true ? '1' : '0',
     ].join('|');
   }
 
@@ -227,6 +273,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       participantCount: _participantCount,
       requirementsStatus: _requirementsStatus,
       requirementsApproved: _requirementsApproved,
+      canRegisterNow: _canRegisterNow,
+      approvalRequired: _approvalRequired,
     );
 
     _detailsCache[widget.eventId] = _EventDetailsSnapshot(
@@ -255,6 +303,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     _eventLiveSubscription?.cancel();
     _approvalRefreshTimer?.cancel();
     _capacityRefreshTimer?.cancel();
+    _registrationAccessRefreshTimer?.cancel();
+    _livePulseDebounce?.cancel();
     _approvalChannel?.unsubscribe();
     _capacityChannel?.unsubscribe();
     WidgetsBinding.instance.removeObserver(this);
@@ -264,7 +314,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _loadEvent(silent: true);
+      _loadEvent(silent: true, forceFresh: true);
     }
   }
 
@@ -310,6 +360,25 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       }
       unawaited(_loadEvent(silent: true));
     });
+  }
+
+  /// Poll while viewing details so Allow Registration toggles apply even if
+  /// Supabase realtime is delayed/disabled for the events table.
+  void _scheduleRegistrationAccessRefresh() {
+    _registrationAccessRefreshTimer?.cancel();
+    if (_isRegistered) return;
+
+    // Keep this light — forceFresh every 5s was janking the UI (100+ skipped frames).
+    _registrationAccessRefreshTimer = Timer.periodic(
+      const Duration(seconds: 20),
+      (_) {
+        if (!mounted || _isRegistered || _isRefreshingEvent) {
+          if (_isRegistered) _registrationAccessRefreshTimer?.cancel();
+          return;
+        }
+        unawaited(_loadEvent(silent: true));
+      },
+    );
   }
 
   void _bindCapacityRealtime() {
@@ -451,6 +520,23 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       },
     );
 
+    // Allow Registration toggle updates this event row — refresh CTA immediately.
+    _approvalChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.update,
+      schema: 'public',
+      table: 'events',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'id',
+        value: widget.eventId,
+      ),
+      callback: (_) {
+        _eventService.invalidateEventDetailCache(widget.eventId);
+        _detailsCache.remove(widget.eventId);
+        unawaited(_loadEvent(silent: true, forceFresh: true));
+      },
+    );
+
     _approvalChannel!.subscribe();
   }
 
@@ -474,9 +560,33 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     return 'Registration is closed for this event.';
   }
 
-  Future<void> _loadEvent({bool silent = false}) async {
-    if (_isRefreshingEvent) return;
+  void _resolveCtaFailClosed() {
+    if (!mounted) return;
+    final paid = _event != null && !_eventLooksFree(_event!);
+    setState(() {
+      _isLoading = false;
+      if (!_isRegistered && (paid || _approvalRequired)) {
+        _approvalRequired = true;
+        _canRegisterNow = false;
+        _requirementsRequired = false;
+        _requirementsApproved = false;
+        _requirementsStatus = '';
+        if (_registrationMessage.isEmpty) {
+          _registrationMessage =
+              'Settle your payment first with the authorized person assigned for this event.';
+        }
+      }
+      _isRegistrationResolved = true;
+    });
+  }
+
+  Future<void> _loadEvent({bool silent = false, bool forceFresh = false}) async {
+    if (_isRefreshingEvent) {
+      if (forceFresh) _pendingForceRefresh = true;
+      return;
+    }
     _isRefreshingEvent = true;
+    final loadToken = ++_eventLoadToken;
 
     final canStaySilent = silent || _event != null;
     if (!canStaySilent && mounted) {
@@ -486,33 +596,42 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     }
 
     try {
-      await _loadEventData(silent: canStaySilent).timeout(
-        const Duration(seconds: 25),
+      await _loadEventData(
+        silent: canStaySilent,
+        forceFresh: forceFresh,
+        loadToken: loadToken,
+      ).timeout(
+        const Duration(seconds: 12),
         onTimeout: () {
-          if (!mounted) return;
-          setState(() {
-            if (_event == null && widget.initialEvent != null) {
-              _event = Map<String, dynamic>.from(widget.initialEvent!);
-            }
-            _isLoading = false;
-          });
-          unawaited(_recoverEventRegistrationState());
+          if (!mounted || loadToken != _eventLoadToken) return;
+          _resolveCtaFailClosed();
         },
       );
     } catch (_) {
-      if (mounted && !canStaySilent) {
-        setState(() {
-          if (_event == null && widget.initialEvent != null) {
+      if (mounted && loadToken == _eventLoadToken) {
+        if (_event == null && widget.initialEvent != null) {
+          setState(() {
             _event = Map<String, dynamic>.from(widget.initialEvent!);
-          }
-          _isLoading = false;
-        });
+          });
+        }
         if (!_isRegistrationResolved) {
-          unawaited(_recoverEventRegistrationState());
+          _resolveCtaFailClosed();
+        } else if (!canStaySilent) {
+          setState(() => _isLoading = false);
         }
       }
     } finally {
-      _isRefreshingEvent = false;
+      if (loadToken == _eventLoadToken) {
+        _isRefreshingEvent = false;
+      }
+      if (_pendingForceRefresh && mounted && loadToken == _eventLoadToken) {
+        _pendingForceRefresh = false;
+        // Defer chained refresh so we don't stack work on the same frame.
+        scheduleMicrotask(() {
+          if (!mounted || _isRefreshingEvent) return;
+          unawaited(_loadEvent(silent: true, forceFresh: true));
+        });
+      }
     }
   }
 
@@ -527,6 +646,28 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     }
 
     try {
+      final event = _event;
+      final looksPaid = event != null && !_eventLooksFree(event);
+
+      // Paid events: fail closed to Settle Payment — never invent Submit Docs.
+      if (looksPaid) {
+        if (mounted) {
+          setState(() {
+            _approvalRequired = true;
+            _canRegisterNow = false;
+            _requirementsRequired = false;
+            _requirementsApproved = false;
+            _requirementsStatus = '';
+            if (_registrationMessage.isEmpty) {
+              _registrationMessage =
+                  'Settle your payment first with the authorized person assigned for this event.';
+            }
+            _isRegistrationResolved = true;
+          });
+        }
+        return;
+      }
+
       final requirementRows = await _eventService
           .fetchEventStudentRequirementsList(
             widget.eventId,
@@ -559,7 +700,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     }
   }
 
-  Future<void> _loadEventData({required bool silent}) async {
+  Future<void> _loadEventData({
+    required bool silent,
+    bool forceFresh = false,
+    int loadToken = 0,
+  }) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id') ?? '';
@@ -569,12 +714,17 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final results = await Future.wait([
         _eventService.getEventById(
           widget.eventId,
-          forceFresh: missingCover,
+          forceFresh: forceFresh || missingCover,
         ),
         _eventService.isRegistered(widget.eventId, userId),
-        _eventService.getEventRegistrationSettings(widget.eventId),
+        _eventService.getEventRegistrationSettings(
+          widget.eventId,
+          forceFresh: forceFresh,
+        ),
         _eventService.getEventSessions(widget.eventId),
-      ]).timeout(const Duration(seconds: 12));
+      ]).timeout(const Duration(seconds: 8));
+
+      if (!mounted || loadToken != _eventLoadToken) return;
 
       final baseEvent = results[0] as Map<String, dynamic>?;
       var isReg = results[1] as bool || _isRegistered;
@@ -595,23 +745,27 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         event['cover_image_url'] = knownCover;
       }
 
-      // Paint the screen ASAP — don't keep the bottom button on a spinner
-      // while secondary registration/requirements calls are still running.
-      if (mounted) {
+      // Paint event content ASAP. If payment just cleared and registration flips
+      // true, keep CTA unresolved until docs gate is known (no See Ticket flash).
+      if (mounted && loadToken == _eventLoadToken) {
         setState(() {
           if (event.isNotEmpty) {
             _event = event;
           }
           _eventSessions = sessions;
+          final becameRegistered = isReg && !_isRegistered;
           _isRegistered = isReg;
-          _isLoading = false;
-          if (!_isRegistrationResolved) {
-            // Tentative open state until secondary finishes (or times out).
-            _isRegistrationResolved = true;
-            if (!isReg && _registrationMessage.isEmpty) {
-              _canRegisterNow = true;
+          final looksPaid =
+              event.isNotEmpty ? !_eventLooksFree(event) : false;
+          if (becameRegistered &&
+              (looksPaid || _hasStudentRequirements) &&
+              !_requirementsApproved) {
+            _isRegistrationResolved = false;
+            if (_hasStudentRequirements) {
+              _requirementsRequired = true;
             }
           }
+          _isLoading = false;
         });
       }
 
@@ -635,7 +789,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                   preloadedEvent: Map<String, dynamic>.from(event),
                 )
                 .timeout(
-                  const Duration(seconds: 6),
+                  const Duration(seconds: 4),
                   onTimeout: () => <String, dynamic>{},
                 )
           else
@@ -644,7 +798,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             _eventService
                 .getStudentRequirementsInfo(widget.eventId, userId)
                 .timeout(
-                  const Duration(seconds: 5),
+                  const Duration(seconds: 3),
                   onTimeout: () => {'ok': false},
                 )
           else
@@ -656,22 +810,20 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                   studentId: userId,
                 )
                 .timeout(
-                  const Duration(seconds: 4),
+                  const Duration(seconds: 3),
                   onTimeout: () => <Map<String, dynamic>>[],
                 )
           else
             Future<List<Map<String, dynamic>>>.value([]),
-        ]).timeout(const Duration(seconds: 8));
+        ]).timeout(const Duration(seconds: 6));
       } on TimeoutException {
-        if (mounted) {
-          setState(() {
-            _isLoading = false;
-            _isRegistrationResolved = true;
-          });
+        if (mounted && loadToken == _eventLoadToken) {
+          _resolveCtaFailClosed();
         }
         return;
       }
 
+      if (!mounted || loadToken != _eventLoadToken) return;
       final snapshot = secondary[0] as Map<String, dynamic>?;
       final count = secondary[1] as int;
       final ticket = secondary[2] as Map<String, dynamic>;
@@ -699,20 +851,50 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       var requirementsApproved = false;
       var requirementsStatus = '';
       var registrationMessage = '';
+      var paymentCleared = false;
+      final eventLooksPaid = event.isNotEmpty && !_eventLooksFree(event);
 
       if (event.isNotEmpty && !isReg && availability.isNotEmpty) {
         accessDenied = availability['targetAllowed'] == false;
         canRegisterNow = availability['allowed'] == true;
         approvalRequired = availability['approvalRequired'] == true;
+        paymentCleared = availability['paymentCleared'] == true;
         requirementsRequired = availability['requirementsRequired'] == true;
         requirementsApproved = availability['requirementsApproved'] == true;
         requirementsStatus =
             (availability['requirementsStatus'] as String? ?? '').trim();
         registrationMessage = (availability['message'] as String? ?? '').trim();
+      } else if (event.isNotEmpty && !isReg && availability.isEmpty) {
+        // Live refresh / timeout must not invent Submit Documents for paid events.
+        if (eventLooksPaid || _approvalRequired) {
+          approvalRequired = true;
+          canRegisterNow = false;
+          requirementsRequired = false;
+          registrationMessage = _registrationMessage.isNotEmpty
+              ? _registrationMessage
+              : 'Settle your payment first with the authorized person assigned for this event.';
+        }
       } else if (isReg) {
         canRegisterNow = false;
         approvalRequired = false;
+        paymentCleared = true;
         registrationMessage = '';
+        // Paid-event students are already registered after payment —
+        // still surface document status when requirements exist.
+        if (availability.isNotEmpty) {
+          requirementsRequired = availability['requirementsRequired'] == true;
+          requirementsApproved = availability['requirementsApproved'] == true;
+          requirementsStatus =
+              (availability['requirementsStatus'] as String? ?? '').trim();
+        }
+        // Sticky docs gate: don't drop to See Ticket if rows exist but
+        // availability omitted the requirements flags this cycle.
+        if (!requirementsApproved &&
+            (requirementsRequired ||
+                requirementRows.isNotEmpty ||
+                _hasStudentRequirements)) {
+          requirementsRequired = true;
+        }
       }
 
       final resolvedCount = isReg && count < _participantCount
@@ -725,7 +907,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
               ) ||
               (event.isNotEmpty && isEventRegistrationWindowClosed(event)));
 
-      if (reqInfo['ok'] == true && !isRegistrationClosed) {
+      // Payment must be settled before documents for paid events.
+      final paymentPending = !isReg &&
+          (approvalRequired ||
+              (eventLooksPaid && !paymentCleared && availability.isNotEmpty) ||
+              (eventLooksPaid && availability.isEmpty));
+
+      if (!paymentPending && reqInfo['ok'] == true && !isRegistrationClosed) {
         final reqs = List<Map<String, dynamic>>.from(
           reqInfo['requirements'] as List? ?? const [],
         );
@@ -739,12 +927,21 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           if (!requirementsApproved) {
             canRegisterNow = false;
             final reqMessage = (access['message']?.toString() ?? '').trim();
-            registrationMessage = reqMessage.isNotEmpty
-                ? reqMessage
-                : 'Upload the required documents before registering.';
+            if (!isReg) {
+              registrationMessage = reqMessage.isNotEmpty
+                  ? reqMessage
+                  : 'Upload the required documents before registering.';
+            } else if (reqMessage.isNotEmpty) {
+              registrationMessage = reqMessage;
+            } else {
+              registrationMessage =
+                  'Upload the required documents for this event.';
+            }
           }
         }
-      } else if (!isRegistrationClosed && requirementRows.isNotEmpty) {
+      } else if (!paymentPending &&
+          !isRegistrationClosed &&
+          requirementRows.isNotEmpty) {
         requirementsRequired = true;
         if (!requirementsApproved) {
           canRegisterNow = false;
@@ -752,9 +949,21 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
               ? 'incomplete'
               : requirementsStatus;
           if (registrationMessage.isEmpty) {
-            registrationMessage =
-                'Upload the required documents before registering.';
+            registrationMessage = isReg
+                ? 'Upload the required documents for this event.'
+                : 'Upload the required documents before registering.';
           }
+        }
+      } else if (paymentPending) {
+        // Keep settle-payment state; hide document CTA until payment clears.
+        requirementsRequired = false;
+        requirementsApproved = false;
+        requirementsStatus = '';
+        canRegisterNow = false;
+        approvalRequired = true;
+        if (registrationMessage.isEmpty) {
+          registrationMessage =
+              'Settle your payment first with the authorized person assigned for this event.';
         }
       }
 
@@ -770,7 +979,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             : 'Registration is closed for this event.';
       }
 
-      if (mounted) {
+      if (mounted && loadToken == _eventLoadToken) {
         final previous = _detailsCache[widget.eventId];
         final nextEvent = event.isNotEmpty ? event : _event;
         final nextRevision = nextEvent == null
@@ -781,6 +990,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                 participantCount: resolvedCount,
                 requirementsStatus: requirementsStatus,
                 requirementsApproved: requirementsApproved,
+                canRegisterNow: canRegisterNow,
+                approvalRequired: approvalRequired,
               );
         final unchanged =
             previous != null &&
@@ -793,18 +1004,19 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         setState(() {
           if (!unchanged || _event == null) {
             _event = nextEvent;
-            _isRegistered = isReg;
-            _isAccessDenied = accessDenied;
-            _canRegisterNow = canRegisterNow;
-            _approvalRequired = approvalRequired;
-            _requirementsRequired = requirementsRequired;
-            _requirementsApproved = requirementsApproved;
-            _requirementsStatus = requirementsStatus;
-            _registrationMessage = registrationMessage;
-            _hasStudentRequirements = hasStudentRequirements;
-            _participantCount = resolvedCount;
             _eventSessions = sessions;
+            _participantCount = resolvedCount;
+            _hasStudentRequirements = hasStudentRequirements;
           }
+          // Always apply live registration CTA flags (Allow Registration toggle).
+          _isRegistered = isReg;
+          _isAccessDenied = accessDenied;
+          _canRegisterNow = canRegisterNow;
+          _approvalRequired = approvalRequired;
+          _requirementsRequired = requirementsRequired;
+          _requirementsApproved = requirementsApproved;
+          _requirementsStatus = requirementsStatus;
+          _registrationMessage = registrationMessage;
           _isRegistrationResolved = true;
           _isLoading = false;
         });
@@ -812,18 +1024,16 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         _bindCapacityRealtime();
         _scheduleCapacityRefresh();
         _scheduleApprovalRefresh();
+        _scheduleRegistrationAccessRefresh();
       }
     } catch (_) {
-      if (mounted) {
-        setState(() {
-          if (_event == null && widget.initialEvent != null) {
+      if (mounted && loadToken == _eventLoadToken) {
+        if (_event == null && widget.initialEvent != null) {
+          setState(() {
             _event = Map<String, dynamic>.from(widget.initialEvent!);
-          }
-          _isLoading = false;
-        });
-        if (!_isRegistrationResolved) {
-          unawaited(_recoverEventRegistrationState());
+          });
         }
+        _resolveCtaFailClosed();
       }
     }
   }
@@ -870,11 +1080,38 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   }
 
   Future<void> _handlePrimaryAction() async {
+    // Hard lock while gates are still loading / refreshing.
+    if (!_isRegistrationResolved || _isRefreshingEvent) return;
     if (_isPrimaryActionInProgress) return;
+    if (_isDocumentsUnderReview) return;
     _isPrimaryActionInProgress = true;
     if (mounted) setState(() {});
 
     try {
+      // Paid: settle payment before any document / register CTA.
+      if (_approvalRequired && !_canRegisterNow && !_isRegistered) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                _registrationMessage.isNotEmpty
+                    ? _registrationMessage
+                    : 'Settle your payment first with the authorized person assigned for this event.',
+              ),
+            ),
+          );
+        }
+        return;
+      }
+
+      // Already registered (e.g. paid event after staff payment) —
+      // documents come first if still pending (including post-payment race).
+      if (_docsGateBlocksTicket) {
+        if (_requirementsStatus == 'pending_review') return;
+        await _handleRequirementsFlow();
+        return;
+      }
+
       if (_isRegistered) {
         await _handleViewTicket();
         return;
@@ -941,7 +1178,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         }
       }
 
-      if (_requirementsRequired && !_requirementsApproved) {
+      if (_docsGateBlocksTicket) {
         await _handleRequirementsFlow();
         return;
       }
@@ -954,9 +1191,23 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   }
 
   String _primaryActionLabel() {
-    if (_isRegistered) return 'See Ticket';
-    if (_isRegistrationClosedForEvent()) return 'Registration Closed';
-    if (_requirementsRequired && !_requirementsApproved) {
+    final registrationPaused = _isRegistrationResolved &&
+        !_isRegistered &&
+        !_canRegisterNow &&
+        !_approvalRequired &&
+        !_needsRequirementsAction;
+    // Paid settle gate can show immediately even before full resolve.
+    if (_approvalRequired && !_canRegisterNow && !_isRegistered) {
+      return 'Settle Payment';
+    }
+    if (!_isRegistrationResolved) return 'Loading...';
+    if ((_isRegistrationClosedForEvent() || registrationPaused) &&
+        !_isRegistered) {
+      return 'Registration Closed';
+    }
+    // After payment, registration can flip true before docs flags land.
+    // Never flash See Ticket when this event has (or likely has) student docs.
+    if (_docsGateBlocksTicket) {
       if (_requirementsStatus == 'pending_review') {
         return 'Under Review';
       }
@@ -965,36 +1216,80 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       }
       return 'Submit Documents';
     }
+    if (_isRegistered) return 'See Ticket';
     if (_canRegisterNow) return 'Register';
-    if (_approvalRequired) return 'Approval Required';
-    if (_hasStudentRequirements && _requirementsRequired && !_requirementsApproved) {
-      return 'Submit Documents';
+    return 'Registration Closed';
+  }
+
+  /// Gold is reserved for See Ticket only — docs/register stay maroon.
+  bool get _isTicketPrimaryAction =>
+      _isRegistrationResolved &&
+      _isRegistered &&
+      !_docsGateBlocksTicket;
+
+  /// True when the student must finish docs before ticket — including the
+  /// short window right after payment where `_isRegistered` is already true
+  /// but `_requirementsRequired` has not been set yet.
+  bool get _docsGateBlocksTicket {
+    if (_requirementsApproved) return false;
+    if (_requirementsRequired && !_requirementsApproved) return true;
+    if (!_isRegistered) return false;
+    if (_hasStudentRequirements) return true;
+    final event = _event;
+    // Paid events almost always have docs in this product flow; fail closed
+    // to Submit Documents until the requirements list says otherwise.
+    if (event != null && !_eventLooksFree(event) && !_isRegistrationResolved) {
+      return true;
     }
-    if (!_isRegistrationResolved) return 'Loading...';
-    return 'Register';
+    return false;
   }
 
   IconData _primaryActionIcon() {
-    if (_isRegistered) return Icons.confirmation_num_rounded;
-    if (_isRegistrationClosedForEvent()) return Icons.lock_outline_rounded;
-    if (_requirementsRequired && !_requirementsApproved) {
+    if ((_isRegistrationClosedForEvent() ||
+            (_isRegistrationResolved &&
+                !_isRegistered &&
+                !_canRegisterNow &&
+                !_approvalRequired &&
+                !_needsRequirementsAction)) &&
+        !_isRegistered) {
+      return Icons.lock_outline_rounded;
+    }
+    if (_approvalRequired && !_canRegisterNow && !_isRegistered) {
+      return Icons.payments_outlined;
+    }
+    if (_docsGateBlocksTicket) {
       if (_requirementsStatus == 'pending_review') {
         return Icons.hourglass_top_rounded;
       }
       return Icons.upload_file_rounded;
     }
-    if (_approvalRequired) return Icons.lock_clock_rounded;
-    return Icons.how_to_reg_rounded;
+    if (_isRegistered) return Icons.confirmation_num_rounded;
+    if (_canRegisterNow) return Icons.how_to_reg_rounded;
+    return Icons.lock_outline_rounded;
   }
 
   bool get _needsRequirementsAction =>
       !_isRegistrationClosedForEvent() &&
-      _requirementsRequired &&
-      !_requirementsApproved &&
+      !_approvalRequired &&
+      _docsGateBlocksTicket &&
       _requirementsStatus != 'pending_review';
 
+  bool _eventLooksFree(Map<String, dynamic> event) {
+    final freeRaw =
+        (event['is_free_event'] ?? true).toString().trim().toLowerCase();
+    return freeRaw == 'true' ||
+        freeRaw == '1' ||
+        freeRaw == 't' ||
+        freeRaw == 'yes' ||
+        freeRaw == 'y' ||
+        event['is_free_event'] == true;
+  }
+
+  bool get _isDocumentsUnderReview =>
+      _docsGateBlocksTicket && _requirementsStatus == 'pending_review';
+
   Future<void> _handleRegister() async {
-    if (_requirementsRequired && !_requirementsApproved) {
+    if (_docsGateBlocksTicket) {
       await _handleRequirementsFlow();
       return;
     }
@@ -1244,29 +1539,32 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final startDate = parseStoredEventDateTime(startAt);
     final endDate = parseStoredEventDateTime(endAt);
 
-    final isRegistrationClosed = _isRegistrationClosedForEvent();
+    final isRegistrationClosed = _isRegistrationClosedForEvent() ||
+        (_isRegistrationResolved &&
+            !_isRegistered &&
+            !_canRegisterNow &&
+            !_approvalRequired &&
+            !_needsRequirementsAction);
     final isDeclinedDocs = _requirementsStatus == 'declined';
-    final registrationStatusLabel = _isRegistered
-        ? 'Registered'
-        : (isRegistrationClosed
-              ? 'Closed'
-              : (_requirementsRequired && !_requirementsApproved
-                    ? (_requirementsStatus == 'pending_review'
-                          ? 'Under Review'
-                          : (_requirementsStatus == 'declined'
-                                ? 'Docs Declined'
-                                : 'Docs Required'))
-                    : (_canRegisterNow
-                          ? 'Open'
-                          : (_approvalRequired
-                                ? 'Approval Required'
-                                : (_hasStudentRequirements &&
-                                        _requirementsRequired &&
-                                        !_requirementsApproved
-                                    ? 'Docs Required'
-                                    : (!_isRegistrationResolved
-                                          ? 'Checking...'
-                                          : 'Open'))))));
+    final registrationStatusLabel = (_approvalRequired &&
+            !_isRegistered &&
+            !_canRegisterNow)
+        ? 'Settle Payment'
+        : (_docsGateBlocksTicket
+              ? (_requirementsStatus == 'pending_review'
+                    ? 'Under Review'
+                    : (_requirementsStatus == 'declined'
+                          ? 'Docs Declined'
+                          : 'Docs Required'))
+              : (_isRegistered
+                    ? 'Registered'
+                    : (isRegistrationClosed
+                          ? 'Closed'
+                          : (_canRegisterNow
+                                ? 'Open'
+                                : (!_isRegistrationResolved
+                                      ? 'Checking...'
+                                      : 'Closed')))));
     final usesSessions =
         usesEventSessions(_event!) || _eventSessions.isNotEmpty;
     final canTapAction =
@@ -1274,18 +1572,34 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         !_isRegistering &&
         !_isPrimaryActionInProgress &&
         !_isOpeningRequirements &&
-        (_isRegistered ||
-            (!isRegistrationClosed &&
-                (_needsRequirementsAction ||
-                    (_isRegistrationResolved && _canRegisterNow) ||
-                    (_isRegistrationResolved &&
-                        _hasStudentRequirements &&
-                        _requirementsRequired &&
-                        !_requirementsApproved &&
-                        _requirementsStatus != 'pending_review'))));
+        !_isRefreshingEvent &&
+        _isRegistrationResolved &&
+        !_isDocumentsUnderReview &&
+        (
+          // See Ticket — only when docs are approved / not required
+          (_isRegistered && !_docsGateBlocksTicket) ||
+          // Submit / Resubmit documents (never while payment still required)
+          (_needsRequirementsAction && !_approvalRequired) ||
+          // Register only (settle payment stays non-tappable info CTA)
+          (!_isRegistered &&
+              !isRegistrationClosed &&
+              _canRegisterNow));
     final isActionDisabled =
-        !_isRegistered &&
-        (isRegistrationClosed || (!_canRegisterNow && !_needsRequirementsAction));
+        _isDocumentsUnderReview ||
+        !_isRegistrationResolved ||
+        (!_isRegistered &&
+            (isRegistrationClosed ||
+                (!_canRegisterNow && !_needsRequirementsAction)));
+    // Loader only when we truly don't know the CTA yet.
+    // If Settle Payment is already known, never keep an endless spinner.
+    final isCtaLoading = _isRegistering ||
+        _isPrimaryActionInProgress ||
+        _isOpeningRequirements ||
+        (!_isRegistrationResolved &&
+            !(_approvalRequired && !_canRegisterNow && !_isRegistered));
+    // Keep maroon while loading — gray is only for a truly unavailable action.
+    final useDisabledGradient =
+        isActionDisabled && !isCtaLoading && !_isTicketPrimaryAction;
 
     const coverExpandedHeight = 248.0;
     final topInset = MediaQuery.paddingOf(context).top;
@@ -1293,7 +1607,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
     return Scaffold(
       backgroundColor: Colors.white,
-      body: CustomScrollView(
+      body: ColoredBox(
+        color: Colors.white,
+        child: CustomScrollView(
+          clipBehavior: Clip.hardEdge,
           slivers: [
             SliverAppBar(
               expandedHeight: coverExpandedHeight,
@@ -1304,7 +1621,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
               forceElevated: false,
               shadowColor: Colors.transparent,
               surfaceTintColor: Colors.transparent,
-              backgroundColor: Colors.transparent,
+              backgroundColor: Colors.black,
               automaticallyImplyLeading: false,
               leadingWidth: 0,
               titleSpacing: 0,
@@ -1587,6 +1904,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           ),
         ],
       ),
+      ),
       // Bottom Register/Ticket Button
       bottomNavigationBar: Container(
         padding: const EdgeInsets.fromLTRB(24, 12, 24, 28),
@@ -1605,9 +1923,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           children: [
             if (_registrationMessage.isNotEmpty &&
                 !_isRegistered &&
-                (!_approvalRequired ||
+                (_approvalRequired ||
                     _requirementsRequired ||
-                    isRegistrationClosed)) ...[
+                    isRegistrationClosed ||
+                    !_canRegisterNow)) ...[
               Container(
                 width: double.infinity,
                 margin: const EdgeInsets.only(bottom: 12),
@@ -1673,9 +1992,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(16),
                   gradient: LinearGradient(
-                    colors: _isRegistered
+                    colors: _isTicketPrimaryAction
                         ? [const Color(0xFFD4A843), const Color(0xFFB8942F)]
-                        : (isActionDisabled
+                        : (useDisabledGradient
                               ? const [Color(0xFFE5E7EB), Color(0xFFD1D5DB)]
                               : [
                                   _studentDark(context),
@@ -1685,9 +2004,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                   boxShadow: [
                     BoxShadow(
                       color:
-                          (_isRegistered
+                          (_isTicketPrimaryAction
                                   ? const Color(0xFFD4A843)
-                                  : (isActionDisabled
+                                  : (useDisabledGradient
                                         ? const Color(0xFF9CA3AF)
                                         : _studentPrimary(context)))
                               .withValues(alpha: 0.3),
@@ -1697,7 +2016,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                   ],
                 ),
                 child: ElevatedButton(
-                  onPressed: canTapAction ? _handlePrimaryAction : null,
+                  // Avoid Material "disabled" gray styling on the loader —
+                  // use a no-op while loading so the maroon CTA stays branded.
+                  onPressed: canTapAction
+                      ? _handlePrimaryAction
+                      : (isCtaLoading ? () {} : null),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.transparent,
                     shadowColor: Colors.transparent,
@@ -1708,10 +2031,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                       borderRadius: BorderRadius.circular(16),
                     ),
                   ),
-                  child: (_isRegistering ||
-                          _isPrimaryActionInProgress ||
-                          _isOpeningRequirements ||
-                          (!_isRegistrationResolved && !_isRegistered))
+                  child: isCtaLoading
                       ? const PulseConnectLoader(size: 14, color: Colors.white)
                       : AnimatedSwitcher(
                           duration: const Duration(milliseconds: 280),
@@ -1719,9 +2039,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                           switchOutCurve: Curves.easeInCubic,
                           child: Row(
                             key: ValueKey(
-                              _isRegistered
+                              _isTicketPrimaryAction
                                   ? 'ticket_action'
-                                  : (_needsRequirementsAction
+                                  : (_needsRequirementsAction ||
+                                          (_requirementsRequired &&
+                                              !_requirementsApproved)
                                         ? 'requirements_action'
                                         : 'register_action'),
                             ),
@@ -2023,13 +2345,43 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         title: 'Event Type',
         value: eventType.isNotEmpty ? eventType : 'General Event',
       ),
+    ]);
+
+    final freeRaw = (event['is_free_event'] ?? true).toString().trim().toLowerCase();
+    final isFreeEvent = freeRaw == 'true' ||
+        freeRaw == '1' ||
+        freeRaw == 't' ||
+        freeRaw == 'yes' ||
+        freeRaw == 'y' ||
+        event['is_free_event'] == true;
+    final feeRaw = event['event_fee'];
+    double? fee;
+    if (feeRaw is num) {
+      fee = feeRaw.toDouble();
+    } else {
+      fee = double.tryParse(
+        (feeRaw?.toString() ?? '').trim().replaceAll(',', ''),
+      );
+    }
+    if (!isFreeEvent && fee != null && fee > 0) {
+      cards.add(
+        _buildScheduleInfoCard(
+          icon: Icons.payments_outlined,
+          title: 'Settlement Amount',
+          value: '₱${fee.toStringAsFixed(2)}',
+          subtitle: 'Pay this amount to the authorized person at school',
+        ),
+      );
+    }
+
+    cards.add(
       _buildScheduleInfoCard(
         icon: Icons.groups_rounded,
         title: 'Target Participants',
         value: _targetParticipantsLabel(eventFor),
         fullWidth: true,
       ),
-    ]);
+    );
 
     if (graceTime.isNotEmpty) {
       cards.add(
@@ -2178,12 +2530,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     if (normalized == 'none') return 'No Target';
     final rawUpper = value.trim().toUpperCase();
     final multi = RegExp(
-      r'^COURSE\s*=\s*(ALL|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
+      r'^COURSE\s*=\s*(ALL|BSIT-SD|BSIT-BA|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
     ).firstMatch(rawUpper);
     if (multi != null) {
-      final course = multi.group(1) == 'ALL'
+      final courseRaw = multi.group(1) ?? 'ALL';
+      final course = courseRaw == 'ALL'
           ? 'All Courses'
-          : (multi.group(1) ?? 'All Courses');
+          : (courseRaw == 'BSIT' ? 'BSIT (All)' : courseRaw);
       final yearsRaw = (multi.group(2) ?? '')
           .split(',')
           .map((e) => e.trim().toUpperCase())
@@ -2209,6 +2562,14 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         return '3rd Year Students';
       case '4':
         return '4th Year Students';
+      case 'bsit':
+        return 'BSIT (All)';
+      case 'bsit-sd':
+        return 'BSIT-SD';
+      case 'bsit-ba':
+        return 'BSIT-BA';
+      case 'bscs':
+        return 'BSCS';
       default:
         return value;
     }

@@ -118,26 +118,31 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
 
   Future<void> _handleLogin() async {
     if (!_formKey.currentState!.validate()) return;
+    if (_isLoading) return;
 
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
 
-    final result = await _authService.login(
-      _emailController.text,
-      _passwordController.text,
-      widget.role,
-    );
+    try {
+      final result = await _authService.login(
+        _emailController.text,
+        _passwordController.text,
+        widget.role,
+      );
 
-    setState(() => _isLoading = false);
+      if (!mounted) return;
+      setState(() => _isLoading = false);
 
-    if (result['ok'] == true) {
-      if (mounted) {
+      if (result['ok'] == true) {
         final userData = result['user'] as Map<String, dynamic>;
         final currentRole = userData['role'] as String? ?? 'student';
-        final needsVerification =
-            AuthService.requiresDailyEmailVerification(userData);
+        final gateReason =
+            await _authService.emailVerificationGateReason(userData);
+        final needsVerification = gateReason != null;
+        if (!mounted) return;
+
         final restoredOfflineQueueCount =
             (result['restored_offline_queue_count'] is num)
                 ? (result['restored_offline_queue_count'] as num).toInt()
@@ -156,7 +161,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
             (result['reconciled_offline_queue_count'] is num)
                 ? (result['reconciled_offline_queue_count'] as num).toInt()
                 : int.tryParse(
-                        result['reconciled_offline_queue_count']?.toString() ?? '',
+                        result['reconciled_offline_queue_count']?.toString() ??
+                            '',
                       ) ??
                     0;
         PulseConnectApp.of(context).updateTheme(
@@ -186,8 +192,11 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
               final slide = Tween<Offset>(
                 begin: const Offset(0.08, 0),
                 end: Offset.zero,
-              ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic));
-              final fade = CurvedAnimation(parent: animation, curve: Curves.easeOut);
+              ).animate(
+                CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
+              );
+              final fade =
+                  CurvedAnimation(parent: animation, curve: Curves.easeOut);
               return FadeTransition(
                 opacity: fade,
                 child: SlideTransition(position: slide, child: child),
@@ -195,7 +204,10 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
             },
             pageBuilder: (context, animation, secondaryAnimation) {
               if (needsVerification) {
-                return EmailVerificationScreen(user: userData);
+                return EmailVerificationScreen(
+                  user: userData,
+                  gateReason: gateReason,
+                );
               }
               return currentRole.toLowerCase() == 'teacher'
                   ? const TeacherHome()
@@ -204,9 +216,16 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           ),
           (route) => false,
         );
+      } else {
+        if (!mounted) return;
+        setState(() => _errorMessage = result['error'] as String?);
       }
-    } else {
-      setState(() => _errorMessage = result['error'] as String?);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _errorMessage = 'Something went wrong. Please try again.';
+      });
     }
   }
 

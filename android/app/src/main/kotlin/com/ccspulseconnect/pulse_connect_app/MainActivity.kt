@@ -1,10 +1,15 @@
 package com.ccspulseconnect.pulse_connect_app
 
+import android.app.Activity
 import android.content.ContentUris
 import android.content.ContentValues
+import android.content.Intent
+import android.database.Cursor
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.OpenableColumns
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -15,8 +20,14 @@ import java.io.IOException
 class MainActivity : FlutterActivity() {
     companion object {
         private const val OFFLINE_BACKUP_CHANNEL = "pulseconnect/offline_backup"
+        private const val DOCUMENT_PICKER_CHANNEL = "pulseconnect/document_picker"
         private const val AUTO_BACKUP_FOLDER = "PulseConnect"
+        private const val REQUEST_PICK_DOCUMENT = 0x5043 // 'PC'
+        private const val DEFAULT_MAX_BYTES = 15L * 1024L * 1024L
     }
+
+    private var pendingDocumentResult: MethodChannel.Result? = null
+    private var pendingMaxBytes: Long = DEFAULT_MAX_BYTES
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -31,6 +42,139 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            DOCUMENT_PICKER_CHANNEL
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "pickDocument" -> pickDocument(call, result)
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun pickDocument(call: MethodCall, result: MethodChannel.Result) {
+        if (pendingDocumentResult != null) {
+            result.error("busy", "A file picker is already open.", null)
+            return
+        }
+
+        pendingMaxBytes = when (val raw = call.argument<Any>("maxBytes")) {
+            is Number -> raw.toLong().coerceAtLeast(1024L)
+            else -> DEFAULT_MAX_BYTES
+        }
+        pendingDocumentResult = result
+
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf(
+                    "application/pdf",
+                    "application/msword",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "image/jpeg",
+                    "image/png",
+                    "image/webp",
+                    "image/*",
+                ),
+            )
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        try {
+            startActivityForResult(intent, REQUEST_PICK_DOCUMENT)
+        } catch (e: Exception) {
+            pendingDocumentResult = null
+            result.error("picker_failed", e.message ?: "Unable to open file picker.", null)
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode != REQUEST_PICK_DOCUMENT) {
+            super.onActivityResult(requestCode, resultCode, data)
+            return
+        }
+
+        val reply = pendingDocumentResult
+        pendingDocumentResult = null
+        if (reply == null) {
+            super.onActivityResult(requestCode, resultCode, data)
+            return
+        }
+
+        if (resultCode != Activity.RESULT_OK || data?.data == null) {
+            reply.success(null)
+            return
+        }
+
+        try {
+            val uri = data.data!!
+            val displayName = queryDisplayName(uri) ?: "document"
+            val safeName = sanitizeFileName(displayName)
+            val cacheDir = File(cacheDir, "requirement_uploads").apply { mkdirs() }
+            val dest = File(cacheDir, "${System.currentTimeMillis()}_$safeName")
+
+            contentResolver.openInputStream(uri)?.use { input ->
+                dest.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var total = 0L
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read <= 0) break
+                        total += read
+                        if (total > pendingMaxBytes) {
+                            dest.delete()
+                            reply.error(
+                                "too_large",
+                                "File is too large. Max 15 MB.",
+                                null,
+                            )
+                            return
+                        }
+                        output.write(buffer, 0, read)
+                    }
+                    output.flush()
+                }
+            } ?: throw IOException("Unable to open selected file.")
+
+            reply.success(
+                hashMapOf(
+                    "path" to dest.absolutePath,
+                    "name" to safeName,
+                    "size" to dest.length(),
+                ),
+            )
+        } catch (e: Exception) {
+            reply.error("copy_failed", e.message ?: "Unable to read selected file.", null)
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        var cursor: Cursor? = null
+        return try {
+            cursor = contentResolver.query(uri, null, null, null, null)
+            if (cursor != null && cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0) cursor.getString(index) else null
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        } finally {
+            cursor?.close()
+        }
+    }
+
+    private fun sanitizeFileName(name: String): String {
+        val cleaned = name.trim().replace(Regex("[\\\\/:*?\"<>|]"), "_")
+        if (cleaned.isEmpty() || cleaned == "." || cleaned == "..") {
+            return "document.bin"
+        }
+        return cleaned.take(120)
     }
 
     private fun writeBackupFileAuto(call: MethodCall, result: MethodChannel.Result) {

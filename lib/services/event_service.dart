@@ -2,6 +2,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:async';
 import 'dart:math';
 import 'dart:convert';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -13,6 +14,7 @@ import 'app_cache_service.dart';
 class EventService {
   final _supabase = Supabase.instance.client;
   final AppCacheService _appCache = AppCacheService();
+  static final Connectivity _connectivity = Connectivity();
   static const Duration _manilaOffset = Duration(hours: 8);
   final Map<String, bool> _eventSessionColumnSupport = {};
   final Map<String, bool> _attendanceColumnSupport = {};
@@ -29,9 +31,9 @@ class EventService {
   static const Duration _eventSessionsTtl = Duration(seconds: 60);
   static const Duration _eventRegistrationSettingsTtl = Duration(seconds: 30);
   static const String _eventListColumns =
-      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_structure,event_mode,event_for,allow_registration,cover_image_url,location,event_type,grace_time,registration_limit,is_free_event,registration_close_weeks';
+      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_structure,event_mode,event_for,allow_registration,cover_image_url,location,event_type,grace_time,registration_limit,is_free_event,event_fee,registration_close_weeks,registration_close_extend_days';
   static const String _eventListColumnsFallback =
-      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for,cover_image_url,location,event_type';
+      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for,cover_image_url,location,event_type,is_free_event,event_fee';
   static const String _eventListColumnsMinimal =
       'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for';
 
@@ -55,6 +57,41 @@ class EventService {
     _listCache.removeWhere((key, _) => key.startsWith(prefix));
     AppCacheService().invalidateMemoryPrefix(prefix);
     AppCacheService().cancelInFlightPrefix('fetch:$prefix');
+  }
+
+  /// Link-level offline check. On errors, assume offline so we keep caches.
+  static Future<bool> isLikelyOffline() async {
+    try {
+      final results = await _connectivity.checkConnectivity();
+      return results.isEmpty ||
+          results.every((result) => result == ConnectivityResult.none);
+    } catch (_) {
+      return true;
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> _preferExistingCacheIfEmpty(
+    String cacheKey,
+    List<Map<String, dynamic>> fresh,
+  ) async {
+    if (fresh.isNotEmpty) return fresh;
+
+    final staleMem = _readListCache(
+      cacheKey,
+      const Duration(days: 7),
+      allowStale: true,
+      staleTtl: const Duration(days: 7),
+    );
+    if (staleMem != null && staleMem.isNotEmpty) {
+      return staleMem;
+    }
+
+    final disk = await _appCache.loadJsonList(cacheKey);
+    if (disk.isNotEmpty) {
+      _writeListCache(cacheKey, disk);
+      return disk;
+    }
+    return fresh;
   }
 
   void invalidateEventDetailCache(String eventId) {
@@ -2208,7 +2245,30 @@ class EventService {
     );
   }
 
-  String _normalizeTargetCourse(String? rawCourse) {
+  String _normalizeEventTargetCourse(String? rawCourse) {
+    final normalized = (rawCourse ?? '').trim().toUpperCase();
+    if (normalized.isEmpty) return 'ALL';
+
+    final compact = normalized.replaceAll(RegExp(r'[^A-Z0-9]'), '');
+    if (compact == 'BSITSD') return 'BSIT-SD';
+    if (compact == 'BSITBA') return 'BSIT-BA';
+    if (normalized == 'BSIT-SD' || normalized == 'BSIT_SD') return 'BSIT-SD';
+    if (normalized == 'BSIT-BA' || normalized == 'BSIT_BA') return 'BSIT-BA';
+    if (compact == 'BSIT' || compact == 'IT') return 'BSIT';
+    if (compact == 'BSCS' || compact == 'CS') return 'BSCS';
+    if (compact == 'ALL' ||
+        compact == 'NONE' ||
+        compact == 'ALLLEVELS' ||
+        compact == 'ALLYEARLEVEL' ||
+        compact == 'ALLYEARLEVELS' ||
+        compact == 'ALLCOURSES') {
+      return 'ALL';
+    }
+
+    return compact;
+  }
+
+  String _normalizeStudentCourse(String? rawCourse) {
     final normalized = (rawCourse ?? '').trim().toUpperCase();
     if (normalized.isEmpty) return 'ALL';
 
@@ -2230,8 +2290,37 @@ class EventService {
       return 'BSCS';
     }
 
-    // Preserve non-IT/CS course codes (e.g., BECC) for strict matching.
     return compact;
+  }
+
+  String _extractStudentSpecialization(String? sectionName) {
+    final name = (sectionName ?? '').trim().toUpperCase();
+    if (name.isEmpty) return '';
+    if (RegExp(r'\bBSIT\s*[-_]?\s*SD\b').hasMatch(name)) return 'SD';
+    if (RegExp(r'\bBSIT\s*[-_]?\s*BA\b').hasMatch(name)) return 'BA';
+    return '';
+  }
+
+  bool _studentCourseMatchesTarget({
+    required String studentCourse,
+    required String studentSpec,
+    required String targetCourse,
+  }) {
+    final target = _normalizeEventTargetCourse(targetCourse);
+    if (target == 'ALL') return true;
+    if (target == 'BSIT-SD') {
+      return studentCourse == 'BSIT' && studentSpec == 'SD';
+    }
+    if (target == 'BSIT-BA') {
+      return studentCourse == 'BSIT' && studentSpec == 'BA';
+    }
+    if (target == 'BSIT') return studentCourse == 'BSIT';
+    if (target == 'BSCS') return studentCourse == 'BSCS';
+    return studentCourse.isNotEmpty && studentCourse == target;
+  }
+
+  String _normalizeTargetCourse(String? rawCourse) {
+    return _normalizeStudentCourse(rawCourse);
   }
 
   String _normalizeTargetYear(String? rawYear) {
@@ -2256,10 +2345,10 @@ class EventService {
     }
 
     final multi = RegExp(
-      r'^COURSE\s*=\s*(ALL|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
+      r'^COURSE\s*=\s*(ALL|BSIT-SD|BSIT-BA|BSIT|BSCS)\s*;\s*YEARS\s*=\s*([0-9,\sA-Z]+)$',
     ).firstMatch(raw);
     if (multi != null) {
-      final course = _normalizeTargetCourse(multi.group(1));
+      final course = _normalizeEventTargetCourse(multi.group(1));
       final yearsRaw = (multi.group(2) ?? '')
           .split(',')
           .map((e) => e.trim().toUpperCase())
@@ -2271,10 +2360,10 @@ class EventService {
       return {'course': course, 'years': years};
     }
 
-    final pair = RegExp(r'^([A-Z0-9]+)\s*[-_|]\s*([1-4])$').firstMatch(raw);
+    final pair = RegExp(r'^(BSIT|BSCS)\s*[-_|]\s*([1-4])$').firstMatch(raw);
     if (pair != null) {
       return {
-        'course': _normalizeTargetCourse(pair.group(1)),
+        'course': _normalizeStudentCourse(pair.group(1)),
         'years': <String>[pair.group(2) ?? 'ALL'],
       };
     }
@@ -2287,7 +2376,7 @@ class EventService {
     }
 
     return {
-      'course': _normalizeTargetCourse(raw),
+      'course': _normalizeEventTargetCourse(raw),
       'years': const <String>['ALL'],
     };
   }
@@ -2296,6 +2385,7 @@ class EventService {
     Map<String, dynamic> event, {
     String? yearLevel,
     String? courseCode,
+    String? specialization,
   }) {
     final target = _decodeEventTarget(event['event_for']);
     final targetCourse = (target['course'] as String?) ?? 'ALL';
@@ -2304,12 +2394,15 @@ class EventService {
         .where((e) => e.isNotEmpty)
         .toList();
 
-    final studentCourse = _normalizeTargetCourse(courseCode);
+    final studentCourse = _normalizeStudentCourse(courseCode);
+    final studentSpec = (specialization ?? '').trim().toUpperCase();
     final studentYear = _normalizeTargetYear(yearLevel);
 
-    final courseMatches = targetCourse == 'ALL'
-        ? true
-        : (studentCourse != 'ALL' && targetCourse == studentCourse);
+    final courseMatches = _studentCourseMatchesTarget(
+      studentCourse: studentCourse,
+      studentSpec: studentSpec,
+      targetCourse: targetCourse,
+    );
     final yearMatches = (targetYears.length == 1 && targetYears.first == 'ALL')
         ? true
         : (studentYear != 'ALL' && targetYears.contains(studentYear));
@@ -2339,11 +2432,12 @@ class EventService {
   Future<Map<String, String>> getStudentTargetScope(String userId) async {
     final trimmedUserId = userId.trim();
     if (trimmedUserId.isEmpty) {
-      return {'courseCode': 'ALL', 'yearLevel': 'ALL'};
+      return {'courseCode': 'ALL', 'yearLevel': 'ALL', 'specialization': ''};
     }
 
     String courseCode = 'ALL';
     String yearLevel = 'ALL';
+    String specialization = '';
     String sectionId = '';
 
     try {
@@ -2362,17 +2456,18 @@ class EventService {
             .limit(1);
       }
 
-      if ((rows as List).isNotEmpty) {
+        if ((rows as List).isNotEmpty) {
         final row = Map<String, dynamic>.from(rows.first as Map);
-        courseCode = _normalizeTargetCourse(row['course']?.toString());
+        courseCode = _normalizeStudentCourse(row['course']?.toString());
         yearLevel = _normalizeStudentYearFromRaw(row['year_level']);
         sectionId = row['section_id']?.toString().trim() ?? '';
+        specialization = _extractStudentSpecialization(row['course']?.toString());
       }
     } catch (_) {
       // Fall back to defaults.
     }
 
-    if (sectionId.isNotEmpty && (courseCode == 'ALL' || yearLevel == 'ALL')) {
+    if (sectionId.isNotEmpty) {
       try {
         final rows = await _supabase
             .from('sections')
@@ -2382,37 +2477,50 @@ class EventService {
         if ((rows as List).isNotEmpty) {
           final sectionName = rows.first['name']?.toString() ?? '';
           if (courseCode == 'ALL') {
-            courseCode = _normalizeTargetCourse(sectionName);
+            courseCode = _normalizeStudentCourse(sectionName);
           }
           if (yearLevel == 'ALL') {
             yearLevel = _normalizeStudentYearFromRaw(sectionName);
+          }
+          final sectionSpec = _extractStudentSpecialization(sectionName);
+          if (sectionSpec.isNotEmpty) {
+            specialization = sectionSpec;
           }
         }
       } catch (_) {
         // Keep best-effort values.
       }
+    } else if (courseCode == 'ALL' || yearLevel == 'ALL') {
+      // Legacy path when section_id missing.
     }
 
-    return {'courseCode': courseCode, 'yearLevel': yearLevel};
+    return {
+      'courseCode': courseCode,
+      'yearLevel': yearLevel,
+      'specialization': specialization,
+    };
   }
 
   bool isStudentAllowedForEvent(
     Map<String, dynamic> event, {
     String? yearLevel,
     String? courseCode,
+    String? specialization,
   }) {
     return _matchesEventTarget(
       event,
       yearLevel: yearLevel,
       courseCode: courseCode,
+      specialization: specialization,
     );
   }
 
-  // Helper to filter events by target participant scope (course + year)
+  // Helper to filter events by target participant scope (course + year + spec)
   List<Map<String, dynamic>> _filterByTargetParticipant(
     List<Map<String, dynamic>> events, {
     String? yearLevel,
     String? courseCode,
+    String? specialization,
   }) {
     return events
         .where(
@@ -2420,6 +2528,7 @@ class EventService {
             event,
             yearLevel: yearLevel,
             courseCode: courseCode,
+            specialization: specialization,
           ),
         )
         .toList();
@@ -2431,10 +2540,11 @@ class EventService {
   Future<List<Map<String, dynamic>>> getActiveEvents({
     String? yearLevel,
     String? courseCode,
+    String? specialization,
     bool forceFresh = false,
   }) async {
     final cacheKey =
-        'active:v2:${yearLevel ?? ''}:${courseCode ?? ''}';
+        'active:v5:${yearLevel ?? ''}:${courseCode ?? ''}:${specialization ?? ''}';
     if (!forceFresh) {
       final cached = _readListCache(cacheKey, _activeEventsTtl);
       if (cached != null) {
@@ -2452,6 +2562,7 @@ class EventService {
             cacheKey,
             yearLevel: yearLevel,
             courseCode: courseCode,
+            specialization: specialization,
           ),
         );
         return stale;
@@ -2465,6 +2576,7 @@ class EventService {
             cacheKey,
             yearLevel: yearLevel,
             courseCode: courseCode,
+            specialization: specialization,
           ),
         );
         return diskCached;
@@ -2477,6 +2589,7 @@ class EventService {
         cacheKey,
         yearLevel: yearLevel,
         courseCode: courseCode,
+        specialization: specialization,
       ),
       forceFresh: forceFresh,
     );
@@ -2486,6 +2599,7 @@ class EventService {
     String cacheKey, {
     String? yearLevel,
     String? courseCode,
+    String? specialization,
   }) async {
     try {
       final now = DateTime.now().toUtc().toIso8601String();
@@ -2495,10 +2609,23 @@ class EventService {
         list,
         yearLevel: yearLevel,
         courseCode: courseCode,
+        specialization: specialization,
       );
-      _writeListCache(cacheKey, filtered);
-      await _appCache.saveJsonList(cacheKey, filtered);
-      return filtered;
+
+      // Sudden disconnect can look "online" but return empty / partial data.
+      // Never wipe a warm offline cache with an empty refresh while offline.
+      final offline = await isLikelyOffline();
+      var toStore = filtered;
+      if (filtered.isEmpty && offline) {
+        toStore = await _preferExistingCacheIfEmpty(cacheKey, filtered);
+      }
+      _writeListCache(cacheKey, toStore);
+      await _appCache.saveJsonList(
+        cacheKey,
+        toStore,
+        preserveNonEmptyOnEmpty: offline,
+      );
+      return toStore;
     } catch (e) {
       final stale = _readListCache(
         cacheKey,
@@ -2506,10 +2633,13 @@ class EventService {
         allowStale: true,
         staleTtl: const Duration(hours: 24),
       );
-      if (stale != null) {
+      if (stale != null && stale.isNotEmpty) {
         return stale;
       }
       final diskCached = await _appCache.loadJsonList(cacheKey);
+      if (diskCached.isNotEmpty) {
+        _writeListCache(cacheKey, diskCached);
+      }
       return diskCached;
     }
   }
@@ -2543,10 +2673,93 @@ class EventService {
     }
   }
 
+  /// Calendar markers only: published + approved (ready to publish), not ended.
+  /// Do not use this for Active/Upcoming lists — those stay published-only.
+  Future<List<Map<String, dynamic>>> getCalendarEvents({
+    String? yearLevel,
+    String? courseCode,
+    String? specialization,
+    bool forceFresh = false,
+  }) async {
+    final cacheKey =
+        'calendar:v1:${yearLevel ?? ''}:${courseCode ?? ''}:${specialization ?? ''}';
+    if (!forceFresh) {
+      final cached = _readListCache(cacheKey, _activeEventsTtl);
+      if (cached != null) return cached;
+    }
+
+    return _appCache.fetchOnce(
+      'fetch:$cacheKey',
+      () => _fetchCalendarEvents(
+        cacheKey,
+        yearLevel: yearLevel,
+        courseCode: courseCode,
+        specialization: specialization,
+      ),
+      forceFresh: forceFresh,
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchCalendarEvents(
+    String cacheKey, {
+    String? yearLevel,
+    String? courseCode,
+    String? specialization,
+  }) async {
+    try {
+      final now = DateTime.now().toUtc().toIso8601String();
+      List<dynamic> response;
+      try {
+        response = await _supabase
+            .from('events')
+            .select(_eventListColumns)
+            .inFilter('status', ['published', 'approved'])
+            .gte('end_at', now)
+            .order('start_at', ascending: true);
+      } catch (_) {
+        try {
+          response = await _supabase
+              .from('events')
+              .select(_eventListColumnsFallback)
+              .inFilter('status', ['published', 'approved'])
+              .gte('end_at', now)
+              .order('start_at', ascending: true);
+        } catch (_) {
+          response = await _supabase
+              .from('events')
+              .select(_eventListColumnsMinimal)
+              .inFilter('status', ['published', 'approved'])
+              .gte('end_at', now)
+              .order('start_at', ascending: true);
+        }
+      }
+
+      final list = List<Map<String, dynamic>>.from(response);
+      final filtered = _filterByTargetParticipant(
+        list,
+        yearLevel: yearLevel,
+        courseCode: courseCode,
+        specialization: specialization,
+      );
+      _writeListCache(cacheKey, filtered);
+      await _appCache.saveJsonList(cacheKey, filtered);
+      return filtered;
+    } catch (_) {
+      final stale = _readListCache(
+        cacheKey,
+        _activeEventsTtl,
+        allowStale: true,
+        staleTtl: const Duration(hours: 24),
+      );
+      return stale ?? <Map<String, dynamic>>[];
+    }
+  }
+
   // Get expired events (already ended)
   Future<List<Map<String, dynamic>>> getExpiredEvents({
     String? yearLevel,
     String? courseCode,
+    String? specialization,
   }) async {
     try {
       final now = DateTime.now().toUtc().toIso8601String();
@@ -2561,6 +2774,7 @@ class EventService {
         list,
         yearLevel: yearLevel,
         courseCode: courseCode,
+        specialization: specialization,
       );
     } catch (e) {
       return [];
@@ -2571,6 +2785,7 @@ class EventService {
   Future<List<Map<String, dynamic>>> getUpcomingEvents({
     String? yearLevel,
     String? courseCode,
+    String? specialization,
   }) async {
     try {
       final now = DateTime.now().toUtc().toIso8601String();
@@ -2588,6 +2803,7 @@ class EventService {
         list,
         yearLevel: yearLevel,
         courseCode: courseCode,
+        specialization: specialization,
       );
       return filtered.take(5).toList();
     } catch (e) {
@@ -3513,21 +3729,33 @@ class EventService {
     return paymentStatus == 'paid' || paymentStatus == 'waived';
   }
 
+  bool _eventIsFreeRegistrationEvent(Map<String, dynamic> event) {
+    return _asRegistrationBool(event['is_free_event'] ?? true);
+  }
+
+  double? _normalizeEventFee(dynamic value) {
+    if (value == null) return null;
+    if (value is num) {
+      final fee = value.toDouble();
+      return fee >= 0 ? fee : null;
+    }
+    final raw = value.toString().trim().replaceAll(',', '');
+    if (raw.isEmpty) return null;
+    final fee = double.tryParse(raw);
+    if (fee == null || fee < 0) return null;
+    return fee;
+  }
+
   bool _eventRegistrationOpenToAll(Map<String, dynamic> event) {
-    if (_asRegistrationBool(event['allow_registration'])) {
-      return true;
-    }
-
-    if (!_asRegistrationBool(event['is_free_event'] ?? true)) {
-      return false;
-    }
-
-    final status = (event['status']?.toString() ?? '').trim().toLowerCase();
-    return status == 'published';
+    // Driven only by the Allow Registration toggle (mirrors web).
+    return _asRegistrationBool(event['allow_registration']);
   }
 
   Future<Map<String, dynamic>?> _fetchRegistrationEvent(String eventId) async {
     const selectAttempts = [
+      'id,status,event_for,start_at,allow_registration,is_free_event,event_fee,registration_limit,registration_close_weeks,registration_close_extend_days,registered_count',
+      'id,status,event_for,start_at,allow_registration,is_free_event,registration_limit,registration_close_weeks,registration_close_extend_days,registered_count',
+      'id,status,event_for,start_at,allow_registration,is_free_event,event_fee,registration_limit,registration_close_weeks,registered_count',
       'id,status,event_for,start_at,allow_registration,is_free_event,registration_limit,registration_close_weeks,registered_count',
       'id,status,event_for,start_at,allow_registration,is_free_event,registration_limit,registered_count',
       'id,status,event_for,start_at,allow_registration,is_free_event,registration_limit,registration_close_weeks',
@@ -3553,6 +3781,7 @@ class EventService {
         event.putIfAbsent('is_free_event', () => true);
         event.putIfAbsent('registration_limit', () => null);
         event.putIfAbsent('registration_close_weeks', () => null);
+        event.putIfAbsent('registration_close_extend_days', () => 0);
         return event;
       } catch (_) {
         continue;
@@ -3569,10 +3798,7 @@ class EventService {
   }) async {
     // Local/Supabase only — hosted mobile_event_registration_info.php regularly
     // times out on device and was blocking Event Details for seconds on every open.
-    final documentGate = await _fetchStudentDocumentAccessGate(
-      eventId,
-      studentId,
-    );
+    // Defer document-gate fetch until after paid settle-payment check.
 
     final event = preloadedEvent != null
         ? Map<String, dynamic>.from(preloadedEvent)
@@ -3619,7 +3845,9 @@ class EventService {
         'targetAllowed': false,
         'approvalRequired': false,
         'registrationOpenToAll': false,
-        'message': 'Registration is currently closed.',
+        'message': status == 'approved'
+            ? 'This event is approved and will open for registration once published.'
+            : 'Registration is currently closed.',
       };
     }
 
@@ -3628,6 +3856,7 @@ class EventService {
       event,
       yearLevel: studentScope['yearLevel'],
       courseCode: studentScope['courseCode'],
+      specialization: studentScope['specialization'],
     );
     if (!targetAllowed) {
       return {
@@ -3659,12 +3888,137 @@ class EventService {
       };
     }
 
+    final isPaidEvent = !_eventIsFreeRegistrationEvent(event);
+    final openToAll = _eventRegistrationOpenToAll(event);
+
+    // Free events only: Allow Registration OFF pauses signup.
+    // Paid events always go through settle-payment first (below), even if
+    // Allow Registration is ON — never jump straight to Submit Documents.
+    if (!isPaidEvent && !openToAll) {
+      return {
+        'allowed': false,
+        'targetAllowed': true,
+        'approvalRequired': false,
+        'paymentRequired': false,
+        'isPaidEvent': false,
+        'registrationOpenToAll': false,
+        'message': 'Registration is currently closed by the organizer.',
+      };
+    }
+
+    // Paid: Payments → settle → docs → ticket (always, regardless of Allow Registration).
+    // Check payment BEFORE document gate so Event Details CTA isn't blocked by a hung docs fetch.
+    if (isPaidEvent) {
+      Map<String, dynamic>? accessRow;
+      try {
+        final accessRows = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('event_registration_access')
+              .select('approved,payment_status,payment_note,amount_paid,updated_at')
+              .eq('event_id', eventId)
+              .eq('student_id', studentId)
+              .order('updated_at', ascending: false)
+              .limit(1),
+        );
+        if (accessRows.isNotEmpty) {
+          accessRow = Map<String, dynamic>.from(accessRows.first);
+        }
+      } catch (_) {
+        try {
+          final accessRows = List<Map<String, dynamic>>.from(
+            await _supabase
+                .from('event_registration_access')
+                .select('approved,payment_status,payment_note,updated_at')
+                .eq('event_id', eventId)
+                .eq('student_id', studentId)
+                .order('updated_at', ascending: false)
+                .limit(1),
+          );
+          if (accessRows.isNotEmpty) {
+            accessRow = Map<String, dynamic>.from(accessRows.first);
+          }
+        } catch (_) {
+          // Fail closed for paid / payment-gated registration.
+        }
+      }
+
+      final paymentCleared = (accessRow != null &&
+              _registrationAccessRowAllows(accessRow)) ||
+          await _hasServerApprovedRegistrationSignal(studentId, eventId) ||
+          await hasCachedApprovedRegistrationAccess(studentId, eventId);
+
+      if (!paymentCleared) {
+        final fee = _normalizeEventFee(event['event_fee']);
+        final feeText = fee == null ? '' : '₱${fee.toStringAsFixed(2)}';
+        var message =
+            'Settle your payment first with the authorized person assigned for this event.';
+        if (feeText.isNotEmpty) {
+          message =
+              'Settle $feeText with the authorized person assigned for this event before you can continue.';
+        }
+        return {
+          'allowed': false,
+          'targetAllowed': true,
+          'approvalRequired': true,
+          'paymentRequired': true,
+          'paymentCleared': false,
+          'isPaidEvent': true,
+          'eventFee': fee,
+          'registrationOpenToAll': openToAll,
+          'requirementsRequired': false,
+          'message': message,
+        };
+      }
+
+      await cacheApprovedRegistrationAccess(studentId, eventId);
+
+      // Only fetch document gate after payment is cleared.
+      final paidDocumentGate =
+          await _fetchStudentDocumentAccessGate(eventId, studentId);
+
+      if (paidDocumentGate != null &&
+          paidDocumentGate['requirementsApproved'] != true) {
+        return {
+          'allowed': false,
+          'targetAllowed': true,
+          'approvalRequired': false,
+          'paymentRequired': false,
+          'paymentCleared': true,
+          'isPaidEvent': true,
+          'registrationOpenToAll': openToAll,
+          'requirementsRequired':
+              paidDocumentGate['requirementsRequired'] == true,
+          'requirementsComplete':
+              paidDocumentGate['requirementsComplete'] == true,
+          'requirementsApproved': false,
+          'requirementsStatus': paidDocumentGate['requirementsStatus'] ?? '',
+          'requirementsDeclineReason':
+              paidDocumentGate['requirementsDeclineReason'] ?? '',
+          'message': (paidDocumentGate['message'] as String? ?? '').trim(),
+        };
+      }
+
+      return {
+        'allowed': true,
+        'targetAllowed': true,
+        'approvalRequired': false,
+        'paymentRequired': false,
+        'paymentCleared': true,
+        'isPaidEvent': true,
+        'registrationOpenToAll': openToAll,
+        'message': '',
+      };
+    }
+
+    // Free / open registration: documents gate as before.
+    final documentGate =
+        await _fetchStudentDocumentAccessGate(eventId, studentId);
     if (documentGate != null && documentGate['requirementsApproved'] != true) {
       return {
         'allowed': false,
         'targetAllowed': true,
         'approvalRequired': false,
-        'registrationOpenToAll': _eventRegistrationOpenToAll(event),
+        'registrationOpenToAll': true,
         'requirementsRequired': documentGate['requirementsRequired'] == true,
         'requirementsComplete': documentGate['requirementsComplete'] == true,
         'requirementsApproved': false,
@@ -3675,71 +4029,12 @@ class EventService {
       };
     }
 
-    if (_eventRegistrationOpenToAll(event)) {
-      return {
-        'allowed': true,
-        'targetAllowed': true,
-        'approvalRequired': false,
-        'registrationOpenToAll': true,
-        'message': '',
-      };
-    }
-
-    try {
-      final accessRows = List<Map<String, dynamic>>.from(
-        await _supabase
-            .from('event_registration_access')
-            .select('approved,payment_status,payment_note,updated_at')
-            .eq('event_id', eventId)
-            .eq('student_id', studentId)
-            .order('updated_at', ascending: false)
-            .limit(1),
-      );
-
-      if (accessRows.isNotEmpty) {
-        final accessRow = Map<String, dynamic>.from(accessRows.first);
-        if (_registrationAccessRowAllows(accessRow)) {
-          await cacheApprovedRegistrationAccess(studentId, eventId);
-          return {
-            'allowed': true,
-            'targetAllowed': true,
-            'approvalRequired': false,
-            'registrationOpenToAll': false,
-            'message': '',
-          };
-        }
-      }
-    } catch (_) {
-      // If the approval table is unavailable, stay fail-closed for controlled registration.
-    }
-
-    if (await _hasServerApprovedRegistrationSignal(studentId, eventId)) {
-      await cacheApprovedRegistrationAccess(studentId, eventId);
-      return {
-        'allowed': true,
-        'targetAllowed': true,
-        'approvalRequired': false,
-        'registrationOpenToAll': false,
-        'message': '',
-      };
-    }
-
-    if (await hasCachedApprovedRegistrationAccess(studentId, eventId)) {
-      return {
-        'allowed': true,
-        'targetAllowed': true,
-        'approvalRequired': false,
-        'registrationOpenToAll': false,
-        'message': '',
-      };
-    }
-
     return {
-      'allowed': false,
+      'allowed': true,
       'targetAllowed': true,
-      'approvalRequired': true,
-      'registrationOpenToAll': false,
-      'message': 'Registration requires payment approval first.',
+      'approvalRequired': false,
+      'registrationOpenToAll': true,
+      'message': '',
     };
   }
 
@@ -3927,65 +4222,101 @@ class EventService {
     bool forceFresh = false,
   }) async {
     final cacheKey = 'tickets:$userId';
+    if (!forceFresh) {
+      final memCached = await _appCache.loadJsonList(cacheKey);
+      // Prefer warm memory/disk so offline reopen stays populated.
+      if (memCached.isNotEmpty) {
+        final age = await _appCache.lastUpdatedAt(cacheKey);
+        final isFresh = age != null &&
+            DateTime.now().toUtc().difference(age.toUtc()) <= _ticketsTtl;
+        if (isFresh) {
+          return memCached;
+        }
+        unawaited(_fetchAndPersistMyTickets(userId, cacheKey));
+        return memCached;
+      }
+    }
+
     return _appCache.fetchOnce(
-      cacheKey,
-      () => _fetchMyTickets(userId),
-      ttl: _ticketsTtl,
+      'fetch:$cacheKey',
+      () => _fetchAndPersistMyTickets(userId, cacheKey),
       forceFresh: forceFresh,
     );
   }
 
-  Future<List<Map<String, dynamic>>> _fetchMyTickets(String userId) async {
+  Future<List<Map<String, dynamic>>> _fetchAndPersistMyTickets(
+    String userId,
+    String cacheKey,
+  ) async {
     try {
-      final response = await _supabase
-          .from('event_registrations')
-          .select('*, events(*), tickets(*, attendance(*))')
-          .eq('student_id', userId)
-          .order('registered_at', ascending: false);
-      final rows = List<Map<String, dynamic>>.from(response);
-
-      // Best-effort: if a registration exists but its ticket row was deleted
-      // (common during manual DB cleanup), recreate the missing ticket so the
-      // student can still "See Ticket" from My Tickets.
-      for (final reg in rows) {
-        final regId = reg['id']?.toString() ?? '';
-        if (regId.isEmpty) continue;
-
-        final ticketData = reg['tickets'];
-        final existingTicketId = ticketData is List && ticketData.isNotEmpty
-            ? (ticketData.first['id'] ?? '').toString()
-            : ticketData is Map
-            ? (ticketData['id'] ?? '').toString()
-            : '';
-        if (existingTicketId.trim().isNotEmpty) continue;
-
-        try {
-          final token = _generateToken();
-          final ticketRes = await _supabase
-              .from('tickets')
-              .insert({'registration_id': regId, 'token': token})
-              .select()
-              .single();
-          final ticketId = ticketRes['id']?.toString() ?? '';
-          if (ticketId.isNotEmpty) {
-            reg['tickets'] = [ticketRes];
-            // Bootstrap attendance is best-effort only.
-            try {
-              await _supabase.from('attendance').insert({
-                'ticket_id': ticketId,
-                'status': 'unscanned',
-              });
-            } catch (_) {}
-          }
-        } catch (_) {
-          // If ticket recreate fails due to policy/schema, skip silently.
-        }
+      final rows = await _fetchMyTickets(userId);
+      final offline = await isLikelyOffline();
+      var toStore = rows;
+      if (rows.isEmpty && offline) {
+        toStore = await _preferExistingCacheIfEmpty(cacheKey, rows);
       }
-
-      return rows;
-    } catch (e) {
-      return [];
+      await _appCache.saveJsonList(
+        cacheKey,
+        toStore,
+        preserveNonEmptyOnEmpty: offline,
+      );
+      return toStore;
+    } catch (_) {
+      final diskCached = await _appCache.loadJsonList(cacheKey);
+      if (diskCached.isNotEmpty) {
+        return diskCached;
+      }
+      rethrow;
     }
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchMyTickets(String userId) async {
+    final response = await _supabase
+        .from('event_registrations')
+        .select('*, events(*), tickets(*, attendance(*))')
+        .eq('student_id', userId)
+        .order('registered_at', ascending: false);
+    final rows = List<Map<String, dynamic>>.from(response);
+
+    // Best-effort: if a registration exists but its ticket row was deleted
+    // (common during manual DB cleanup), recreate the missing ticket so the
+    // student can still "See Ticket" from My Tickets.
+    for (final reg in rows) {
+      final regId = reg['id']?.toString() ?? '';
+      if (regId.isEmpty) continue;
+
+      final ticketData = reg['tickets'];
+      final existingTicketId = ticketData is List && ticketData.isNotEmpty
+          ? (ticketData.first['id'] ?? '').toString()
+          : ticketData is Map
+          ? (ticketData['id'] ?? '').toString()
+          : '';
+      if (existingTicketId.trim().isNotEmpty) continue;
+
+      try {
+        final token = _generateToken();
+        final ticketRes = await _supabase
+            .from('tickets')
+            .insert({'registration_id': regId, 'token': token})
+            .select()
+            .single();
+        final ticketId = ticketRes['id']?.toString() ?? '';
+        if (ticketId.isNotEmpty) {
+          reg['tickets'] = [ticketRes];
+          // Bootstrap attendance is best-effort only.
+          try {
+            await _supabase.from('attendance').insert({
+              'ticket_id': ticketId,
+              'status': 'unscanned',
+            });
+          } catch (_) {}
+        }
+      } catch (_) {
+        // If ticket recreate fails due to policy/schema, skip silently.
+      }
+    }
+
+    return rows;
   }
 
   Future<List<Map<String, dynamic>>> getTicketSeminarAttendance({
@@ -4539,8 +4870,10 @@ class EventService {
           .order('start_at', ascending: true);
 
       return List<Map<String, dynamic>>.from(eventRows);
-    } catch (_) {
-      return [];
+    } catch (e) {
+      // Don't treat network/schema failures as "no assignment" — callers must
+      // distinguish empty assignment from unreachable server.
+      rethrow;
     }
   }
 
@@ -7609,7 +7942,16 @@ class EventService {
       // for older events whose targeting format changed over time.
       publishedEvents = List<Map<String, dynamic>>.from(response);
     } catch (_) {
-      publishedEvents = [];
+      final stale = _readListCache(
+        cacheKey,
+        _expiredEvalTtl,
+        allowStale: true,
+        staleTtl: const Duration(hours: 24),
+      );
+      if (stale != null && stale.isNotEmpty) {
+        return stale;
+      }
+      return [];
     }
 
     final visibleResults = await Future.wait(
