@@ -8,8 +8,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import '../../services/auth_service.dart';
 import '../../services/offline_sync_service.dart';
+import '../../services/device_performance_service.dart';
 import '../../widgets/custom_loader.dart';
 import '../../widgets/safe_circle_avatar.dart';
+import '../../widgets/performance_mode_sheet.dart';
 import '../welcome_screen.dart';
 import '../auth/change_password_screen.dart';
 import '../../utils/teacher_theme_utils.dart';
@@ -44,10 +46,16 @@ class _TeacherProfileState extends State<TeacherProfile> {
     if (_user == null) {
       _loadUser();
     }
+    DevicePerformance.instance.addListener(_onPerformanceChanged);
+  }
+
+  void _onPerformanceChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    DevicePerformance.instance.removeListener(_onPerformanceChanged);
     _connectivitySubscription?.cancel();
     super.dispose();
   }
@@ -1035,6 +1043,16 @@ class _TeacherProfileState extends State<TeacherProfile> {
                     title: 'Offline Status',
                     subtitle: _offlineSummarySubtitle(),
                     onTap: _showOfflineStatusSheet,
+                  ),
+                  const SizedBox(height: 16),
+                  _buildActionCard(
+                    icon: Icons.speed_rounded,
+                    title: 'Performance Mode',
+                    subtitle: DevicePerformance.instance.settingsSubtitle,
+                    onTap: () => showPerformanceModeSheet(
+                      context,
+                      accent: TeacherThemeUtils.primary,
+                    ),
                   ),
                   const SizedBox(height: 120), // Extra space for bottom nav
                 ],

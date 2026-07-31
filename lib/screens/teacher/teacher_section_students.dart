@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../widgets/custom_loader.dart';
 import '../../widgets/safe_circle_avatar.dart';
 import '../../utils/teacher_theme_utils.dart';
@@ -18,7 +17,6 @@ class TeacherSectionStudents extends StatefulWidget {
   State<TeacherSectionStudents> createState() => _TeacherSectionStudentsState();
 }
 class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
-  final _supabase = Supabase.instance.client;
   bool _isLoading = true;
   List<Map<String, dynamic>> _students = [];
   String _searchQuery = '';
@@ -38,25 +36,9 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
 
   Future<void> _fetchStudents() async {
     try {
-      final response = await _supabase
-          .from('users')
-          .select('id, first_name, last_name, email, student_id, photo_url')
-          .eq('section_id', widget.sectionId)
-          .eq('role', 'student');
-
+      // users table is locked from anon (048). Do not probe — it floods
+      // Postgres ERROR. Section roster needs a PHP BFF endpoint next.
       final List<Map<String, dynamic>> studentList = [];
-
-      for (var u in response) {
-        studentList.add({
-          'id': u['id'],
-          'name': '${u['first_name']} ${u['last_name']}',
-          'email': u['email'],
-          'student_id': u['student_id'] ?? 'No ID',
-          'photo_url': u['photo_url'],
-        });
-      }
-
-      studentList.sort((a, b) => (a['name'] as String).compareTo(b['name'] as String));
 
       if (mounted) {
         setState(() {

@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../screens/student/student_certificates.dart';
 import '../screens/student/student_event_details.dart';
+import '../screens/student/student_event_evaluation.dart';
 import '../screens/teacher/teacher_event_manage.dart';
 import '../screens/teacher/teacher_proposal_requirements_page.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -15,7 +17,9 @@ import 'event_live_service.dart';
 import 'event_service.dart';
 import 'live_ui_sync.dart';
 import 'live_ui_sync_pending.dart';
+import 'mobile_backend_service.dart';
 import 'notification_service.dart';
+import '../utils/app_page_routes.dart';
 
 Future<void> _cacheApprovedRegistrationFromPayload(
   Map<String, dynamic> data,
@@ -242,7 +246,7 @@ class PushNotificationService {
 
             // Default fallback for students (or if teacher event fetch fails)
             PulseConnectApp.navigatorKey.currentState?.push(
-              MaterialPageRoute(
+              AppPageRoute(
                 builder: (context) => StudentEventDetails(eventId: payload),
               ),
             );
@@ -457,8 +461,7 @@ class PushNotificationService {
     );
   }
 
-  /// Gets the FCM Token and saves it to the `fcm_tokens` table in Supabase.
-  /// Uses SharedPreferences user_id since we use custom auth, not Supabase Auth.
+  /// Gets the FCM Token and saves it via PHP (fcm_tokens is revoked from anon).
   Future<void> updateToken() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -469,37 +472,32 @@ class PushNotificationService {
       }
 
       String? token = await _firebaseMessaging.getToken();
-      debugPrint('[FCM] Device token: $token');
+      if (kDebugMode) {
+        debugPrint(
+          '[FCM] Device token present: ${token != null && token.isNotEmpty}',
+        );
+      }
 
-      if (token != null) {
-        // Step 1: Delete ALL existing rows for this token (any user_id)
-        // This ensures one physical device = one row, preventing ghost notifications
-        await Supabase.instance.client
-            .from('fcm_tokens')
-            .delete()
-            .eq('token', token);
-
-        // Step 2: Insert fresh row for the currently logged-in user
-        await Supabase.instance.client
-            .from('fcm_tokens')
-            .insert({
-              'user_id': userId,
-              'token': token,
-              'updated_at': DateTime.now().toUtc().toIso8601String(),
-            });
-        debugPrint('[FCM] Token saved to Supabase successfully.');
+      if (token != null && token.isNotEmpty) {
+        // Upsert only — never delete-first (that wiped tokens when upsert failed).
+        final saved = await MobileBackendService().secureWrite('fcm_upsert', {
+          'token': token,
+          'platform': 'android',
+        });
+        if (saved['ok'] == true) {
+          debugPrint('[FCM] Token saved via secure backend.');
+        } else {
+          debugPrint('[FCM] Token save failed: ${saved['error']}');
+        }
       }
     } catch (e) {
       debugPrint('[FCM] Error saving FCM Token: $e');
     }
   }
 
-  /// Remove this device token from Supabase so logged-out screens stop getting pushes.
+  /// Remove this device token so logged-out screens stop getting pushes.
   Future<void> unregisterCurrentToken({String? userId}) async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final resolvedUserId =
-          (userId ?? prefs.getString('user_id') ?? '').trim();
       String? token;
       try {
         token = await _firebaseMessaging.getToken();
@@ -507,13 +505,9 @@ class PushNotificationService {
         debugPrint('[FCM] Could not read token for unregister: $e');
       }
 
-      final client = Supabase.instance.client;
-      if (token != null && token.isNotEmpty) {
-        await client.from('fcm_tokens').delete().eq('token', token);
-      }
-      if (resolvedUserId.isNotEmpty) {
-        await client.from('fcm_tokens').delete().eq('user_id', resolvedUserId);
-      }
+      await MobileBackendService().secureWrite('fcm_delete', {
+        if (token != null && token.isNotEmpty) 'token': token,
+      });
       debugPrint('[FCM] Device token unregistered.');
     } catch (e) {
       debugPrint('[FCM] Error unregistering FCM Token: $e');
@@ -582,12 +576,28 @@ class PushNotificationService {
             return;
           }
         }
+
+        if (role == 'student' &&
+            (type == 'eval_open' || route == 'evaluation')) {
+          final studentId = (user?['id']?.toString() ?? '').trim();
+          if (studentId.isNotEmpty) {
+            PulseConnectApp.navigatorKey.currentState?.push(
+              AppPageRoute(
+                builder: (context) => StudentEventEvaluationScreen(
+                  eventId: eventId,
+                  studentId: studentId,
+                ),
+              ),
+            );
+            return;
+          }
+        }
       } catch (e) {
         debugPrint('[FCM] Notification route fallback: $e');
       }
 
       PulseConnectApp.navigatorKey.currentState?.push(
-        MaterialPageRoute(
+        AppPageRoute(
           builder: (context) => StudentEventDetails(eventId: eventId),
         ),
       );

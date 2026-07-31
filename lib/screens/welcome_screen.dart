@@ -3,6 +3,7 @@ import '../main.dart';
 import 'auth/login_screen.dart';
 import 'auth/register_screen.dart';
 import '../widgets/shiny_text.dart';
+import '../services/device_performance_service.dart';
 import '../utils/teacher_theme_utils.dart';
 
 class WelcomeScreen extends StatefulWidget {
@@ -33,14 +34,15 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       vsync: this,
       duration: const Duration(milliseconds: 9000),
     );
-    _collisionController.repeat();
 
     // Gradient animation (matches CSS authGradientFlow - slow movement)
     _gradientController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 12),
     );
-    _gradientController.repeat(reverse: true);
+
+    _syncPerformanceAnimationState();
+    DevicePerformance.instance.addListener(_syncPerformanceAnimationState);
 
     // Ensure global app theme matches the default selected role on screen open.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -49,8 +51,27 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     });
   }
 
+  void _syncPerformanceAnimationState() {
+    if (!mounted) return;
+    if (DevicePerformance.instance.enableDecorativeMotion) {
+      if (!_collisionController.isAnimating) _collisionController.repeat();
+      if (!_gradientController.isAnimating) {
+        _gradientController.repeat(reverse: true);
+      }
+    } else {
+      // Low/medium devices stop the loop — but t=0 has ccsOpacity=0, so the
+      // logo vanished. Hold on a mid-cycle frame where CCS is fully visible.
+      _collisionController.stop();
+      _collisionController.value = 0.40;
+      _gradientController.stop();
+      _gradientController.value = 0.5;
+    }
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    DevicePerformance.instance.removeListener(_syncPerformanceAnimationState);
     _collisionController.dispose();
     _gradientController.dispose();
     super.dispose();
@@ -644,35 +665,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                             // Keep theme in sync even when user doesn't retap the role toggle.
                             PulseConnectApp.of(
                               context,
-                            ).updateTheme(_selectedRole);
-                            Navigator.push(
-                              context,
-                              PageRouteBuilder(
-                                pageBuilder:
-                                    (context, animation, secondaryAnimation) =>
-                                        LoginScreen(role: _selectedRole),
-                                transitionDuration: const Duration(
-                                  milliseconds: 400,
-                                ),
-                                reverseTransitionDuration: const Duration(
-                                  milliseconds: 400,
-                                ),
-                                opaque: true,
-                                barrierColor: const Color(0xFF09090B),
-                                transitionsBuilder:
-                                    (
-                                      context,
-                                      animation,
-                                      secondaryAnimation,
-                                      child,
-                                    ) {
-                                      return FadeTransition(
-                                        opacity: animation,
-                                        child: child,
-                                      );
-                                    },
-                              ),
-                            );
+                            ).showLogin(_selectedRole);
                           },
                           style: ElevatedButton.styleFrom(
                             backgroundColor: Colors.white,

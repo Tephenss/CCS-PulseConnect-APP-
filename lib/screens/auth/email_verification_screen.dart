@@ -8,9 +8,6 @@ import '../../services/email_verification_service.dart';
 import '../../services/push_notification_service.dart';
 import '../../utils/teacher_theme_utils.dart';
 import '../../widgets/custom_loader.dart';
-import 'login_screen.dart';
-import '../student/student_home.dart';
-import '../teacher/teacher_home.dart';
 
 class EmailVerificationScreen extends StatefulWidget {
   final Map<String, dynamic> user;
@@ -40,6 +37,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   int _cooldownSeconds = 0;
   String? _message;
   String? _error;
+  bool _isLeavingToLogin = false;
 
   String get _userId => widget.user['id']?.toString() ?? '';
   String get _email => widget.user['email']?.toString() ?? '';
@@ -67,13 +65,16 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   }
 
   Future<void> _initialize() async {
-    // Keep verification as a pre-login step.
-    await _authService.clearLocalSessionMarkers();
+    // Keep verification as a pre-login step, but keep the login session token
+    // so avatar/FCM/inbox work after OTP (clearing the token caused "Mobile session required").
+    await _authService.clearLocalSessionMarkers(keepMobileSession: true);
+    if (!mounted) return;
     if (_userId.isEmpty || _email.isEmpty) {
       setState(() => _error = 'Missing account email. Please login again.');
       return;
     }
     await _refreshCooldown();
+    if (!mounted) return;
     await _sendCode(forceResend: false);
   }
 
@@ -99,28 +100,11 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   }
 
   void _backToLogin() {
+    if (_isLeavingToLogin || !mounted) return;
+    _isLeavingToLogin = true;
+    FocusManager.instance.primaryFocus?.unfocus();
     final roleLabel = _isTeacher ? 'Teacher' : 'Student';
-    Navigator.pushAndRemoveUntil(
-      context,
-      PageRouteBuilder(
-        transitionDuration: const Duration(milliseconds: 240),
-        reverseTransitionDuration: const Duration(milliseconds: 200),
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          final slide = Tween<Offset>(
-            begin: const Offset(-0.06, 0),
-            end: Offset.zero,
-          ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic));
-          final fade = CurvedAnimation(parent: animation, curve: Curves.easeOut);
-          return FadeTransition(
-            opacity: fade,
-            child: SlideTransition(position: slide, child: child),
-          );
-        },
-        pageBuilder: (context, animation, secondaryAnimation) =>
-            LoginScreen(role: roleLabel),
-      ),
-      (route) => false,
-    );
+    PulseConnectApp.of(context).exitEmailVerificationToLogin(roleLabel);
   }
 
   Future<void> _showVerificationSuccessDialog() async {
@@ -168,6 +152,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   }
 
   Future<void> _sendCode({required bool forceResend}) async {
+    if (!mounted) return;
     setState(() {
       _isSending = true;
       _error = null;
@@ -182,7 +167,12 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
       );
       if (!mounted) return;
       if (result['ok'] == true) {
-        setState(() => _message = 'Verification code sent to $_email');
+        final skipped = result['skipped'] == true;
+        setState(
+          () => _message = skipped
+              ? 'Code already sent — check your inbox (including spam).'
+              : 'Verification code sent to $_email',
+        );
         await _refreshCooldown();
       } else {
         setState(
@@ -198,6 +188,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   }
 
   Future<void> _verify() async {
+    if (_isVerifying || _isLeavingToLogin) return;
     FocusScope.of(context).unfocus();
     final code = _codeController.text.trim();
     if (code.length != 6 || int.tryParse(code) == null) {
@@ -227,27 +218,16 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
           if (!mounted) return;
           await _showVerificationSuccessDialog();
           if (!mounted) return;
-          Navigator.pushAndRemoveUntil(
-            context,
-            MaterialPageRoute(builder: (_) => const LoginScreen(role: 'Student')),
-            (route) => false,
-          );
+          PulseConnectApp.of(context).exitEmailVerificationToLogin('Student');
           return;
         }
         final role = updatedUser['role']?.toString().toLowerCase() ?? 'student';
-        PulseConnectApp.of(
-          context,
-        ).updateTheme(role, course: updatedUser['course']?.toString());
         // Session is persisted only after OTP — register this device for pushes now.
         await PushNotificationService().updateToken();
         if (!mounted) return;
-        Navigator.pushAndRemoveUntil(
-          context,
-          MaterialPageRoute(
-            builder: (_) =>
-                role == 'teacher' ? const TeacherHome() : const StudentHome(),
-          ),
-          (route) => false,
+        PulseConnectApp.of(context).enterAppAfterAuth(
+          role: role,
+          course: updatedUser['course']?.toString(),
         );
       } else {
         setState(
@@ -263,10 +243,12 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   Widget build(BuildContext context) {
     final canResend = !_isSending && _cooldownSeconds <= 0;
     return PopScope(
+      // Block Android predictive/IME back from leaving OTP mid-send.
+      // Users leave via the explicit "Back to Sign In" button only.
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        _backToLogin();
+        FocusManager.instance.primaryFocus?.unfocus();
       },
       child: Scaffold(
         backgroundColor: const Color(0xFF09090B),
@@ -295,269 +277,331 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
               ),
             ),
             SafeArea(
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  return SingleChildScrollView(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 24,
-                      vertical: 12,
-                    ),
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        minHeight: constraints.maxHeight - 24,
-                      ),
-                      child: Center(
+              child: Stack(
+                children: [
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      return SingleChildScrollView(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 24,
+                          vertical: 12,
+                        ),
                         child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 460),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 16,
-                                  vertical: 8,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: _primaryColor,
-                                  borderRadius: BorderRadius.circular(999),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: _primaryColor.withValues(
-                                        alpha: 0.35,
-                                      ),
-                                      blurRadius: 12,
-                                      offset: const Offset(0, 4),
+                          constraints: BoxConstraints(
+                            minHeight: constraints.maxHeight - 24,
+                          ),
+                          child: Center(
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 460),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16,
+                                      vertical: 8,
                                     ),
-                                  ],
-                                ),
-                                child: const Text(
-                                  'EMAIL VERIFICATION',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.w800,
-                                    fontSize: 12,
-                                    letterSpacing: 0.6,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(height: 18),
-                              Container(
-                                width: double.infinity,
-                                padding: const EdgeInsets.all(20),
-                                decoration: BoxDecoration(
-                                  color: Colors.white.withValues(alpha: 0.06),
-                                  borderRadius: BorderRadius.circular(18),
-                                  border: Border.all(
-                                    color: Colors.white.withValues(alpha: 0.08),
-                                  ),
-                                ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const Text(
-                                      'Check Your Email',
+                                    decoration: BoxDecoration(
+                                      color: _primaryColor,
+                                      borderRadius: BorderRadius.circular(999),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: _primaryColor.withValues(
+                                            alpha: 0.35,
+                                          ),
+                                          blurRadius: 12,
+                                          offset: const Offset(0, 4),
+                                        ),
+                                      ],
+                                    ),
+                                    child: const Text(
+                                      'EMAIL VERIFICATION',
                                       style: TextStyle(
                                         color: Colors.white,
-                                        fontWeight: FontWeight.w700,
-                                        fontSize: 20,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 10),
-                                    Text(
-                                      'We sent a 6-digit code to:',
-                                      style: TextStyle(
-                                        color: Colors.white.withValues(
-                                          alpha: 0.75,
-                                        ),
-                                        fontSize: 13,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      _email,
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 14,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 10),
-                                    Text(
-                                      AuthService.emailVerificationReasonMessage(
-                                        widget.gateReason,
-                                      ),
-                                      style: TextStyle(
-                                        color: Colors.white.withValues(
-                                          alpha: 0.7,
-                                        ),
+                                        fontWeight: FontWeight.w800,
                                         fontSize: 12,
-                                        height: 1.35,
+                                        letterSpacing: 0.6,
                                       ),
                                     ),
-                                    const SizedBox(height: 18),
-                                    TextField(
-                                      controller: _codeController,
-                                      keyboardType: TextInputType.number,
-                                      maxLength: 6,
-                                      style: const TextStyle(
-                                        color: Color(0xFFF4F4F5),
-                                        fontWeight: FontWeight.w700,
-                                        letterSpacing: 2,
+                                  ),
+                                  const SizedBox(height: 18),
+                                  Container(
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.fromLTRB(
+                                      20,
+                                      20,
+                                      20,
+                                      16,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withValues(
+                                        alpha: 0.06,
                                       ),
-                                      cursorColor: _primaryColor,
-                                      decoration: InputDecoration(
-                                        labelText: 'Verification Code',
-                                        labelStyle: const TextStyle(
-                                          color: Color(0xFFA1A1AA),
-                                        ),
-                                        hintText: '123456',
-                                        counterText: '',
-                                        prefixIcon: const Icon(
-                                          Icons.mark_email_read_outlined,
-                                          color: Color(0xFF52525B),
-                                          size: 20,
-                                        ),
-                                        filled: true,
-                                        fillColor: const Color(0xFF1C1C22),
-                                        border: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            14,
-                                          ),
-                                          borderSide: const BorderSide(
-                                            color: Color(0xFF27272A),
-                                          ),
-                                        ),
-                                        enabledBorder: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            14,
-                                          ),
-                                          borderSide: const BorderSide(
-                                            color: Color(0xFF27272A),
-                                          ),
-                                        ),
-                                        focusedBorder: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            14,
-                                          ),
-                                          borderSide: BorderSide(
-                                            color: _primaryColor,
-                                            width: 1.5,
-                                          ),
+                                      borderRadius: BorderRadius.circular(18),
+                                      border: Border.all(
+                                        color: Colors.white.withValues(
+                                          alpha: 0.08,
                                         ),
                                       ),
                                     ),
-                                    if (_error != null) ...[
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        _error!,
-                                        style: const TextStyle(
-                                          color: Color(0xFFFCA5A5),
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ],
-                                    if (_message != null) ...[
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        _message!,
-                                        style: const TextStyle(
-                                          color: Color(0xFF86EFAC),
-                                          fontSize: 12,
-                                          fontWeight: FontWeight.w500,
-                                        ),
-                                      ),
-                                    ],
-                                    const SizedBox(height: 16),
-                                    SizedBox(
-                                      width: double.infinity,
-                                      child: Container(
-                                        decoration: BoxDecoration(
-                                          borderRadius: BorderRadius.circular(
-                                            16,
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        const Text(
+                                          'Check Your Email',
+                                          style: TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w700,
+                                            fontSize: 20,
                                           ),
-                                          gradient: LinearGradient(
-                                            colors: [
-                                              _accentColor,
-                                              _primaryColor,
-                                            ],
-                                            begin: Alignment.topLeft,
-                                            end: Alignment.bottomRight,
-                                          ),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: _primaryColor.withValues(
-                                                alpha: 0.4,
-                                              ),
-                                              blurRadius: 20,
-                                              offset: const Offset(0, 8),
-                                            ),
-                                          ],
                                         ),
-                                        child: ElevatedButton(
-                                          onPressed: _isVerifying
-                                              ? null
-                                              : _verify,
-                                          style: ElevatedButton.styleFrom(
-                                            backgroundColor: Colors.transparent,
-                                            shadowColor: Colors.transparent,
-                                            foregroundColor: Colors.white,
-                                            padding: const EdgeInsets.symmetric(
-                                              vertical: 16,
+                                        const SizedBox(height: 10),
+                                        Text(
+                                          'We sent a 6-digit code to:',
+                                          style: TextStyle(
+                                            color: Colors.white.withValues(
+                                              alpha: 0.75,
                                             ),
-                                            shape: RoundedRectangleBorder(
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          _email,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 10),
+                                        Text(
+                                          AuthService
+                                              .emailVerificationReasonMessage(
+                                            widget.gateReason,
+                                          ),
+                                          style: TextStyle(
+                                            color: Colors.white.withValues(
+                                              alpha: 0.7,
+                                            ),
+                                            fontSize: 12,
+                                            height: 1.35,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 14),
+                                        TextField(
+                                          controller: _codeController,
+                                          keyboardType: TextInputType.number,
+                                          maxLength: 6,
+                                          style: const TextStyle(
+                                            color: Color(0xFFF4F4F5),
+                                            fontWeight: FontWeight.w700,
+                                            letterSpacing: 2,
+                                          ),
+                                          cursorColor: _primaryColor,
+                                          decoration: InputDecoration(
+                                            labelText: 'Verification Code',
+                                            labelStyle: const TextStyle(
+                                              color: Color(0xFFA1A1AA),
+                                            ),
+                                            hintText: '123456',
+                                            counterText: '',
+                                            prefixIcon: const Icon(
+                                              Icons.mark_email_read_outlined,
+                                              color: Color(0xFF52525B),
+                                              size: 20,
+                                            ),
+                                            filled: true,
+                                            fillColor: const Color(0xFF1C1C22),
+                                            border: OutlineInputBorder(
                                               borderRadius:
-                                                  BorderRadius.circular(16),
+                                                  BorderRadius.circular(14),
+                                              borderSide: const BorderSide(
+                                                color: Color(0xFF27272A),
+                                              ),
+                                            ),
+                                            enabledBorder: OutlineInputBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(14),
+                                              borderSide: const BorderSide(
+                                                color: Color(0xFF27272A),
+                                              ),
+                                            ),
+                                            focusedBorder: OutlineInputBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(14),
+                                              borderSide: BorderSide(
+                                                color: _primaryColor,
+                                                width: 1.5,
+                                              ),
                                             ),
                                           ),
-                                          child: _isVerifying
-                                              ? const PulseConnectLoader(
-                                                  size: 18,
-                                                  color: Colors.white,
-                                                )
-                                              : const Text(
-                                                  'Verify and Continue',
-                                                  style: TextStyle(
-                                                    fontWeight: FontWeight.w800,
-                                                    fontSize: 15,
+                                        ),
+                                        if (_error != null) ...[
+                                          const SizedBox(height: 8),
+                                          Text(
+                                            _error!,
+                                            style: const TextStyle(
+                                              color: Color(0xFFFCA5A5),
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                        ],
+                                        if (_message != null) ...[
+                                          const SizedBox(height: 8),
+                                          Text(
+                                            _message!,
+                                            style: const TextStyle(
+                                              color: Color(0xFF86EFAC),
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                        ],
+                                        const SizedBox(height: 10),
+                                        SizedBox(
+                                          width: double.infinity,
+                                          child: AbsorbPointer(
+                                            absorbing: _isVerifying,
+                                            child: Container(
+                                              decoration: BoxDecoration(
+                                                borderRadius:
+                                                    BorderRadius.circular(16),
+                                                gradient: LinearGradient(
+                                                  colors: [
+                                                    _accentColor,
+                                                    _primaryColor,
+                                                  ],
+                                                  begin: Alignment.topLeft,
+                                                  end: Alignment.bottomRight,
+                                                ),
+                                                boxShadow: [
+                                                  BoxShadow(
+                                                    color: _primaryColor
+                                                        .withValues(alpha: 0.4),
+                                                    blurRadius: 20,
+                                                    offset: const Offset(0, 8),
+                                                  ),
+                                                ],
+                                              ),
+                                              child: ElevatedButton(
+                                                onPressed: _verify,
+                                                style: ElevatedButton.styleFrom(
+                                                  backgroundColor:
+                                                      Colors.transparent,
+                                                  shadowColor:
+                                                      Colors.transparent,
+                                                  foregroundColor: Colors.white,
+                                                  disabledForegroundColor:
+                                                      Colors.white,
+                                                  disabledBackgroundColor:
+                                                      Colors.transparent,
+                                                  padding: const EdgeInsets
+                                                      .symmetric(vertical: 16),
+                                                  shape: RoundedRectangleBorder(
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                      16,
+                                                    ),
                                                   ),
                                                 ),
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 10),
-                                    Align(
-                                      alignment: Alignment.center,
-                                      child: TextButton(
-                                        onPressed: canResend
-                                            ? () => _sendCode(forceResend: true)
-                                            : null,
-                                        child: Text(
-                                          canResend
-                                              ? 'Resend Code'
-                                              : 'Resend available in ${_cooldownSeconds}s',
-                                          style: TextStyle(
-                                            color: canResend
-                                                ? _primaryColor
-                                                : Colors.white.withValues(
-                                                    alpha: 0.45,
-                                                  ),
-                                            fontWeight: FontWeight.w700,
+                                                child: _isVerifying
+                                                    ? const PulseConnectLoader(
+                                                        size: 18,
+                                                        color: Colors.white,
+                                                      )
+                                                    : const Text(
+                                                        'Verify and Continue',
+                                                        style: TextStyle(
+                                                          fontWeight:
+                                                              FontWeight.w800,
+                                                          fontSize: 15,
+                                                        ),
+                                                      ),
+                                              ),
+                                            ),
                                           ),
                                         ),
-                                      ),
+                                        const SizedBox(height: 6),
+                                        Align(
+                                          alignment: Alignment.center,
+                                          child: TextButton(
+                                            onPressed: canResend
+                                                ? () => _sendCode(
+                                                      forceResend: true,
+                                                    )
+                                                : () {},
+                                            style: TextButton.styleFrom(
+                                              foregroundColor: canResend
+                                                  ? _primaryColor
+                                                  : Colors.white.withValues(
+                                                      alpha: 0.45,
+                                                    ),
+                                            ),
+                                            child: Text(
+                                              canResend
+                                                  ? 'Resend Code'
+                                                  : 'Resend available in ${_cooldownSeconds}s',
+                                              style: TextStyle(
+                                                color: canResend
+                                                    ? _primaryColor
+                                                    : Colors.white.withValues(
+                                                        alpha: 0.45,
+                                                      ),
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ],
                                     ),
-                                  ],
-                                ),
+                                  ),
+                                ],
                               ),
-                            ],
+                            ),
                           ),
+                        ),
+                      );
+                    },
+                  ),
+                  Positioned(
+                    top: 4,
+                    left: 12,
+                    child: TextButton.icon(
+                      onPressed: _isLeavingToLogin || _isVerifying
+                          ? null
+                          : _backToLogin,
+                      icon: const Icon(
+                        Icons.arrow_back_rounded,
+                        color: Colors.white,
+                        size: 20,
+                      ),
+                      label: const Text(
+                        'Back to Sign In',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        backgroundColor: const Color(0xE0121216),
+                        disabledForegroundColor: const Color(0x73FFFFFF),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          side: const BorderSide(color: Color(0x66FFFFFF)),
                         ),
                       ),
                     ),
-                  );
-                },
+                  ),
+                ],
               ),
             ),
           ],

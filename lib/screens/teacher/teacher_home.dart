@@ -18,6 +18,7 @@ import '../../widgets/notifications_modal.dart';
 import '../../widgets/animated_greeting_text.dart';
 import '../../widgets/card_swap_widget.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/pulseconnect_splash_screen.dart';
 import '../../widgets/safe_circle_avatar.dart';
 import '../../widgets/shiny_text.dart';
 import '../../utils/event_time_utils.dart';
@@ -42,6 +43,9 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   List<Map<String, dynamic>> _upcomingEvents = [];
   List<Map<String, dynamic>> _calendarEvents = [];
   int _currentIndex = 0;
+  /// Once opened, keep TeacherScanScreen mounted so reopening the FAB
+  /// does not remount and flash the full-screen loader every time.
+  bool _scanVisited = false;
   bool _isLoading = true;
   bool _usingCachedUpcomingEvents = false;
   int _unreadCount = 0;
@@ -74,7 +78,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
       unawaited(_refreshTeacherHomeLive(reason));
     });
     _homeLiveFallbackTimer = Timer.periodic(
-      const Duration(seconds: 40),
+      const Duration(seconds: 60),
       (_) => unawaited(_refreshTeacherHomeLive('fallback')),
     );
     _loadData();
@@ -92,7 +96,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
 
     final accessible = await _eventService.getTeacherAccessibleEvents(
       teacherId,
-      forceFresh: reason != 'fallback',
+      forceFresh: true,
     );
     final events = _teacherActiveUpcomingEvents(accessible);
     final calendarEvents = _teacherCalendarEvents(accessible);
@@ -362,12 +366,12 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     // Events/Sections/Profile stay alive so cached data survives tab switches.
-    // Scan is only mounted while selected so the camera does not linger.
+    // Scan stays mounted after first open (camera paused while inactive).
     final screens = [
       _buildHomeContent(),
       const TeacherEventsTab(),
-      _currentIndex == 2
-          ? const TeacherScanScreen()
+      _scanVisited
+          ? TeacherScanScreen(isActive: _currentIndex == 2)
           : const SizedBox.shrink(),
       const TeacherSections(),
       TeacherProfile(user: _user, onUpdate: _loadData),
@@ -385,7 +389,9 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
         body: Stack(
           children: [
             _isLoading
-                ? const Center(child: PulseConnectLoader())
+                ? const PulseConnectSplashScreen(
+                    statusMessage: 'Loading faculty dashboard & events...',
+                  )
                 : IndexedStack(
                     index: _currentIndex,
                     sizing: StackFit.expand,
@@ -440,7 +446,10 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                     const SizedBox(width: 12),
                     // Separate QR Button
                     GestureDetector(
-                      onTap: () => setState(() => _currentIndex = 2),
+                      onTap: () => setState(() {
+                        _scanVisited = true;
+                        _currentIndex = 2;
+                      }),
                       child: Container(
                         width: 58,
                         height: 58,

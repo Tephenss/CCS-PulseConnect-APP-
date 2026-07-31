@@ -1,9 +1,9 @@
 import 'dart:ui' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../../main.dart';
 import '../../services/auth_service.dart';
 import '../../widgets/custom_loader.dart';
-import 'email_verification_screen.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -84,15 +84,10 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
       final user = result['user'];
       if (user is Map<String, dynamic>) {
         if (!mounted) return;
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => EmailVerificationScreen(
-              user: user,
-              postRegistrationReviewFlow: true,
-              gateReason: 'unverified',
-            ),
-          ),
+        PulseConnectApp.of(context).showEmailVerificationGate(
+          user,
+          gateReason: 'unverified',
+          postRegistrationReviewFlow: true,
         );
         return;
       }

@@ -1,7 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:bcrypt/bcrypt.dart';
-import 'dart:math';
 import '../../widgets/custom_loader.dart';
 import '../../utils/teacher_theme_utils.dart';
 import '../../services/mobile_backend_service.dart';
@@ -82,16 +79,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
         return;
       }
 
-      final resolvedUserId = delivery['user_id']?.toString() ?? '';
-      if (resolvedUserId.isEmpty) {
-        _showError('Invalid account record.');
-        setState(() => _isLoading = false);
-        return;
-      }
-
-      // Identity verified successfully
       setState(() {
-        _verifiedUserId = resolvedUserId;
+        _verifiedUserId = email; // store email for later steps
         _currentStep = 1;
         _isLoading = false;
       });
@@ -109,53 +98,33 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
       _showError('Please enter the 6-digit code.');
       return;
     }
-    if (_verifiedUserId == null) {
+    final email = _emailController.text.toLowerCase().trim();
+    if (email.isEmpty) {
       _showError('No reset session found. Please request a new code.');
       return;
     }
 
     setState(() => _isLoading = true);
     try {
-      final row = await Supabase.instance.client
-          .from('password_reset_codes')
-          .select('code, expires_at')
-          .eq('user_id', _verifiedUserId!)
-          .maybeSingle();
-      if (row == null) {
-        _showError('No reset code found. Please request a new code.');
+      final result = await _mobileBackend.verifyPasswordResetCode(
+        email: email,
+        code: code,
+      );
+      if (result['ok'] != true) {
+        _showError(result['error']?.toString() ?? 'Invalid confirmation code.');
         setState(() => _isLoading = false);
         return;
       }
 
-      final storedCode = row['code']?.toString() ?? '';
-      final expiresAt = DateTime.tryParse(
-        row['expires_at']?.toString() ?? '',
-      )?.toUtc();
-      final now = DateTime.now().toUtc();
-      if (storedCode != code) {
-        _showError('Invalid confirmation code.');
-        setState(() => _isLoading = false);
-        return;
-      }
-      if (expiresAt == null || now.isAfter(expiresAt)) {
-        _showError('Code expired. Please request a new code.');
+      final token = result['reset_token']?.toString() ?? '';
+      if (token.isEmpty) {
+        _showError('Invalid reset session. Please request a new code.');
         setState(() => _isLoading = false);
         return;
       }
 
-      final token = _generateResetToken();
-      await Supabase.instance.client
-          .from('password_reset_codes')
-          .update({
-            'verified_at': now.toIso8601String(),
-            'reset_token': token,
-            'token_expires_at': now
-                .add(const Duration(minutes: 15))
-                .toIso8601String(),
-            'updated_at': now.toIso8601String(),
-          })
-          .eq('user_id', _verifiedUserId!);
       setState(() {
+        _verifiedUserId = email;
         _resetToken = token;
         _currentStep = 2;
         _isLoading = false;
@@ -181,45 +150,22 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
     setState(() => _isLoading = true);
 
     try {
-      if (_verifiedUserId == null || _resetToken == null) {
-        _showError('Reset session expired. Please verify code again.');
-        setState(() => _isLoading = false);
-        return;
-      }
-      final row = await Supabase.instance.client
-          .from('password_reset_codes')
-          .select('reset_token, token_expires_at')
-          .eq('user_id', _verifiedUserId!)
-          .maybeSingle();
-      final storedToken = row?['reset_token']?.toString() ?? '';
-      final tokenExpires = DateTime.tryParse(
-        row?['token_expires_at']?.toString() ?? '',
-      )?.toUtc();
-      final now = DateTime.now().toUtc();
-      if (storedToken.isEmpty || storedToken != _resetToken) {
-        _showError('Invalid reset session. Please verify code again.');
-        setState(() => _isLoading = false);
-        return;
-      }
-      if (tokenExpires == null || now.isAfter(tokenExpires)) {
+      final email = _emailController.text.toLowerCase().trim();
+      if (email.isEmpty || _resetToken == null) {
         _showError('Reset session expired. Please verify code again.');
         setState(() => _isLoading = false);
         return;
       }
 
-      // Hash the new password properly (Bcrypt to match web system schema)
-      final newHashedPassword = BCrypt.hashpw(newPass, BCrypt.gensalt());
-
-      // Update Supabase directly based on the verified user id
-      if (_verifiedUserId != null) {
-        await Supabase.instance.client
-            .from('users')
-            .update({'password': newHashedPassword})
-            .eq('id', _verifiedUserId!);
-        await Supabase.instance.client
-            .from('password_reset_codes')
-            .delete()
-            .eq('user_id', _verifiedUserId!);
+      final result = await _mobileBackend.updatePasswordWithResetToken(
+        email: email,
+        resetToken: _resetToken!,
+        newPassword: newPass,
+      );
+      if (result['ok'] != true) {
+        _showError(result['error']?.toString() ?? 'Error updating password.');
+        setState(() => _isLoading = false);
+        return;
       }
 
       setState(() {
@@ -702,12 +648,5 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
         ),
       ),
     );
-  }
-
-  String _generateResetToken() {
-    const chars =
-        'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    final random = Random.secure();
-    return List.generate(48, (_) => chars[random.nextInt(chars.length)]).join();
   }
 }

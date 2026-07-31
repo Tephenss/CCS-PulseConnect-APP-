@@ -37,7 +37,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   List<String> _targetYears = ['ALL'];
   String _eventMode = 'simple';
   int _seminarCount = 1;
-  final _graceTimeCtrl = TextEditingController(text: '15');
+  final _graceTimeCtrl = TextEditingController(text: '30');
 
   final _authService = AuthService();
   final _eventService = EventService();
@@ -240,7 +240,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     final teacherId = user?['id'];
 
     final eventFor = _encodeTargetParticipant(_targetCourse, _targetYears);
-    final graceTime = int.tryParse(_graceTimeCtrl.text) ?? 15;
+    final graceTime = int.tryParse(_graceTimeCtrl.text) ?? 30;
 
     Map<String, dynamic> payload;
     if (_eventMode == 'seminar_based') {
@@ -253,7 +253,6 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           'end_at': _toUtcIsoFromManila(_parseDateTime(_seminar1EndCtrl.text)!),
           'location': _locationCtrl.text.trim(),
           'scan_window_minutes': graceTime,
-          'attendance_window_minutes': graceTime,
         },
       ];
       if (_seminarCount >= 2) {
@@ -265,7 +264,6 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           'end_at': _toUtcIsoFromManila(_parseDateTime(_seminar2EndCtrl.text)!),
           'location': _locationCtrl.text.trim(),
           'scan_window_minutes': graceTime,
-          'attendance_window_minutes': graceTime,
         });
       }
 
@@ -1182,7 +1180,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         _buildLabel('Grace Time (Minutes)'),
         _buildNumberField(
           controller: _graceTimeCtrl,
-          hint: '15',
+          hint: '30',
           prefixIcon: Icons.timer_outlined,
         ),
         const SizedBox(height: 24),

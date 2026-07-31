@@ -44,7 +44,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
       unawaited(_loadEvents(forceFresh: true));
     });
     _fallbackRefreshTimer = Timer.periodic(
-      const Duration(seconds: 40),
+      const Duration(seconds: 60),
       (_) => unawaited(_loadEvents(forceFresh: false)),
     );
     _loadEvents();

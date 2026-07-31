@@ -298,6 +298,9 @@ class _StudentTicketViewState extends State<StudentTicketView> {
 
     final scanStatus = attendance?['status'] as String? ?? 'unscanned';
     final checkInAt = attendance?['check_in_at'] as String?;
+    final checkOutAt = attendance?['check_out_at'] as String?;
+    final hasCheckOut = (checkOutAt ?? '').trim().isNotEmpty;
+    final displayStatus = hasCheckOut ? 'timed_out' : scanStatus;
     final ticketIdDisplay = ticketId.length > 8 ? ticketId.substring(0, 8).toUpperCase() : ticketId.toUpperCase();
 
     final startDate = parseStoredEventDateTime(startAt);
@@ -594,17 +597,17 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                                     decoration: BoxDecoration(
-                                      color: _getAttendanceColor(scanStatus).withValues(alpha: 0.12),
+                                      color: _getAttendanceColor(displayStatus).withValues(alpha: 0.12),
                                       borderRadius: BorderRadius.circular(20),
                                     ),
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        Icon(_getAttendanceIcon(scanStatus), size: 16, color: _getAttendanceColor(scanStatus)),
+                                        Icon(_getAttendanceIcon(displayStatus), size: 16, color: _getAttendanceColor(displayStatus)),
                                         const SizedBox(width: 6),
                                         Text(
-                                          _getAttendanceLabel(scanStatus),
-                                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: _getAttendanceColor(scanStatus)),
+                                          _getAttendanceLabel(displayStatus),
+                                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: _getAttendanceColor(displayStatus)),
                                         ),
                                       ],
                                     ),
@@ -617,16 +620,15 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                                 _buildSeminarAttendanceRows(),
                               ] else ...[
                                 _buildAttendanceRow(
-                                  'Check-in',
-                                  checkInAt != null
-                                      ? (() {
-                                          final parsed = parseStoredEventDateTime(checkInAt);
-                                          return parsed != null
-                                              ? DateFormat('MMM dd, yyyy — hh:mm a').format(parsed)
-                                              : 'Not yet';
-                                        })()
-                                      : 'Not yet',
-                                  checkInAt != null,
+                                  'Check-In',
+                                  _formatAttendanceTime(checkInAt),
+                                  (checkInAt ?? '').trim().isNotEmpty,
+                                ),
+                                const SizedBox(height: 10),
+                                _buildAttendanceRow(
+                                  'Time-Out',
+                                  _formatAttendanceTime(checkOutAt),
+                                  hasCheckOut,
                                 ),
                                 const SizedBox(height: 10),
                                 _buildAttendanceRow('Flow', 'Simple event', true),
@@ -784,13 +786,7 @@ class _StudentTicketViewState extends State<StudentTicketView> {
               ? row['title'].toString().trim()
               : 'Seminar ${entry.key + 1}';
           final rawCheckIn = (row['check_in_at']?.toString() ?? '').trim();
-          String checkIn = 'Not yet';
-          if (rawCheckIn.isNotEmpty) {
-            final parsed = parseStoredEventDateTime(rawCheckIn);
-            if (parsed != null) {
-              checkIn = DateFormat('MMM dd, yyyy — hh:mm a').format(parsed);
-            }
-          }
+          final rawCheckOut = (row['check_out_at']?.toString() ?? '').trim();
           return Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Column(
@@ -798,7 +794,17 @@ class _StudentTicketViewState extends State<StudentTicketView> {
               children: [
                 _buildAttendanceRow('Title', title, true),
                 const SizedBox(height: 6),
-                _buildAttendanceRow('Check-in', checkIn, rawCheckIn.isNotEmpty),
+                _buildAttendanceRow(
+                  'Check-In',
+                  _formatAttendanceTime(rawCheckIn),
+                  rawCheckIn.isNotEmpty,
+                ),
+                const SizedBox(height: 6),
+                _buildAttendanceRow(
+                  'Time-Out',
+                  _formatAttendanceTime(rawCheckOut),
+                  rawCheckOut.isNotEmpty,
+                ),
               ],
             ),
           );
@@ -807,8 +813,19 @@ class _StudentTicketViewState extends State<StudentTicketView> {
     );
   }
 
+  String _formatAttendanceTime(String? raw) {
+    final value = (raw ?? '').trim();
+    if (value.isEmpty) return 'Not yet';
+    final parsed = parseStoredEventDateTime(value);
+    if (parsed == null) return 'Not yet';
+    return DateFormat('MMM dd, yyyy — hh:mm a').format(parsed);
+  }
+
   Color _getAttendanceColor(String status) {
     switch (status) {
+      case 'timed_out':
+      case 'checked_out':
+        return const Color(0xFF047857);
       case 'present': return const Color(0xFF059669);
       case 'late': return const Color(0xFFD97706);
       case 'early': return const Color(0xFF2563EB);
@@ -821,6 +838,9 @@ class _StudentTicketViewState extends State<StudentTicketView> {
 
   IconData _getAttendanceIcon(String status) {
     switch (status) {
+      case 'timed_out':
+      case 'checked_out':
+        return Icons.logout_rounded;
       case 'present': return Icons.check_circle_rounded;
       case 'late': return Icons.watch_later_rounded;
       case 'early': return Icons.bolt_rounded;
@@ -833,6 +853,9 @@ class _StudentTicketViewState extends State<StudentTicketView> {
 
   String _getAttendanceLabel(String status) {
     switch (status) {
+      case 'timed_out':
+      case 'checked_out':
+        return 'Timed Out';
       case 'present': return 'Checked In';
       case 'late': return 'Checked In (Late)';
       case 'early': return 'Checked In (Early)';

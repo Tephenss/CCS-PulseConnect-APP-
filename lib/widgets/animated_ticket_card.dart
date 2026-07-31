@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 
+import '../services/device_performance_service.dart';
+
 /// Wraps a ticket card with a smooth, straight vertical float animation
 /// (gentle up-and-down bob) plus a diagonal shimmer sweep.
 ///
 /// No internal GestureDetector — all tap handling is left to the parent.
+/// On low-end devices, motion is skipped automatically.
 class AnimatedTicketCard extends StatefulWidget {
   const AnimatedTicketCard({
     super.key,
@@ -30,33 +33,36 @@ class AnimatedTicketCard extends StatefulWidget {
 
 class _AnimatedTicketCardState extends State<AnimatedTicketCard>
     with TickerProviderStateMixin {
-  // ── Float (up-down bob) ───────────────────────────────────────────────────
   late final AnimationController _floatCtrl;
   late final Animation<double> _floatY;
-
-  // ── Shimmer sweep ─────────────────────────────────────────────────────────
   late final AnimationController _shimmerCtrl;
   late final Animation<double> _shimmerPos;
+  late final bool _motionEnabled;
 
   @override
   void initState() {
     super.initState();
+    _motionEnabled = DevicePerformance.instance.enableDecorativeMotion;
 
-    // Float: smooth sine-like oscillation using easeInOut back-and-forth
-    _floatCtrl = AnimationController(vsync: this, duration: widget.floatDuration)
-      ..repeat(reverse: true);
-
+    _floatCtrl =
+        AnimationController(vsync: this, duration: widget.floatDuration);
     _floatY = Tween<double>(begin: 0.0, end: -widget.floatHeight).animate(
       CurvedAnimation(parent: _floatCtrl, curve: Curves.easeInOut),
     );
 
-    // Shimmer: sweeps from off-left to off-right
-    _shimmerCtrl = AnimationController(vsync: this, duration: widget.shimmerDuration)
-      ..repeat();
-
+    _shimmerCtrl =
+        AnimationController(vsync: this, duration: widget.shimmerDuration);
     _shimmerPos = Tween<double>(begin: -1.0, end: 2.0).animate(
       CurvedAnimation(parent: _shimmerCtrl, curve: Curves.linear),
     );
+
+    if (_motionEnabled) {
+      _floatCtrl.repeat(reverse: true);
+      // Shimmer only on high-end — float alone is enough for medium.
+      if (DevicePerformance.instance.enableShine) {
+        _shimmerCtrl.repeat();
+      }
+    }
   }
 
   @override
@@ -68,22 +74,31 @@ class _AnimatedTicketCardState extends State<AnimatedTicketCard>
 
   @override
   Widget build(BuildContext context) {
+    if (!_motionEnabled) {
+      return widget.child;
+    }
+
+    final shimmerOn = DevicePerformance.instance.enableShine;
+
     return AnimatedBuilder(
-      animation: Listenable.merge([_floatCtrl, _shimmerCtrl]),
+      animation: Listenable.merge([
+        _floatCtrl,
+        if (shimmerOn) _shimmerCtrl,
+      ]),
       builder: (context, child) {
         return Transform.translate(
           offset: Offset(0, _floatY.value),
           child: Stack(
             children: [
               child!,
-              // ── Diagonal shimmer overlay (pointer-transparent) ──────────
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: CustomPaint(
-                    painter: _ShimmerPainter(_shimmerPos.value),
+              if (shimmerOn)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: CustomPaint(
+                      painter: _ShimmerPainter(_shimmerPos.value),
+                    ),
                   ),
                 ),
-              ),
             ],
           ),
         );
@@ -93,11 +108,9 @@ class _AnimatedTicketCardState extends State<AnimatedTicketCard>
   }
 }
 
-// ── Shimmer band painter ───────────────────────────────────────────────────
 class _ShimmerPainter extends CustomPainter {
   _ShimmerPainter(this.progress);
 
-  /// Ranges from -1.0 (fully off-left) to 2.0 (fully off-right).
   final double progress;
 
   @override
@@ -116,7 +129,7 @@ class _ShimmerPainter extends CustomPainter {
           Colors.white.withValues(alpha: 0.14),
           Colors.transparent,
         ],
-        stops: [0.0, 0.3, 0.5, 0.7, 1.0],
+        stops: const [0.0, 0.3, 0.5, 0.7, 1.0],
         transform: _ShiftTransform(cx - bandHalf, size),
       ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
 

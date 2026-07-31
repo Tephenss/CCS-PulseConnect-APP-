@@ -56,10 +56,10 @@ class _StudentTicketsState extends State<StudentTickets> {
       }
     });
     _fallbackRefreshTimer = Timer.periodic(
-      const Duration(seconds: 40),
-      (_) => unawaited(_loadTickets(forceFresh: false)),
+      const Duration(seconds: 60),
+      (_) => unawaited(_loadTickets(forceFresh: true)),
     );
-    _loadTickets();
+    _loadTickets(forceFresh: true);
   }
 
   @override
@@ -89,16 +89,26 @@ class _StudentTicketsState extends State<StudentTickets> {
               userId,
               forceFresh: effectiveForceFresh,
             );
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[tickets] fetch error: $e');
       fetchFailed = true;
       allTickets = <Map<String, dynamic>>[];
     }
+
+    debugPrint('[tickets] fetched ${allTickets.length} rows, forceFresh=$effectiveForceFresh');
 
     // Keep online list behavior: show active events only.
     // Also require an actual ticket id from Supabase; registration rows without
     // a ticket should not appear here (prevents "ghost" tickets).
     final activeOnlineTickets = allTickets
-        .where((t) => _isTicketActive(t) && _hasTicketId(t))
+        .where((t) {
+          final active = _isTicketActive(t);
+          final hasId = _hasTicketId(t);
+          if (!active || !hasId) {
+            debugPrint('[tickets] filtered out: active=$active hasId=$hasId event=${t['events']?['title'] ?? t['event_id']}');
+          }
+          return active && hasId;
+        })
         .map((ticket) {
           final normalized = Map<String, dynamic>.from(ticket);
           normalized['local_cached'] = offline || fetchFailed;
@@ -172,6 +182,11 @@ class _StudentTicketsState extends State<StudentTickets> {
   }
 
   DateTime _extractSortDate(Map<String, dynamic> ticketMap) {
+    final event = ticketMap['events'];
+    final startAt = event is Map ? (event['start_at'] ?? '').toString() : '';
+    final eventDate = parseStoredEventDateTime(startAt);
+    if (eventDate != null) return eventDate;
+
     try {
       final registeredAt = (ticketMap['registered_at'] ?? '').toString();
       if (registeredAt.isNotEmpty) return DateTime.parse(registeredAt);
@@ -181,11 +196,6 @@ class _StudentTicketsState extends State<StudentTickets> {
       final downloadedAt = (ticketMap['downloaded_at_local'] ?? '').toString();
       if (downloadedAt.isNotEmpty) return DateTime.parse(downloadedAt);
     } catch (_) {}
-
-    final event = ticketMap['events'];
-    final startAt = event is Map ? (event['start_at'] ?? '').toString() : '';
-    final eventDate = parseStoredEventDateTime(startAt);
-    if (eventDate != null) return eventDate;
 
     return DateTime.fromMillisecondsSinceEpoch(0);
   }
@@ -245,7 +255,7 @@ class _StudentTicketsState extends State<StudentTickets> {
     }
 
     final list = merged.values.toList();
-    list.sort((a, b) => _extractSortDate(b).compareTo(_extractSortDate(a)));
+    list.sort((a, b) => _extractSortDate(a).compareTo(_extractSortDate(b)));
     return list;
   }
 

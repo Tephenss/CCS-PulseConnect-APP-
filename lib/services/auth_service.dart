@@ -21,6 +21,10 @@ class AuthService {
     caseSensitive: false,
   );
 
+  static bool _trustInFlight = false;
+  static int _lastTrustAttemptMs = 0;
+  static const Duration _trustMinInterval = Duration(seconds: 60);
+
   static bool isValidEmail(String? value) {
     final email = (value ?? '').trim();
     if (email.isEmpty) return false;
@@ -132,6 +136,11 @@ class AuthService {
   static int _authFlowDepth = 0;
   static bool get isAuthFlowBusy => _authFlowDepth > 0;
 
+  /// True while the email OTP gate is the active root screen.
+  static bool _otpGateActive = false;
+  static bool get isOtpGateActive => _otpGateActive;
+  static void setOtpGateActive(bool active) => _otpGateActive = active;
+
   static Future<T> runAuthFlow<T>(Future<T> Function() action) async {
     _authFlowDepth++;
     try {
@@ -150,15 +159,58 @@ class AuthService {
       if (deviceKey == null || deviceKey.isEmpty) {
         return null;
       }
-      final row = await _supabase
-          .from('trusted_devices')
-          .select('id')
-          .eq('user_id', id)
-          .eq('device_key', deviceKey)
-          .maybeSingle();
-      return row != null;
+      if (!MobileBackendService.isConfigured) {
+        return null;
+      }
+      final res = await MobileBackendService().checkDeviceTrust(
+        deviceKey: deviceKey,
+      );
+      if (res['ok'] != true) return null;
+      return res['trusted'] == true;
     } catch (_) {
       return null;
+    }
+  }
+
+  Future<void> trustCurrentDevice(String userId, {String? label}) async {
+    final id = userId.trim();
+    if (id.isEmpty) return;
+    if (!MobileBackendService.isConfigured) {
+      debugPrint('AuthService.trustCurrentDevice skipped: backend not configured');
+      return;
+    }
+
+    // Debounce: resume/idle was hammering the API and flooding logs on 500s.
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (_trustInFlight ||
+        (nowMs - _lastTrustAttemptMs) < _trustMinInterval.inMilliseconds) {
+      return;
+    }
+    _trustInFlight = true;
+    _lastTrustAttemptMs = nowMs;
+
+    try {
+      final deviceKey = await resolvePublicIpTrustKey(forceRefresh: true);
+      if (deviceKey == null || deviceKey.isEmpty) return;
+      final platform = Platform.isAndroid
+          ? 'android'
+          : (Platform.isIOS ? 'ios' : Platform.operatingSystem);
+      final res = await MobileBackendService().trustDevice(
+        deviceKey: deviceKey,
+        platform: platform,
+        label: (label ?? deviceKey).trim().isEmpty
+            ? deviceKey
+            : (label ?? deviceKey).trim(),
+      );
+      if (res['ok'] != true) {
+        debugPrint(
+          'AuthService.trustCurrentDevice failed: ${res['error'] ?? 'unknown'}',
+        );
+      }
+    } catch (e) {
+      debugPrint('AuthService.trustCurrentDevice failed: $e');
+    } finally {
+      _trustInFlight = false;
     }
   }
 
@@ -168,10 +220,6 @@ class AuthService {
   }
 
   /// OTP is required when the Manila day rolled over OR this public IP is new.
-  ///
-  /// [unknownTrustRequiresVerification]: when IP/trust cannot be resolved,
-  /// `true` forces OTP (login/bootstrap fail-closed), `false` keeps the
-  /// current session (mid-session enforce fail-open on transient network).
   Future<bool> requiresEmailVerification(
     Map<String, dynamic>? user, {
     bool unknownTrustRequiresVerification = true,
@@ -196,7 +244,6 @@ class AuthService {
     final userId = user['id']?.toString().trim() ?? '';
     if (userId.isEmpty) return 'unverified';
     final trusted = await checkDeviceTrust(userId);
-    // Unknown IP at login still requires OTP (fail closed).
     if (trusted != true) return 'new_ip';
     return null;
   }
@@ -215,32 +262,6 @@ class AuthService {
     }
   }
 
-  Future<void> trustCurrentDevice(String userId, {String? label}) async {
-    final id = userId.trim();
-    if (id.isEmpty) return;
-    final deviceKey = await resolvePublicIpTrustKey(forceRefresh: true);
-    if (deviceKey == null || deviceKey.isEmpty) return;
-    final now = DateTime.now().toUtc().toIso8601String();
-    final platform = Platform.isAndroid
-        ? 'android'
-        : (Platform.isIOS ? 'ios' : Platform.operatingSystem);
-    try {
-      await _supabase.from('trusted_devices').upsert({
-        'user_id': id,
-        'device_key': deviceKey,
-        'platform': platform,
-        'label': (label ?? deviceKey).trim().isEmpty
-            ? deviceKey
-            : (label ?? deviceKey).trim(),
-        'last_seen_at': now,
-        'trusted_at': now,
-      }, onConflict: 'user_id,device_key');
-    } catch (e) {
-      // Non-fatal: OTP still succeeded; trust can be retried next login.
-      debugPrint('AuthService.trustCurrentDevice failed: $e');
-    }
-  }
-
   /// Fresh signups can stay blocked while `pending` + verified + app pipeline.
   /// Established accounts should never be locked out by stale `pending` rows.
   static const int _adminReviewGateMaxAgeDays = 21;
@@ -256,11 +277,29 @@ class AuthService {
     return days >= _adminReviewGateMaxAgeDays;
   }
 
-  // Check if user is logged in
+  // Check if user is logged in (requires opaque mobile session token).
   Future<bool> isLoggedIn() async {
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id');
-    return userId != null && userId.isNotEmpty;
+    if (userId == null || userId.isEmpty) return false;
+    final token = await MobileBackendService.getSessionToken();
+    return token != null && token.isNotEmpty;
+  }
+
+  Map<String, dynamic> _stripPassword(Map<String, dynamic> user) {
+    final copy = Map<String, dynamic>.from(user);
+    copy.remove('password');
+    copy.remove('password_hash');
+    return copy;
+  }
+
+  Future<void> _persistLocalUser(Map<String, dynamic> user) async {
+    final prefs = await SharedPreferences.getInstance();
+    final safe = _stripPassword(user);
+    final role = (safe['role']?.toString() ?? 'student');
+    await prefs.setString('user_id', safe['id'].toString());
+    await prefs.setString('user_role', role);
+    await prefs.setString('user_data', jsonEncode(safe));
   }
 
   // Get current user data from SharedPreferences
@@ -290,25 +329,17 @@ class AuthService {
         _mergeAvatarCache(parsed, prefs, userId);
       }
 
-      // Keep avatar URL usable:
-      // - refresh signed URL when needed
-      // - if public URL is blocked, fallback to signed URL
+      // Avatars bucket is private (security lockdown). Always refresh via PHP
+      // BFF signed URL when we have a storage path + mobile session.
       final photoUrl = (parsed['photo_url'] as String?) ?? '';
       final photoPath =
           (parsed['photo_path'] as String?) ??
           _extractStoragePathFromUrl(photoUrl);
       final hasPath = photoPath != null && photoPath.isNotEmpty;
-      final isSigned = _isSupabaseSignedAvatarUrl(photoUrl);
-      final isPublic = _isSupabasePublicAvatarUrl(photoUrl);
-      if (hasPath && (isSigned || isPublic)) {
+      if (hasPath) {
         try {
-          final publicReachable = isPublic
-              ? await _isUrlReachable(photoUrl)
-              : false;
-          if (isSigned || !publicReachable) {
-            final freshSigned = await _supabase.storage
-                .from('avatars')
-                .createSignedUrl(photoPath, 60 * 60 * 24 * 30);
+          final freshSigned = await _resolveAvatarUrl(photoPath);
+          if (freshSigned != null && freshSigned.isNotEmpty) {
             parsed['photo_url'] = _withCacheBuster(freshSigned);
             parsed['photo_path'] = photoPath;
             if (userId.isNotEmpty) {
@@ -355,31 +386,45 @@ class AuthService {
         }
       }
 
+      // Last resort: upload convention is profiles/{userId}.{ext}.
+      final stillEmpty =
+          ((parsed['photo_url'] as String?) ?? '').trim().isEmpty;
+      if (stillEmpty && userId.isNotEmpty) {
+        try {
+          final guessedPath = await _guessAvatarPath(userId);
+          if (guessedPath != null && guessedPath.isNotEmpty) {
+            final rebuilt = await _resolveAvatarUrl(guessedPath);
+            if (rebuilt != null && rebuilt.isNotEmpty) {
+              final rebuiltWithCache = _withCacheBuster(rebuilt);
+              parsed['photo_url'] = rebuiltWithCache;
+              parsed['photo_path'] = guessedPath;
+              await _saveAvatarCache(
+                prefs,
+                userId,
+                rebuiltWithCache,
+                photoPath: guessedPath,
+              );
+              await prefs.setString('user_data', jsonEncode(parsed));
+            }
+          }
+        } catch (_) {}
+      }
+
       return parsed;
     }
     return null;
   }
 
-  // Refresh current logged-in user from Supabase, then update local cache.
+  // Refresh current logged-in user from PHP session endpoint.
   Future<Map<String, dynamic>?> refreshCurrentUserFromServer() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('user_id') ?? '';
-      if (userId.isEmpty) return null;
-
-      final response = await _supabase
-          .from('users')
-          .select()
-          .eq('id', userId)
-          .limit(1);
-      if (response.isEmpty) return null;
-
-      final user = Map<String, dynamic>.from(response[0] as Map);
-      await prefs.setString('user_data', jsonEncode(user));
-      await prefs.setString(
-        'user_role',
-        (user['role']?.toString() ?? 'student'),
-      );
+      if (!MobileBackendService.isConfigured) return null;
+      final res = await MobileBackendService().sessionCheck();
+      if (res['ok'] != true) return null;
+      final userRaw = res['user'];
+      if (userRaw is! Map) return null;
+      final user = _stripPassword(Map<String, dynamic>.from(userRaw));
+      await _persistLocalUser(user);
       await _offlineBackupService.autoBackupIfConfigured();
       return user;
     } catch (_) {
@@ -406,84 +451,33 @@ class AuthService {
       if (!isValidEmail(normalizedEmail)) {
         return {'ok': false, 'error': 'Please enter a valid email address.'};
       }
-
-      // Query user by email
-      final response = await _supabase
-          .from('users')
-          .select()
-          .eq('email', normalizedEmail)
-          .limit(1);
-
-      if (response.isEmpty) {
-        return {'ok': false, 'error': 'No account found with that email.'};
-      }
-
-      final user = Map<String, dynamic>.from(response[0] as Map);
-      final storedHash = user['password'] as String? ?? '';
-
-      // Simple password verification workaround:
-      // We check if the password matches via the web API
-      final verified = _verifyBcryptPassword(password, storedHash);
-
-      if (!verified) {
-        return {'ok': false, 'error': 'Incorrect password.'};
-      }
-
-      // Check role
-      final role = user['role'] as String? ?? 'student';
-      if (role == 'admin') {
-        return {
-          'ok': false,
-          'error': 'Admin accounts must use the web dashboard.',
-        };
-      }
-
-      // Enforce Role
-      if (role.toLowerCase() != expectedRole.toLowerCase()) {
+      if (!MobileBackendService.isConfigured) {
         return {
           'ok': false,
           'error':
-              'This account is registered as a ${role == 'teacher' ? 'Teacher' : 'Student'}, not a $expectedRole.',
+              'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
         };
       }
 
-      // Student application review gate (mobile app signups only):
-      // - `manage_applications` / admin APIs scope pending queue to
-      //   registration_source=app. Only those users should be blocked here.
-      // - Web/legacy students with pending+verified (data drift, old imports)
-      //   should not be locked out of an account they already use.
-      // - unverified => allow passing to verification screen first
-      // - rejected => blocked with admin note
-      // Legacy approved student rows may still have a blank/null account_status,
-      // so never coerce missing values to "pending" here.
-      final accountStatus =
-          (user['account_status']?.toString().toLowerCase() ?? '').trim();
-      final registrationSource =
-          (user['registration_source']?.toString().toLowerCase() ?? '').trim();
-      final emailVerified = user['email_verified'] == true;
-      if (role.toLowerCase() == 'student') {
-        if (accountStatus == 'pending' &&
-            emailVerified &&
-            registrationSource == 'app' &&
-            !_shouldBypassPendingAdminReviewGate(user)) {
-          return {
-            'ok': false,
-            'error':
-                'Your account is under admin review. Please wait for approval email.',
-          };
-        }
-        if (accountStatus == 'rejected') {
-          final note = (user['approval_note']?.toString() ?? '').trim();
-          return {
-            'ok': false,
-            'error': note.isNotEmpty
-                ? 'Your application was not approved: $note'
-                : 'Your application was not approved. Please contact admin.',
-          };
-        }
+      final loginRes = await MobileBackendService().login(
+        email: normalizedEmail,
+        password: password,
+        expectedRole: expectedRole,
+      );
+      if (loginRes['ok'] != true) {
+        return {
+          'ok': false,
+          'error': loginRes['error']?.toString() ?? 'Login failed.',
+        };
       }
 
-      // Save user data locally
+      final userRaw = loginRes['user'];
+      if (userRaw is! Map) {
+        return {'ok': false, 'error': 'Invalid login response.'};
+      }
+      final user = _stripPassword(Map<String, dynamic>.from(userRaw));
+      final role = user['role'] as String? ?? 'student';
+
       final prefs = await SharedPreferences.getInstance();
       final previousUserData = prefs.getString('user_data');
       if (previousUserData != null) {
@@ -495,16 +489,14 @@ class AuthService {
             if (incomingPhoto.isEmpty && previousPhoto.isNotEmpty) {
               user['photo_url'] = previousPhoto;
             }
-
             final previousPhotoPath = (prev['photo_path'] as String?) ?? '';
             if (previousPhotoPath.isNotEmpty) {
               user['photo_path'] = previousPhotoPath;
             }
           }
-        } catch (_) {
-          // Ignore broken cached data and continue.
-        }
+        } catch (_) {}
       }
+
       final userId = user['id']?.toString() ?? '';
       var restoredOfflineQueueCount = 0;
       var syncedOfflineQueueCount = 0;
@@ -512,9 +504,7 @@ class AuthService {
       if (userId.isNotEmpty) {
         _mergeAvatarCache(user, prefs, userId);
       }
-      await prefs.setString('user_id', user['id'].toString());
-      await prefs.setString('user_role', role);
-      await prefs.setString('user_data', jsonEncode(user));
+      await _persistLocalUser(user);
       if (userId.isNotEmpty) {
         final cachedPhoto = (user['photo_url'] as String?) ?? '';
         final cachedPath =
@@ -554,9 +544,7 @@ class AuthService {
             actorId: userId,
             isTeacher: isTeacher,
           );
-        } catch (_) {
-          // Keep login resilient if offline recovery cannot finish right away.
-        }
+        } catch (_) {}
       }
       await _offlineBackupService.autoBackupIfConfigured(force: true);
 
@@ -572,7 +560,7 @@ class AuthService {
     }
   }
 
-  // Register new student account
+  // Register new student account via PHP (never writes password via anon key).
   Future<Map<String, dynamic>> register({
     required String firstName,
     required String middleName,
@@ -588,23 +576,13 @@ class AuthService {
       if (!isValidEmail(normalizedEmail)) {
         return {'ok': false, 'error': 'Please enter a valid email address.'};
       }
-
-      // Check if email already exists
-      final existing = await _supabase
-          .from('users')
-          .select('id')
-          .eq('email', normalizedEmail)
-          .limit(1);
-
-      if (existing.isNotEmpty) {
+      if (!MobileBackendService.isConfigured) {
         return {
           'ok': false,
-          'error': 'An account with this email already exists.',
+          'error':
+              'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
         };
       }
-
-      // Hash password using native Bcrypt for web dashboard compatibility
-      final passwordHash = BCrypt.hashpw(password, BCrypt.gensalt());
 
       final normalizedCourse = course.trim().toUpperCase();
       if (normalizedCourse != 'IT' && normalizedCourse != 'CS') {
@@ -614,50 +592,29 @@ class AuthService {
         };
       }
 
-      final payload = {
+      final result = await MobileBackendService().registerUser({
         'first_name': firstName.trim(),
-        'middle_name': middleName.trim().isEmpty ? null : middleName.trim(),
+        'middle_name': middleName.trim(),
         'last_name': lastName.trim(),
-        'suffix': suffix.trim().isEmpty ? null : suffix.trim(),
+        'suffix': suffix.trim(),
         'student_id': idNumber.trim(),
         'course': normalizedCourse,
         'email': normalizedEmail,
-        'password': passwordHash,
-        'email_verified': false,
-        'account_status': 'preverify',
-        'registration_source': 'app',
-        'section_id': null, // Section is selected purely post-login
-        'role': 'student',
-      };
+        'password': password,
+      });
 
-      dynamic response;
-      try {
-        response = await _supabase
-            .from('users')
-            .insert(payload)
-            .select()
-            .single();
-      } catch (e) {
-        final message = e.toString().toLowerCase();
-        final preverifyConstraintError =
-            message.contains('users_account_status_check') &&
-            message.contains('preverify');
-        if (!preverifyConstraintError) {
-          rethrow;
-        }
-
-        // Compatibility fallback for environments where DB constraint
-        // was not migrated yet to include "preverify".
-        final fallbackPayload = Map<String, dynamic>.from(payload);
-        fallbackPayload['account_status'] = 'pending';
-        response = await _supabase
-            .from('users')
-            .insert(fallbackPayload)
-            .select()
-            .single();
+      if (result['ok'] != true) {
+        return {
+          'ok': false,
+          'error': result['error']?.toString() ?? 'Registration failed.',
+        };
       }
 
-      return {'ok': true, 'user': response};
+      final userRaw = result['user'];
+      final user = userRaw is Map
+          ? _stripPassword(Map<String, dynamic>.from(userRaw))
+          : null;
+      return {'ok': true, 'user': user};
     } catch (e) {
       return {'ok': false, 'error': 'Registration failed: ${e.toString()}'};
     }
@@ -665,20 +622,15 @@ class AuthService {
 
   Future<void> _unregisterDevicePushToken({String? userId}) async {
     try {
-      final resolvedUserId = (userId ?? '').trim();
       String? token;
       try {
         token = await FirebaseMessaging.instance.getToken();
       } catch (_) {
         token = null;
       }
-
-      if (token != null && token.isNotEmpty) {
-        await _supabase.from('fcm_tokens').delete().eq('token', token);
-      }
-      if (resolvedUserId.isNotEmpty) {
-        await _supabase.from('fcm_tokens').delete().eq('user_id', resolvedUserId);
-      }
+      await MobileBackendService().secureWrite('fcm_delete', {
+        if (token != null && token.isNotEmpty) 'token': token,
+      });
     } catch (_) {
       // Non-fatal: logout/session clear must continue.
     }
@@ -689,14 +641,18 @@ class AuthService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id');
-
-      // Detach this device token + user rows so pushes stop while logged out.
       await _unregisterDevicePushToken(userId: userId);
+      try {
+        await MobileBackendService().logout();
+      } catch (_) {
+        await MobileBackendService.clearSessionToken();
+      }
     } catch (e) {
-      // Fail silently - still proceed with logout
+      await MobileBackendService.clearSessionToken();
     }
     final prefs = await SharedPreferences.getInstance();
     final preservedStringLists = <String, List<String>>{};
+    final preservedInts = <String, int>{};
     for (final key in prefs.getKeys()) {
       if (key == 'shown_local_interactive_notifications' ||
           key.startsWith('shown_local_interactive_notifications_') ||
@@ -707,25 +663,65 @@ class AuthService {
           preservedStringLists[key] = List<String>.from(value);
         }
       }
+      // Keep OTP resend cooldown across logout / back → login so we don't spam.
+      if (key.startsWith('email_verify_cooldown_until_')) {
+        final value = prefs.getInt(key);
+        if (value != null) {
+          preservedInts[key] = value;
+        }
+      }
     }
     await prefs.clear();
     for (final entry in preservedStringLists.entries) {
       await prefs.setStringList(entry.key, entry.value);
     }
+    for (final entry in preservedInts.entries) {
+      await prefs.setInt(entry.key, entry.value);
+    }
     await OfflineScanStore.instance.clearAll();
     await _offlineBackupService.autoBackupIfConfigured();
   }
 
-  // Clear local login markers and detach this device from push delivery.
-  Future<void> clearLocalSessionMarkers() async {
+  /// Clear local login markers so the app is not treated as fully signed-in.
+  ///
+  /// [keepMobileSession]: OTP gate only — keep the opaque session from login so
+  /// post-verify APIs (avatar signed URLs, FCM, inbox, device trust) still work.
+  /// Do not unregister push or wipe the offline scan store in that mode.
+  Future<void> clearLocalSessionMarkers({bool keepMobileSession = false}) async {
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id');
-    await _unregisterDevicePushToken(userId: userId);
+    if (!keepMobileSession) {
+      await _unregisterDevicePushToken(userId: userId);
+      await MobileBackendService.clearSessionToken();
+      await OfflineScanStore.instance.clearAll();
+    }
     await prefs.remove('user_id');
     await prefs.remove('user_role');
     await prefs.remove('user_data');
-    await OfflineScanStore.instance.clearAll();
     await _offlineBackupService.autoBackupIfConfigured();
+  }
+
+  /// Persist user after OTP and restore avatar URL from local cache when missing.
+  Future<void> persistUserAfterOtp(Map<String, dynamic> user) async {
+    final prefs = await SharedPreferences.getInstance();
+    final safe = _stripPassword(user);
+    final userId = safe['id']?.toString() ?? '';
+    if (userId.isNotEmpty) {
+      _mergeAvatarCache(safe, prefs, userId);
+      final photoUrl = (safe['photo_url'] as String?) ?? '';
+      final photoPath =
+          (safe['photo_path'] as String?) ??
+          _extractStoragePathFromUrl(photoUrl);
+      if (photoUrl.isNotEmpty) {
+        await _saveAvatarCache(
+          prefs,
+          userId,
+          photoUrl,
+          photoPath: photoPath,
+        );
+      }
+    }
+    await _persistLocalUser(safe);
   }
 
   // Simple password hashing (for MVP)
@@ -837,18 +833,26 @@ class AuthService {
       final userId = prefs.getString('user_id');
       if (userId == null) return {'ok': false, 'error': 'Not logged in'};
 
-      final response = await _supabase
-          .from('users')
-          .update({'section_id': sectionId})
-          .eq('id', userId)
-          .select()
-          .single();
+      final response = await MobileBackendService().updateProfile({
+        'section_id': sectionId,
+      });
+      if (response['ok'] != true) {
+        return {
+          'ok': false,
+          'error': response['error']?.toString() ?? 'Failed to update section',
+        };
+      }
 
-      // Update local storage
-      await prefs.setString('user_data', jsonEncode(response));
+      final userRaw = response['user'];
+      final user = userRaw is Map
+          ? _stripPassword(Map<String, dynamic>.from(userRaw))
+          : null;
+      if (user != null) {
+        await _persistLocalUser(user);
+      }
       await _offlineBackupService.autoBackupIfConfigured();
 
-      return {'ok': true, 'user': response};
+      return {'ok': true, 'user': user};
     } catch (e) {
       return {
         'ok': false,
@@ -869,20 +873,19 @@ class AuthService {
 
       String? warning;
 
-      // 1. Try updating Supabase
       try {
-        await _supabase
-            .from('users')
-            .update({'photo_url': photoUrl})
-            .eq('id', userId);
-      } catch (e) {
-        if (!_isMissingPhotoUrlColumn(e)) {
+        final response = await MobileBackendService().updateProfile({
+          'photo_url': photoUrl,
+        });
+        if (response['ok'] != true) {
           warning =
-              'Photo uploaded, but profile sync to users table failed: ${e.toString()}';
+              'Photo uploaded, but profile sync failed: ${response['error']}';
         }
+      } catch (e) {
+        warning =
+            'Photo uploaded, but profile sync to users table failed: ${e.toString()}';
       }
 
-      // 2. Update local storage
       final userDataStr = prefs.getString('user_data');
       final Map<String, dynamic> userData = userDataStr != null
           ? (jsonDecode(userDataStr) as Map<String, dynamic>)
@@ -891,7 +894,7 @@ class AuthService {
       if (photoPath != null && photoPath.isNotEmpty) {
         userData['photo_path'] = photoPath;
       }
-      await prefs.setString('user_data', jsonEncode(userData));
+      await prefs.setString('user_data', jsonEncode(_stripPassword(userData)));
       await _saveAvatarCache(
         prefs,
         userId,
@@ -956,23 +959,38 @@ class AuthService {
   }
 
   Future<String?> _resolveAvatarUrl(String filePath) async {
-    final publicUrl = _supabase.storage.from('avatars').getPublicUrl(filePath);
+    final path = filePath.trim().replaceFirst(RegExp(r'^/+'), '');
+    if (path.isEmpty) return null;
 
-    // If public URL works, use it.
+    // Prefer PHP BFF (service role) — avatars bucket is private; anon cannot sign.
+    if (MobileBackendService.isConfigured) {
+      try {
+        final token = await MobileBackendService.getSessionToken();
+        if (token != null && token.isNotEmpty) {
+          final res = await MobileBackendService().createSignedStorageUrl(
+            bucket: 'avatars',
+            path: path,
+            expiresIn: 60 * 60 * 12,
+          );
+          final signed = (res['signed_url']?.toString() ?? '').trim();
+          if (res['ok'] == true && signed.isNotEmpty) {
+            return signed;
+          }
+        }
+      } catch (_) {}
+    }
+
+    final publicUrl = _supabase.storage.from('avatars').getPublicUrl(path);
     if (await _isUrlReachable(publicUrl)) return publicUrl;
 
-    // Public access might be disabled; fallback to signed URL.
     try {
       final signedUrl = await _supabase.storage
           .from('avatars')
-          .createSignedUrl(filePath, 60 * 60 * 24 * 30);
+          .createSignedUrl(path, 60 * 60 * 24);
       if (signedUrl.isNotEmpty) return signedUrl;
-    } catch (_) {
-      // no-op
-    }
+    } catch (_) {}
 
-    // Final fallback: still return public URL in case network check was inconclusive.
-    return publicUrl;
+    return null;
   }
 
   Future<bool> _isUrlReachable(String url) async {
@@ -1043,8 +1061,16 @@ class AuthService {
 
   String? _extractStoragePathFromUrl(String url) {
     if (url.isEmpty) return null;
+    final trimmed = url.trim();
+    // Already a storage object path (e.g. profiles/{userId}.jpg).
+    if (!trimmed.contains('://') &&
+        (trimmed.startsWith('profiles/') || trimmed.startsWith('avatars/'))) {
+      return trimmed.startsWith('avatars/')
+          ? trimmed.substring('avatars/'.length)
+          : trimmed;
+    }
     try {
-      final uri = Uri.parse(url);
+      final uri = Uri.parse(trimmed);
       final path =
           uri.path; // /storage/v1/object/(public|sign)/avatars/<filePath>
 
@@ -1059,6 +1085,23 @@ class AuthService {
       }
     } catch (_) {
       // no-op
+    }
+    return null;
+  }
+
+  /// After lockdown, photo_url may be a dead public URL with no photo_path.
+  /// Upload convention is profiles/{userId}.{ext}.
+  Future<String?> _guessAvatarPath(String userId) async {
+    final id = userId.trim();
+    if (id.isEmpty) return null;
+    for (final ext in ['jpg', 'jpeg', 'png', 'webp']) {
+      final path = 'profiles/$id.$ext';
+      final url = await _resolveAvatarUrl(path);
+      if (url != null &&
+          url.isNotEmpty &&
+          await _isUrlReachable(url)) {
+        return path;
+      }
     }
     return null;
   }

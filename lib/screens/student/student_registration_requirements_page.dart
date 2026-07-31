@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as path;
@@ -31,17 +32,24 @@ class StudentRegistrationRequirementsPage extends StatefulWidget {
 }
 
 class _StudentRegistrationRequirementsPageState
-    extends State<StudentRegistrationRequirementsPage> {
+    extends State<StudentRegistrationRequirementsPage>
+    with WidgetsBindingObserver {
+  static const _pendingPickRequirementKey = 'pending_student_req_upload_id';
+  static const _pendingPickEventKey = 'pending_student_req_upload_event';
+
   final _eventService = EventService();
   StreamSubscription<String>? _eventLiveSubscription;
 
   String _studentId = '';
   bool _isLoading = true;
   bool _isUploading = false;
+  bool _isPickingFile = false;
   bool _isSubmitting = false;
+  bool _recoveringPendingPick = false;
   int _uploadProgress = 0;
   String? _errorMessage;
   String? _uploadingRequirementId;
+  String? _pickingRequirementId;
   String _status = '';
   String _declineReason = '';
   String _statusMessage = '';
@@ -58,6 +66,7 @@ class _StudentRegistrationRequirementsPageState
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
       if (!mounted) return;
       final eventId = widget.eventId;
@@ -86,13 +95,23 @@ class _StudentRegistrationRequirementsPageState
       _eventService.clearStudentRequirementsCache(eventId);
       unawaited(_loadData(silent: true));
     });
-    _loadData();
+    _loadData().then((_) {
+      unawaited(_recoverPendingPickIfNeeded());
+    });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _eventLiveSubscription?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_recoverPendingPickIfNeeded());
+    }
   }
 
   String get _eventTitle =>
@@ -306,38 +325,121 @@ class _StudentRegistrationRequirementsPageState
     return null;
   }
 
+  Future<void> _rememberPendingPick(String requirementId) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_pendingPickRequirementKey, requirementId);
+    await prefs.setString(_pendingPickEventKey, widget.eventId);
+  }
+
+  Future<void> _clearPendingPickMemory() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_pendingPickRequirementKey);
+    await prefs.remove(_pendingPickEventKey);
+    await NativeDocumentPicker.clearPendingDocument();
+  }
+
+  Future<void> _recoverPendingPickIfNeeded() async {
+    if (!_canUpload || _isUploading || _isPickingFile || _recoveringPendingPick) {
+      return;
+    }
+    if (_studentId.isEmpty) return;
+
+    _recoveringPendingPick = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final requirementId =
+          (prefs.getString(_pendingPickRequirementKey) ?? '').trim();
+      final eventId = (prefs.getString(_pendingPickEventKey) ?? '').trim();
+      if (requirementId.isEmpty || eventId != widget.eventId) {
+        return;
+      }
+
+      final pending = await NativeDocumentPicker.takePendingDocument();
+      if (pending == null) return;
+
+      Map<String, dynamic>? requirement;
+      for (final row in _requirements) {
+        if ((row['id']?.toString() ?? '') == requirementId) {
+          requirement = row;
+          break;
+        }
+      }
+      if (requirement == null) {
+        await _clearPendingPickMemory();
+        return;
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Resuming your file upload…'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      await _uploadPickedFile(
+        requirement: requirement,
+        fileName: pending.name,
+        filePath: pending.path,
+      );
+    } finally {
+      _recoveringPendingPick = false;
+    }
+  }
+
   Future<void> _pickAndUpload(Map<String, dynamic> requirement) async {
-    if (!_canUpload || _isUploading) return;
+    if (!_canUpload || _isUploading || _isPickingFile) return;
 
     final requirementId = requirement['id']?.toString() ?? '';
     if (requirementId.isEmpty) return;
 
     String fileName = 'document.pdf';
+    String? filePath;
     Uint8List? bytes;
 
+    setState(() {
+      _isPickingFile = true;
+      _pickingRequirementId = requirementId;
+    });
     try {
+      await _rememberPendingPick(requirementId);
+
+      // Free image cache before leaving to the system picker — low-RAM Oppo
+      // devices often kill the Flutter process while Documents UI is open.
+      PaintingBinding.instance.imageCache.clear();
+      PaintingBinding.instance.imageCache.clearLiveImages();
+
       if (Platform.isAndroid) {
-        // Native SAF picker is more stable on Oppo/ColorOS than file_picker.
+        // Native SAF picker + pending recovery (stable on low-RAM / ColorOS).
         final native = await NativeDocumentPicker.pickAndroid();
-        if (native == null) return;
+        if (native == null) {
+          await _clearPendingPickMemory();
+          return;
+        }
         fileName = native.name.trim().isNotEmpty
             ? native.name.trim()
             : 'document.pdf';
-        bytes = native.bytes;
+        filePath = native.path;
       } else {
         final result = await FilePicker.platform.pickFiles(
-          type: FileType.any,
+          type: FileType.custom,
+          allowedExtensions: _allowedExtensions.toList(),
           allowMultiple: false,
           withData: false,
-          withReadStream: true,
+          withReadStream: false,
           compressionQuality: 0,
         );
-        if (result == null || result.files.isEmpty) return;
+        if (result == null || result.files.isEmpty) {
+          await _clearPendingPickMemory();
+          return;
+        }
         final picked = result.files.first;
         fileName = picked.name.trim().isNotEmpty
             ? picked.name.trim()
             : 'document.pdf';
-        bytes = await _readPickedBytes(picked);
+        filePath = picked.path;
+        if (filePath == null || filePath.trim().isEmpty) {
+          bytes = await _readPickedBytes(picked);
+        }
       }
     } on PlatformException catch (error) {
       if (!mounted) return;
@@ -345,24 +447,49 @@ class _StudentRegistrationRequirementsPageState
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            message.isEmpty
-                ? 'Unable to open file picker.'
-                : message,
+            message.isEmpty ? 'Unable to open file picker.' : message,
           ),
         ),
       );
+      await _clearPendingPickMemory();
       return;
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Unable to open file picker: $error')),
       );
+      await _clearPendingPickMemory();
       return;
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isPickingFile = false;
+          _pickingRequirementId = null;
+        });
+      }
     }
+
+    await _uploadPickedFile(
+      requirement: requirement,
+      fileName: fileName,
+      filePath: filePath,
+      bytes: bytes,
+    );
+  }
+
+  Future<void> _uploadPickedFile({
+    required Map<String, dynamic> requirement,
+    required String fileName,
+    String? filePath,
+    Uint8List? bytes,
+  }) async {
+    final requirementId = requirement['id']?.toString() ?? '';
+    if (requirementId.isEmpty || _isUploading) return;
 
     final extension =
         path.extension(fileName).toLowerCase().replaceFirst('.', '');
     if (!_allowedExtensions.contains(extension)) {
+      await _clearPendingPickMemory();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -374,6 +501,31 @@ class _StudentRegistrationRequirementsPageState
       return;
     }
 
+    final resolvedPath = (filePath ?? '').trim();
+    final hasPath = resolvedPath.isNotEmpty && await File(resolvedPath).exists();
+    final hasBytes = bytes != null && bytes.isNotEmpty;
+    if (!hasPath && !hasBytes) {
+      await _clearPendingPickMemory();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Unable to read the selected file.')),
+      );
+      return;
+    }
+
+    // Guard oversized files without loading them fully into RAM.
+    if (hasPath) {
+      final size = await File(resolvedPath).length();
+      if (size > 15 * 1024 * 1024) {
+        await _clearPendingPickMemory();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('File is too large. Max 15 MB.')),
+        );
+        return;
+      }
+    }
+
     if (!mounted) return;
     setState(() {
       _isUploading = true;
@@ -382,20 +534,13 @@ class _StudentRegistrationRequirementsPageState
     });
 
     try {
-      if (bytes == null || bytes.isEmpty) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Unable to read the selected file.')),
-        );
-        return;
-      }
-
       final upload = await _trackUploadProgress(
         _eventService.uploadStudentRequirementDocument(
           eventId: widget.eventId,
           requirementId: requirementId,
           studentId: _studentId,
-          bytes: bytes,
+          filePath: hasPath ? resolvedPath : null,
+          bytes: hasPath ? null : bytes,
           fileName: fileName,
           mimeType: _detectMimeType(fileName),
         ),
@@ -405,6 +550,7 @@ class _StudentRegistrationRequirementsPageState
         throw Exception(upload['error']?.toString() ?? 'Upload failed.');
       }
 
+      await _clearPendingPickMemory();
       if (!mounted) return;
       _applyUploadedDocument(requirementId, upload, fileName);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -435,23 +581,56 @@ class _StudentRegistrationRequirementsPageState
         widget.eventId,
         _studentId,
       );
-      if (result['ok'] != true && result['already_approved'] != true) {
+      if (result['ok'] != true &&
+          result['already_approved'] != true &&
+          result['already_pending'] != true) {
         throw Exception(result['error']?.toString() ?? 'Submit failed.');
       }
 
       if (!mounted) return;
+      setState(() {
+        _status = result['already_approved'] == true
+            ? 'approved'
+            : 'pending_review';
+        _statusMessage = _status == 'approved'
+            ? 'Your documents were approved. You may now register.'
+            : 'Your documents are under review. Registration will open after approval.';
+      });
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
+        SnackBar(
           content: Text(
-            'Documents submitted for review. You can register after approval.',
+            _status == 'approved'
+                ? 'Documents already approved.'
+                : 'Documents submitted for review. You can register after approval.',
           ),
         ),
       );
       Navigator.pop(context, true);
     } catch (error) {
       if (!mounted) return;
+      final raw = error.toString();
+      final message = raw.startsWith('Exception: ')
+          ? raw.substring('Exception: '.length)
+          : raw;
+      // Recover UI if server already has pending but local status was stale.
+      if (message.toLowerCase().contains('under review')) {
+        setState(() {
+          _status = 'pending_review';
+          _statusMessage =
+              'Your documents are under review. Registration will open after approval.';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Documents are already under review. Waiting for teacher approval.',
+            ),
+          ),
+        );
+        Navigator.pop(context, true);
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(error.toString())),
+        SnackBar(content: Text(message)),
       );
     } finally {
       if (mounted) {
@@ -777,12 +956,37 @@ class _StudentRegistrationRequirementsPageState
                 color: _studentPrimary(context),
               ),
             ),
+          ] else if (_isPickingFile && _pickingRequirementId == requirementId) ...[
+            Row(
+              children: [
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.2,
+                    color: _studentPrimary(context),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Opening files… keep the app open',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: _studentPrimary(context),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ] else
             SizedBox(
               width: double.infinity,
               height: 48,
               child: OutlinedButton.icon(
-                onPressed: _canUpload ? () => _pickAndUpload(requirement) : null,
+                onPressed: (_canUpload && !_isPickingFile && !_isUploading)
+                    ? () => _pickAndUpload(requirement)
+                    : null,
                 icon: Icon(
                   hasUpload
                       ? Icons.refresh_rounded

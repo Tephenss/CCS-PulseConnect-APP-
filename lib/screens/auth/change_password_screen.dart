@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
+import '../../services/mobile_backend_service.dart';
 import '../../services/notification_service.dart';
 import '../../widgets/custom_loader.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:bcrypt/bcrypt.dart';
 import '../../utils/teacher_theme_utils.dart';
 
 class ChangePasswordScreen extends StatefulWidget {
@@ -71,8 +70,8 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> with Ticker
       return;
     }
 
-    if (newPassword.length < 6) {
-      _showError('Password must be at least 6 characters.');
+    if (newPassword.length < 8) {
+      _showError('Password must be at least 8 characters.');
       return;
     }
 
@@ -82,22 +81,23 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen> with Ticker
       final user = await AuthService().getCurrentUser();
       if (user == null) throw Exception('User not logged in');
 
-      // Verify old password securely using centralized AuthService
-      final authCheck = await AuthService().login(user['email'], oldPassword, user['role'] ?? 'student');
-      if (authCheck['ok'] != true) {
-        _showError('Incorrect current password.');
+      if (!MobileBackendService.isConfigured) {
+        _showError('Secure backend is required to change password.');
         if (mounted) setState(() => _isLoading = false);
         return;
       }
 
-      // Hash the new password properly (Bcrypt to match web system schema)
-      final newHashedPassword = BCrypt.hashpw(newPassword, BCrypt.gensalt());
-
-      // Update Supabase directly, completely decoupling from the insecure PHP API
-      await Supabase.instance.client
-          .from('users')
-          .update({'password': newHashedPassword})
-          .eq('id', user['id']);
+      final result = await MobileBackendService().changePassword(
+        currentPassword: oldPassword,
+        newPassword: newPassword,
+      );
+      if (result['ok'] != true) {
+        _showError(
+          result['error']?.toString() ?? 'Incorrect current password.',
+        );
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
 
       // Trigger local notification!
       await NotificationService().addPasswordChangeNotification();

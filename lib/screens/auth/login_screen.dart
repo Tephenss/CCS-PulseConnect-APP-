@@ -2,15 +2,11 @@ import 'dart:async';
 import 'dart:ui' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import '../../services/auth_service.dart';
-import '../student/student_home.dart';
-import '../teacher/teacher_home.dart';
 import 'forgot_password_screen.dart';
-import 'email_verification_screen.dart';
 import '../../services/push_notification_service.dart';
 import '../../widgets/custom_loader.dart';
 import '../../main.dart';
 import '../../utils/teacher_theme_utils.dart';
-import '../welcome_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   final String role;
@@ -143,6 +139,10 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         final needsVerification = gateReason != null;
         if (!mounted) return;
 
+        debugPrint(
+          '[Login] ok role=$currentRole gate=$gateReason needsOtp=$needsVerification',
+        );
+
         final restoredOfflineQueueCount =
             (result['restored_offline_queue_count'] is num)
                 ? (result['restored_offline_queue_count'] as num).toInt()
@@ -165,62 +165,34 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                             '',
                       ) ??
                     0;
-        PulseConnectApp.of(context).updateTheme(
-          currentRole,
-          course: userData['course']?.toString(),
-        );
-
+        // Root navigator hard-replace — MaterialApp.home alone won't move
+        // after Welcome→Login has already pushed routes.
         if (needsVerification) {
-          // Do not keep a logged-in session (or FCM token) until OTP is done.
-          await _authService.clearLocalSessionMarkers();
-        } else {
-          await PushNotificationService().updateToken();
+          PulseConnectApp.of(context).showEmailVerificationGate(
+            userData,
+            gateReason: gateReason,
+          );
+          return;
         }
 
+        await PushNotificationService().updateToken();
         if (!mounted) return;
         _showOfflineRecoveryNotices(
           restoredCount: restoredOfflineQueueCount,
           syncedCount: syncedOfflineQueueCount,
           reconciledCount: reconciledOfflineQueueCount,
         );
-        Navigator.pushAndRemoveUntil(
-          context,
-          PageRouteBuilder(
-            transitionDuration: const Duration(milliseconds: 260),
-            reverseTransitionDuration: const Duration(milliseconds: 220),
-            transitionsBuilder: (context, animation, secondaryAnimation, child) {
-              final slide = Tween<Offset>(
-                begin: const Offset(0.08, 0),
-                end: Offset.zero,
-              ).animate(
-                CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
-              );
-              final fade =
-                  CurvedAnimation(parent: animation, curve: Curves.easeOut);
-              return FadeTransition(
-                opacity: fade,
-                child: SlideTransition(position: slide, child: child),
-              );
-            },
-            pageBuilder: (context, animation, secondaryAnimation) {
-              if (needsVerification) {
-                return EmailVerificationScreen(
-                  user: userData,
-                  gateReason: gateReason,
-                );
-              }
-              return currentRole.toLowerCase() == 'teacher'
-                  ? const TeacherHome()
-                  : const StudentHome();
-            },
-          ),
-          (route) => false,
+        if (!mounted) return;
+        PulseConnectApp.of(context).enterAppAfterAuth(
+          role: currentRole,
+          course: userData['course']?.toString(),
         );
       } else {
         if (!mounted) return;
         setState(() => _errorMessage = result['error'] as String?);
       }
-    } catch (_) {
+    } catch (e, st) {
+      debugPrint('[Login] error: $e\n$st');
       if (!mounted) return;
       setState(() {
         _isLoading = false;
@@ -230,27 +202,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   }
 
   void _goToWelcome() {
-    Navigator.pushAndRemoveUntil(
-      context,
-      PageRouteBuilder(
-        transitionDuration: const Duration(milliseconds: 240),
-        reverseTransitionDuration: const Duration(milliseconds: 200),
-        transitionsBuilder: (context, animation, secondaryAnimation, child) {
-          final slide = Tween<Offset>(
-            begin: const Offset(-0.06, 0),
-            end: Offset.zero,
-          ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic));
-          final fade = CurvedAnimation(parent: animation, curve: Curves.easeOut);
-          return FadeTransition(
-            opacity: fade,
-            child: SlideTransition(position: slide, child: child),
-          );
-        },
-        pageBuilder: (context, animation, secondaryAnimation) =>
-            const WelcomeScreen(),
-      ),
-      (route) => false,
-    );
+    PulseConnectApp.of(context).exitEmailVerificationToWelcome();
   }
 
   @override
@@ -260,10 +212,12 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     final keyboardOpen = mq.viewInsets.bottom > 0;
 
     return PopScope(
+      // IME hide / predictive-back on Oppo fires a false pop after Sign In.
+      // Never auto-leave from system back — only the UI back control may.
       canPop: false,
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) return;
-        _goToWelcome();
+        FocusManager.instance.primaryFocus?.unfocus();
       },
       child: Scaffold(
       backgroundColor: const Color(0xFF09090B),
@@ -308,11 +262,9 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
               ),
             ),
 
-            // Flashlight effect
+            // Flashlight effect — bake opacity into gradient colors (no Opacity widget).
             if (_pointerActive)
-              AnimatedOpacity(
-                duration: const Duration(milliseconds: 300),
-                opacity: 0.85,
+              IgnorePointer(
                 child: Container(
                   decoration: BoxDecoration(
                     gradient: RadialGradient(
@@ -323,8 +275,8 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                       radius: 0.35,
                       colors: [
                         Colors.transparent,
+                        Colors.black.withValues(alpha: 0.85 * 0.85),
                         Colors.black.withValues(alpha: 0.85),
-                        Colors.black,
                       ],
                       stops: const [0.3, 0.55, 1.0],
                     ),
@@ -332,27 +284,36 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                 ),
               ),
 
-            // Animated maroon/green gradient — top area only
+            // Animated maroon/green gradient — top area only.
+            // Bake alpha into colors (no Opacity widget) — Impeller rejects
+            // SetInheritedOpacity on some gradient contents.
             Positioned(
               top: 0,
               left: 0,
               right: 0,
               height: size.height,
               child: IgnorePointer(
-                child: Opacity(
-                  opacity: _pointerActive ? 0.3 : 0.92,
-                  child: Container(
-                    decoration: BoxDecoration(
-                      gradient: RadialGradient(
-                        center: const Alignment(-0.35, -0.58),
-                        radius: 1.25,
-                        colors: [
-                          (_isTeacher ? TeacherThemeUtils.dark : const Color(0xFF6F1D2D)).withValues(alpha: 0.82),
-                          (_isTeacher ? const Color(0xFF1D4ED8) : const Color(0xFF7F1D1D)).withValues(alpha: 0.44),
-                          Colors.transparent,
-                        ],
-                        stops: const [0.0, 0.48, 1.0],
-                      ),
+                child: Container(
+                  decoration: BoxDecoration(
+                    gradient: RadialGradient(
+                      center: const Alignment(-0.35, -0.58),
+                      radius: 1.25,
+                      colors: [
+                        (_isTeacher
+                                ? TeacherThemeUtils.dark
+                                : const Color(0xFF6F1D2D))
+                            .withValues(
+                              alpha: 0.82 * (_pointerActive ? 0.3 : 0.92),
+                            ),
+                        (_isTeacher
+                                ? const Color(0xFF1D4ED8)
+                                : const Color(0xFF7F1D1D))
+                            .withValues(
+                              alpha: 0.44 * (_pointerActive ? 0.3 : 0.92),
+                            ),
+                        Colors.transparent,
+                      ],
+                      stops: const [0.0, 0.48, 1.0],
                     ),
                   ),
                 ),

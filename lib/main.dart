@@ -9,16 +9,22 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'config/env.dart';
+import 'screens/auth/email_verification_screen.dart';
+import 'screens/auth/login_screen.dart';
 import 'screens/student/student_home.dart';
 import 'screens/teacher/teacher_home.dart';
 import 'screens/welcome_screen.dart';
+import 'widgets/pulseconnect_splash_screen.dart';
 import 'services/auth_service.dart';
+import 'services/device_performance_service.dart';
 import 'services/live_ui_sync.dart';
 import 'services/offline_backup_service.dart';
 import 'services/offline_sync_service.dart';
 import 'services/push_notification_service.dart';
+import 'services/notification_service.dart';
 import 'utils/course_theme_utils.dart';
 import 'utils/teacher_theme_utils.dart';
+import 'utils/app_restarter.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,6 +35,9 @@ void main() async {
   debugPaintLayerBordersEnabled = false;
   debugPaintPointersEnabled = false;
   debugRepaintRainbowEnabled = false;
+
+  // Detect low/mid/high device + load Performance Mode preference.
+  await DevicePerformance.instance.init();
 
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
@@ -104,10 +113,12 @@ void main() async {
   }
 
   runApp(
-    PulseConnectApp(
-      isLoggedIn: isLoggedIn,
-      userRole: role,
-      studentCourse: studentCourse,
+    AppRestarter.wrap(
+      PulseConnectApp(
+        isLoggedIn: isLoggedIn,
+        userRole: role,
+        studentCourse: studentCourse,
+      ),
     ),
   );
 }
@@ -117,10 +128,15 @@ class PulseConnectApp extends StatefulWidget {
   final String userRole;
   final String studentCourse;
 
-  static final GlobalKey<NavigatorState> navigatorKey =
-      GlobalKey<NavigatorState>();
-  static final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey =
+  static GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+  static GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey =
       GlobalKey<ScaffoldMessengerState>();
+
+  /// Fresh navigator keys after a Performance Mode remount.
+  static void rotateRootKeys() {
+    navigatorKey = GlobalKey<NavigatorState>();
+    scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
+  }
 
   const PulseConnectApp({
     super.key,
@@ -150,6 +166,15 @@ class PulseConnectAppState extends State<PulseConnectApp>
   bool _isEnforcingDailyVerification = false;
   bool? _isOffline;
   bool? _lastShownConnectivityState;
+  /// Shown as MaterialApp.home so IME/system-back cannot pop to Welcome.
+  Map<String, dynamic>? _emailOtpUser;
+  String? _emailOtpGateReason;
+  bool _emailOtpPostRegistration = false;
+  String? _loginRoleOverride;
+  late bool _enteredApp;
+  /// Soft remount (Performance Mode) must re-read prefs — widget.isLoggedIn is
+  /// only the cold-start value from main() and goes stale after login.
+  bool _sessionHydrating = false;
 
   @override
   void initState() {
@@ -157,12 +182,63 @@ class PulseConnectAppState extends State<PulseConnectApp>
     WidgetsBinding.instance.addObserver(this);
     _currentRole = widget.userRole;
     _currentStudentCourse = widget.studentCourse;
+    _enteredApp = widget.isLoggedIn;
+    _sessionHydrating = true;
     _startConnectivityMonitoring();
     _startOfflineWarmupTicker();
     _scheduleDailyVerificationCheck();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      unawaited(_enforceDailyVerificationLogout());
+      unawaited(_bootstrapAfterMount());
     });
+  }
+
+  Future<void> _bootstrapAfterMount() async {
+    try {
+      await _hydrateSessionFromStorage();
+    } finally {
+      if (mounted && _sessionHydrating) {
+        setState(() => _sessionHydrating = false);
+      } else {
+        _sessionHydrating = false;
+      }
+    }
+    // Mid-session soft remount: only Manila-day rollover may log out.
+    unawaited(_enforceDailyVerificationLogout());
+  }
+
+  /// Keep the user logged in across AppRestarter remounts (Performance Mode).
+  Future<void> _hydrateSessionFromStorage() async {
+    try {
+      final loggedIn = await _authService.isLoggedIn();
+      if (!loggedIn || !mounted) return;
+
+      final user = await _authService.getCurrentUser();
+      if (user == null || !mounted) return;
+
+      final role = (user['role']?.toString() ?? 'student').toLowerCase();
+      final course =
+          CourseThemeUtils.normalizeCourse(user['course']) == 'CS' ? 'CS' : 'IT';
+
+      if (_enteredApp &&
+          _currentRole.toLowerCase() == role &&
+          (role != 'student' || _currentStudentCourse == course)) {
+        return;
+      }
+
+      setState(() {
+        _enteredApp = true;
+        _currentRole = role;
+        if (role == 'student') {
+          _currentStudentCourse = course;
+        }
+        _loginRoleOverride = null;
+        _emailOtpUser = null;
+        _emailOtpGateReason = null;
+        _emailOtpPostRegistration = false;
+      });
+    } catch (e) {
+      debugPrint('Session hydrate after remount skipped: $e');
+    }
   }
 
   /// Manila calendar-day boundary (UTC+8).
@@ -191,11 +267,15 @@ class PulseConnectAppState extends State<PulseConnectApp>
 
   Future<void> _enforceDailyVerificationLogout() async {
     if (_isEnforcingDailyVerification) return;
+    // Never kick during login OTP / register OTP — that flow IS the daily gate.
+    if (_emailOtpUser != null || AuthService.isOtpGateActive) return;
+    if (!_enteredApp) return;
     if (AuthService.isAuthFlowBusy) return;
     _isEnforcingDailyVerification = true;
     try {
       final loggedIn = await _authService.isLoggedIn();
       if (!loggedIn) return;
+      if (_emailOtpUser != null || AuthService.isOtpGateActive) return;
       if (AuthService.isAuthFlowBusy) return;
 
       final user = await _authService.getCurrentUser();
@@ -218,9 +298,15 @@ class PulseConnectAppState extends State<PulseConnectApp>
         }
         return;
       }
-      if (AuthService.isAuthFlowBusy) return;
+      if (AuthService.isAuthFlowBusy || AuthService.isOtpGateActive) return;
 
       await _authService.logout();
+      if (!mounted) return;
+      setState(() {
+        _enteredApp = false;
+        _emailOtpUser = null;
+        _loginRoleOverride = null;
+      });
       final nav = PulseConnectApp.navigatorKey.currentState;
       if (nav == null) return;
       nav.pushAndRemoveUntil(
@@ -230,6 +316,129 @@ class PulseConnectAppState extends State<PulseConnectApp>
     } finally {
       _isEnforcingDailyVerification = false;
     }
+  }
+
+  /// MaterialApp.home is only applied on the first frame. After Welcome→Login
+  /// pushes, changing `home` alone does nothing — force a stack replace.
+  void _replaceRoot(Widget page) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final nav = PulseConnectApp.navigatorKey.currentState;
+      if (nav == null) return;
+      nav.pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => page),
+        (_) => false,
+      );
+    });
+  }
+
+  Widget _otpPage() {
+    final user = _emailOtpUser!;
+    final id = user['id']?.toString() ?? 'otp';
+    return EmailVerificationScreen(
+      key: ValueKey('email-otp-$id'),
+      user: user,
+      gateReason: _emailOtpGateReason,
+      postRegistrationReviewFlow: _emailOtpPostRegistration,
+    );
+  }
+
+  /// Replace MaterialApp route with OTP (navigator hard-reset).
+  void showEmailVerificationGate(
+    Map<String, dynamic> user, {
+    String? gateReason,
+    bool postRegistrationReviewFlow = false,
+  }) {
+    AuthService.setOtpGateActive(true);
+    setState(() {
+      _emailOtpUser = Map<String, dynamic>.from(user);
+      _emailOtpGateReason = gateReason;
+      _emailOtpPostRegistration = postRegistrationReviewFlow;
+      _loginRoleOverride = null;
+      _enteredApp = false;
+    });
+    _replaceRoot(_otpPage());
+  }
+
+  void showLogin(String role) {
+    AuthService.setOtpGateActive(false);
+    setState(() {
+      _emailOtpUser = null;
+      _emailOtpGateReason = null;
+      _emailOtpPostRegistration = false;
+      _loginRoleOverride = role;
+      _enteredApp = false;
+      _currentRole = role;
+    });
+    _replaceRoot(
+      LoginScreen(key: ValueKey('login-$role'), role: role),
+    );
+  }
+
+  void exitEmailVerificationToLogin(String role) {
+    AuthService.setOtpGateActive(false);
+    setState(() {
+      _emailOtpUser = null;
+      _emailOtpGateReason = null;
+      _emailOtpPostRegistration = false;
+      _loginRoleOverride = role;
+      _enteredApp = false;
+    });
+    _replaceRoot(
+      LoginScreen(key: ValueKey('login-$role'), role: role),
+    );
+  }
+
+  void exitEmailVerificationToWelcome() {
+    AuthService.setOtpGateActive(false);
+    setState(() {
+      _emailOtpUser = null;
+      _emailOtpGateReason = null;
+      _emailOtpPostRegistration = false;
+      _loginRoleOverride = null;
+      _enteredApp = false;
+    });
+    _replaceRoot(const WelcomeScreen());
+  }
+
+  void enterAppAfterAuth({required String role, String? course}) {
+    AuthService.setOtpGateActive(false);
+    final normalizedRole = role.toLowerCase();
+    final nextCourse = normalizedRole == 'student'
+        ? (CourseThemeUtils.isComputerScienceCourse(course) ? 'CS' : 'IT')
+        : _currentStudentCourse;
+    setState(() {
+      _emailOtpUser = null;
+      _emailOtpGateReason = null;
+      _emailOtpPostRegistration = false;
+      _loginRoleOverride = null;
+      _enteredApp = true;
+      _currentRole = role;
+      _currentStudentCourse = nextCourse;
+    });
+    _replaceRoot(
+      normalizedRole == 'teacher'
+          ? const TeacherHome()
+          : const StudentHome(),
+    );
+  }
+
+  Widget _buildRootHome() {
+    // Auth screens (Login/OTP) are shown only via _replaceRoot — never as
+    // MaterialApp.home — so we don't mount EmailVerificationScreen twice
+    // (home rebuild + push) and send two different codes.
+    if (_sessionHydrating && !_enteredApp) {
+      // Show animated splash screen while session is restored on startup.
+      return const PulseConnectSplashScreen(
+        statusMessage: 'Connecting to PulseCONNECT...',
+      );
+    }
+    if (_enteredApp) {
+      return _currentRole.toLowerCase() == 'teacher'
+          ? const TeacherHome()
+          : const StudentHome();
+    }
+    return const WelcomeScreen();
   }
 
   bool _resultsAreOffline(List<ConnectivityResult> results) {
@@ -331,6 +540,7 @@ class PulseConnectAppState extends State<PulseConnectApp>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      NotificationService().resumePolling();
       unawaited(_reconcileConnectivityState());
       unawaited(_enforceDailyVerificationLogout());
       _scheduleDailyVerificationCheck();
@@ -339,6 +549,8 @@ class PulseConnectAppState extends State<PulseConnectApp>
       unawaited(() async {
         if (await _authService.isLoggedIn()) {
           await LiveUiSync.syncNow('resume');
+          // Re-register FCM token so publishes can find devices again.
+          unawaited(PushNotificationService().updateToken());
         }
       }());
       if (_isOffline == false || _isOffline == null) {
@@ -350,6 +562,10 @@ class PulseConnectAppState extends State<PulseConnectApp>
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      if (state == AppLifecycleState.paused ||
+          state == AppLifecycleState.detached) {
+        NotificationService().pausePolling();
+      }
       unawaited(_offlineBackupService.autoBackupIfConfigured());
     }
   }
@@ -384,9 +600,15 @@ class PulseConnectAppState extends State<PulseConnectApp>
         ? (CourseThemeUtils.isComputerScienceCourse(course) ? 'CS' : 'IT')
         : _currentStudentCourse;
     if (_currentRole != role || _currentStudentCourse != nextCourse) {
-      setState(() {
-        _currentRole = role;
-        _currentStudentCourse = nextCourse;
+      // Schedule after the current frame so an in-flight Navigator push
+      // (e.g. login → OTP) is not wiped by a MaterialApp rebuild.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (_currentRole == role && _currentStudentCourse == nextCourse) return;
+        setState(() {
+          _currentRole = role;
+          _currentStudentCourse = nextCourse;
+        });
       });
     }
   }
@@ -406,11 +628,7 @@ class PulseConnectAppState extends State<PulseConnectApp>
           child: child ?? const SizedBox.shrink(),
         );
       },
-      home: widget.isLoggedIn
-          ? (_currentRole.toLowerCase() == 'teacher'
-                ? const TeacherHome()
-                : const StudentHome())
-          : const WelcomeScreen(),
+      home: _buildRootHome(),
     );
   }
 

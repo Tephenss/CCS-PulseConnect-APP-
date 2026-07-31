@@ -8,8 +8,10 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import '../config/env.dart';
 import '../utils/event_time_utils.dart';
+import 'auth_service.dart';
 import 'mobile_backend_service.dart';
 import 'app_cache_service.dart';
+import 'public_catalog_service.dart';
 
 class EventService {
   final _supabase = Supabase.instance.client;
@@ -20,20 +22,23 @@ class EventService {
   final Map<String, bool> _attendanceColumnSupport = {};
   bool? _eventSessionAttendanceTableSupported;
   DateTime? _eventSessionAttendanceSupportCheckedAtUtc;
+  static final Map<String, DateTime> _absenceSyncAttemptedAtUtc = {};
+  static const Duration _absenceSyncCooldown = Duration(minutes: 10);
+  static final Map<String, Map<String, String>> _studentTargetScopeCache = {};
   static final Map<String, _CachedStudentRequirements> _studentRequirementsCache =
       {};
   static final Map<String, _ListCacheEntry> _listCache = {};
-  static const Duration _activeEventsTtl = Duration(seconds: 20);
-  static const Duration _teacherEventsTtl = Duration(seconds: 20);
+  static const Duration _activeEventsTtl = Duration(seconds: 45);
+  static const Duration _teacherEventsTtl = Duration(seconds: 45);
   static const Duration _expiredEvalTtl = Duration(seconds: 120);
-  static const Duration _ticketsTtl = Duration(seconds: 25);
+  static const Duration _ticketsTtl = Duration(seconds: 45);
   static const Duration _eventByIdTtl = Duration(seconds: 60);
   static const Duration _eventSessionsTtl = Duration(seconds: 60);
   static const Duration _eventRegistrationSettingsTtl = Duration(seconds: 30);
   static const String _eventListColumns =
-      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_structure,event_mode,event_for,allow_registration,cover_image_url,location,event_type,grace_time,registration_limit,is_free_event,event_fee,registration_close_weeks,registration_close_extend_days';
+      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_structure,event_mode,event_for,allow_registration,cover_image_url,location,event_type,event_span,grace_time,registration_limit,is_free_event,event_fee,registration_close_weeks,registration_close_extend_days';
   static const String _eventListColumnsFallback =
-      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for,cover_image_url,location,event_type,is_free_event,event_fee';
+      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for,cover_image_url,location,event_type,event_span,is_free_event,event_fee';
   static const String _eventListColumnsMinimal =
       'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for';
 
@@ -100,6 +105,25 @@ class EventService {
     _appCache.invalidateMemory('event_by_id:$id');
     _appCache.invalidateMemory('event_sessions:$id');
     _appCache.invalidateMemory('event_reg_settings:$id');
+  }
+
+  /// Clears tickets list cache so Tickets tab shows newly issued tickets.
+  Future<void> invalidateMyTicketsCache([String? userId]) async {
+    var uid = (userId ?? '').trim();
+    if (uid.isEmpty) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        uid = (prefs.getString('user_id') ?? '').trim();
+      } catch (_) {}
+    }
+    if (uid.isNotEmpty) {
+      final cacheKey = 'tickets:$uid';
+      await _appCache.clearJsonList(cacheKey);
+      _appCache.cancelInFlightPrefix('fetch:$cacheKey');
+      return;
+    }
+    _appCache.invalidateMemoryPrefix('tickets:');
+    _appCache.cancelInFlightPrefix('fetch:tickets:');
   }
 
   List<Map<String, dynamic>>? _readListCache(
@@ -204,6 +228,21 @@ class EventService {
     if (trimmedUserId.isEmpty || trimmedEventId.isEmpty) return false;
 
     try {
+      if (MobileBackendService.isConfigured) {
+        final res = await _mobileBackend.secureRead(
+          table: 'user_notification_reads',
+          select: 'notification_id',
+          filters: {
+            'user_id': trimmedUserId,
+            'notification_id': 'reg_access_approved_$trimmedEventId',
+          },
+          limit: 1,
+        );
+        final rows = (res['ok'] == true && res['rows'] is List)
+            ? (res['rows'] as List)
+            : const [];
+        return rows.isNotEmpty;
+      }
       final row = await _supabase
           .from('user_notification_reads')
           .select('notification_id')
@@ -327,21 +366,7 @@ class EventService {
   Future<String> _resolveUserUuidFromStudentRef(String rawStudentRef) async {
     final normalized = rawStudentRef.trim();
     if (normalized.isEmpty) return '';
-    if (_looksLikeUuid(normalized)) return normalized;
-
-    try {
-      final rows = await _supabase
-          .from('users')
-          .select('id')
-          .eq('student_id', normalized)
-          .limit(1);
-      if (rows.isNotEmpty) {
-        final resolved = rows.first['id']?.toString().trim() ?? '';
-        if (resolved.isNotEmpty) return resolved;
-      }
-    } catch (_) {
-      // Fall through to original reference.
-    }
+    // users table is locked from anon — cannot resolve student_id → uuid here.
     return normalized;
   }
 
@@ -428,6 +453,10 @@ class EventService {
     ).subtract(_manilaOffset);
   }
 
+  String composeParticipantDisplayName(Map<String, dynamic>? user) {
+    return _composeDisplayName(user);
+  }
+
   String _composeDisplayName(Map<String, dynamic>? user) {
     if (user == null || user.isEmpty) return '';
 
@@ -496,25 +525,39 @@ class EventService {
     final avatarPath = _extractAvatarStoragePath(raw);
     if (avatarPath.isEmpty) return raw;
 
+    // Private avatars bucket — sign via PHP BFF (service role).
+    if (MobileBackendService.isConfigured) {
+      try {
+        final token = await MobileBackendService.getSessionToken();
+        if (token != null && token.isNotEmpty) {
+          final res = await MobileBackendService().createSignedStorageUrl(
+            bucket: 'avatars',
+            path: avatarPath,
+            expiresIn: 60 * 60 * 12,
+          );
+          final signed = (res['signed_url']?.toString() ?? '').trim();
+          if (res['ok'] == true && signed.isNotEmpty) {
+            return signed;
+          }
+        }
+      } catch (_) {}
+    }
+
     try {
       final signed = await _supabase.storage
           .from('avatars')
-          .createSignedUrl(avatarPath, 60 * 60 * 24 * 7);
+          .createSignedUrl(avatarPath, 60 * 60 * 24);
       if (signed.trim().isNotEmpty) {
         return signed.trim();
       }
     } catch (_) {}
 
-    try {
-      final publicUrl = _supabase.storage
-          .from('avatars')
-          .getPublicUrl(avatarPath);
-      if (publicUrl.trim().isNotEmpty) {
-        return publicUrl.trim();
-      }
-    } catch (_) {}
-
     return raw;
+  }
+
+  /// Public wrapper for scanner overlays (private bucket paths need signing).
+  Future<String> resolveAvatarDisplayUrl(String rawPhotoUrl) {
+    return _resolveAvatarDisplayUrl(rawPhotoUrl);
   }
 
   Future<Map<String, String>> _resolveParticipantIdentityForRegistration(
@@ -532,60 +575,19 @@ class EventService {
     try {
       final regRows = await _supabase
           .from('event_registrations')
-          .select(
-            'student_id, users(first_name,middle_name,last_name,suffix,photo_url)',
-          )
+          .select('student_id')
           .eq('id', trimmedRegistrationId)
           .limit(1);
 
       if (regRows.isNotEmpty) {
         final row = Map<String, dynamic>.from(regRows.first);
         studentId = (row['student_id']?.toString() ?? '').trim();
-        final user = _extractEmbeddedMap(row['users']);
-        participantName = _composeDisplayName(user);
-        participantPhotoUrl = await _resolveAvatarDisplayUrl(
-          user?['photo_url']?.toString() ?? '',
-        );
       }
     } catch (_) {
-      // Fallback query below.
+      // Leave empty — scan BFF should supply participant identity.
     }
 
-    if (studentId.isEmpty) {
-      try {
-        final regRows = await _supabase
-            .from('event_registrations')
-            .select('student_id')
-            .eq('id', trimmedRegistrationId)
-            .limit(1);
-        if (regRows.isNotEmpty) {
-          studentId = (regRows.first['student_id']?.toString() ?? '').trim();
-        }
-      } catch (_) {}
-    }
-
-    if (studentId.isNotEmpty &&
-        (participantName.isEmpty || participantPhotoUrl.isEmpty)) {
-      try {
-        final userRows = await _supabase
-            .from('users')
-            .select('first_name,middle_name,last_name,suffix,photo_url')
-            .eq('id', studentId)
-            .limit(1);
-        if (userRows.isNotEmpty) {
-          final user = Map<String, dynamic>.from(userRows.first);
-          if (participantName.isEmpty) {
-            participantName = _composeDisplayName(user);
-          }
-          if (participantPhotoUrl.isEmpty) {
-            participantPhotoUrl = await _resolveAvatarDisplayUrl(
-              user['photo_url']?.toString() ?? '',
-            );
-          }
-        }
-      } catch (_) {}
-    }
-
+    // Never SELECT users via anon (locked in 048).
     return {
       'name': participantName.trim(),
       'photo_url': participantPhotoUrl.trim(),
@@ -594,18 +596,7 @@ class EventService {
   }
 
   Future<String> _resolveParticipantNameForUser(String userId) async {
-    final trimmedUserId = userId.trim();
-    if (trimmedUserId.isEmpty) return '';
-    try {
-      final userRows = await _supabase
-          .from('users')
-          .select('first_name,middle_name,last_name,suffix')
-          .eq('id', trimmedUserId)
-          .limit(1);
-      if (userRows.isNotEmpty) {
-        return _composeDisplayName(Map<String, dynamic>.from(userRows.first));
-      }
-    } catch (_) {}
+    // users table locked from anon — names come from scan/roster BFF.
     return '';
   }
 
@@ -626,7 +617,7 @@ class EventService {
       final rows = await _supabase
           .from('event_teacher_assignments')
           .select(
-            'event_id, can_scan, can_manage_assistants, events(id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time)',
+            'event_id, can_scan, can_manage_assistants, events(id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time,early_out_enabled_at)',
           )
           .eq('teacher_id', teacherId)
           .limit(200);
@@ -636,7 +627,7 @@ class EventService {
         final rows = await _supabase
             .from('event_teacher_assignments')
             .select(
-              'event_id, can_scan, events(id,title,status,start_at,end_at,location,uses_sessions,event_structure,grace_time)',
+              'event_id, can_scan, events(id,title,status,start_at,end_at,location,uses_sessions,event_structure,grace_time,early_out_enabled_at)',
             )
             .eq('teacher_id', teacherId)
             .eq('can_scan', true)
@@ -779,88 +770,89 @@ class EventService {
     return true;
   }
 
-  Future<bool> _supportsEventSessionsColumn(String column) async {
-    final cached = _eventSessionColumnSupport[column];
-    if (cached != null) return cached;
+  /// Production schema from migrations — do NOT probe missing columns with
+  /// SELECT (each failure is a Postgres ERROR in Supabase metrics).
+  static const List<String> _eventSessionPreferredColumns = [
+    'id',
+    'event_id',
+    'title',
+    'start_at',
+    'topic',
+    'description',
+    'location',
+    'end_at',
+    'scan_window_minutes',
+    'sort_order',
+  ];
 
-    try {
-      await _supabase.from('event_sessions').select('id,$column').limit(1);
-      _eventSessionColumnSupport[column] = true;
-      return true;
-    } catch (_) {
-      _eventSessionColumnSupport[column] = false;
-      return false;
-    }
-  }
+  static const List<String> _eventSessionBaseColumns = [
+    'id',
+    'event_id',
+    'title',
+    'start_at',
+  ];
 
   Future<List<String>> _eventSessionsSupportedColumns() async {
-    final supported = <String>['id', 'event_id', 'title', 'start_at'];
-    final optionalColumns = [
-      'topic',
-      'description',
-      'location',
-      'end_at',
-      'scan_window_minutes',
-      'attendance_window_minutes',
-      'sort_order',
-      'session_no',
-    ];
-
-    for (final column in optionalColumns) {
-      if (await _supportsEventSessionsColumn(column)) {
-        supported.add(column);
-      }
+    final supported = <String>[];
+    for (final column in _eventSessionPreferredColumns) {
+      if (_eventSessionColumnSupport[column] == false) continue;
+      supported.add(column);
+      _eventSessionColumnSupport.putIfAbsent(column, () => true);
     }
+    return supported.isEmpty ? List<String>.from(_eventSessionBaseColumns) : supported;
+  }
 
-    return supported;
+  Future<List<Map<String, dynamic>>> _queryEventSessions(
+    String eventId,
+    List<String> columns,
+  ) async {
+    dynamic query = _supabase
+        .from('event_sessions')
+        .select(columns.join(','))
+        .eq('event_id', eventId);
+
+    if (columns.contains('sort_order')) {
+      query = query.order('sort_order', ascending: true);
+    } else if (columns.contains('session_no')) {
+      query = query.order('session_no', ascending: true);
+    }
+    query = query.order('start_at', ascending: true);
+
+    final rows = await query;
+    return _normalizeEventSessions(
+      List<Map<String, dynamic>>.from(rows),
+      eventId,
+    );
   }
 
   Future<bool> _supportsAttendanceColumn(String column) async {
+    // Production `attendance` has no session_id (sessions live in
+    // event_session_attendance). Claiming session_id caused 42703 ERROR spam.
+    const known = {
+      'last_scanned_at',
+      'ticket_id',
+      'status',
+      'check_in_at',
+      'check_out_at',
+    };
     final cached = _attendanceColumnSupport[column];
     if (cached != null) return cached;
-
-    try {
-      await _supabase.from('attendance').select('id,$column').limit(1);
-      _attendanceColumnSupport[column] = true;
-      return true;
-    } catch (_) {
-      _attendanceColumnSupport[column] = false;
-      return false;
-    }
+    final ok = known.contains(column);
+    _attendanceColumnSupport[column] = ok;
+    return ok;
   }
 
   Future<bool> _supportsEventSessionAttendanceTable() async {
-    final cached = _eventSessionAttendanceTableSupported;
-    if (cached == true) return true;
-
-    // If we previously cached `false`, allow retries after a short cooldown.
-    // This prevents the app from getting "stuck" when policies/migrations were
-    // applied after the first check, or when network/auth temporarily failed.
-    if (cached == false) {
+    // Assume present in production; probing SELECT failures still count as ERROR.
+    if (_eventSessionAttendanceTableSupported == false) {
       final checkedAt = _eventSessionAttendanceSupportCheckedAtUtc;
-      if (checkedAt != null) {
-        final age = DateTime.now().toUtc().difference(checkedAt);
-        if (age.inSeconds < 10) return false;
-      }
-      _eventSessionAttendanceTableSupported = null;
-    }
-
-    try {
-      await _supabase.from('event_session_attendance').select('id').limit(1);
-      _eventSessionAttendanceTableSupported = true;
-      _eventSessionAttendanceSupportCheckedAtUtc = DateTime.now().toUtc();
-      return true;
-    } catch (e) {
-      if (_isEventSessionAttendanceUnavailableError(e) ||
-          _isAccessPolicyError(e)) {
-        _eventSessionAttendanceTableSupported = false;
-        _eventSessionAttendanceSupportCheckedAtUtc = DateTime.now().toUtc();
+      if (checkedAt != null &&
+          DateTime.now().toUtc().difference(checkedAt).inMinutes < 60) {
         return false;
       }
-      _eventSessionAttendanceTableSupported = false;
-      _eventSessionAttendanceSupportCheckedAtUtc = DateTime.now().toUtc();
-      return false;
     }
+    _eventSessionAttendanceTableSupported = true;
+    return true;
   }
 
   List<Map<String, dynamic>> _ticketRowsFromParticipant(
@@ -927,69 +919,84 @@ class EventService {
     return null;
   }
 
+  Future<Map<String, dynamic>?> _secureAttendanceWrite({
+    required String eventId,
+    required String table,
+    required String method,
+    required Map<String, dynamic> payload,
+    String filter = '',
+  }) async {
+    if (!MobileBackendService.isConfigured || eventId.trim().isEmpty) {
+      return null;
+    }
+    try {
+      final res = await _mobileBackend.secureWrite('attendance_upsert', {
+        'event_id': eventId,
+        'table': table,
+        'method': method,
+        if (filter.isNotEmpty) 'filter': filter,
+        'payload': payload,
+      });
+      if (res['ok'] != true) return null;
+      final rows = res['rows'];
+      if (rows is List && rows.isNotEmpty && rows.first is Map) {
+        return Map<String, dynamic>.from(rows.first as Map);
+      }
+      return payload;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<Map<String, dynamic>?> _patchSimpleAttendanceAbsent({
+    required String eventId,
     required String ticketId,
     required Map<String, dynamic>? existingRow,
     required String nowIso,
   }) async {
     Map<String, dynamic>? updatedRow;
     final existingId = (existingRow?['id']?.toString() ?? '').trim();
+    final payload = <String, dynamic>{
+      'status': 'absent',
+      'last_scanned_at': nowIso,
+    };
 
-    if (existingId.isNotEmpty) {
-      try {
-        final rows = await _supabase
-            .from('attendance')
-            .update({'status': 'absent', 'last_scanned_at': nowIso})
-            .eq('id', existingId)
-            .isFilter('check_in_at', null)
-            .select(
-              'id,ticket_id,session_id,status,check_in_at,last_scanned_at',
-            );
-        if (rows.isNotEmpty) {
-          updatedRow = Map<String, dynamic>.from(rows.first);
-        }
-      } catch (_) {}
+    if (MobileBackendService.isConfigured && eventId.trim().isNotEmpty) {
+      if (existingId.isNotEmpty) {
+        updatedRow = await _secureAttendanceWrite(
+          eventId: eventId,
+          table: 'attendance',
+          method: 'PATCH',
+          filter: 'id=eq.$existingId&check_in_at=is.null',
+          payload: payload,
+        );
+      }
+      updatedRow ??= await _secureAttendanceWrite(
+        eventId: eventId,
+        table: 'attendance',
+        method: 'PATCH',
+        filter: 'ticket_id=eq.$ticketId&check_in_at=is.null',
+        payload: payload,
+      );
+      updatedRow ??= await _secureAttendanceWrite(
+        eventId: eventId,
+        table: 'attendance',
+        method: 'POST',
+        payload: {
+          'ticket_id': ticketId,
+          'status': 'absent',
+          'last_scanned_at': nowIso,
+        },
+      );
+      if (updatedRow != null) return updatedRow;
     }
 
-    if (updatedRow == null) {
-      try {
-        final rows = await _supabase
-            .from('attendance')
-            .update({'status': 'absent', 'last_scanned_at': nowIso})
-            .eq('ticket_id', ticketId)
-            .isFilter('session_id', null)
-            .isFilter('check_in_at', null)
-            .select(
-              'id,ticket_id,session_id,status,check_in_at,last_scanned_at',
-            );
-        if (rows.isNotEmpty) {
-          updatedRow = Map<String, dynamic>.from(rows.first);
-        }
-      } catch (_) {}
-    }
-
-    if (updatedRow == null) {
-      try {
-        final rows = await _supabase
-            .from('attendance')
-            .insert({
-              'ticket_id': ticketId,
-              'status': 'absent',
-              'last_scanned_at': nowIso,
-            })
-            .select(
-              'id,ticket_id,session_id,status,check_in_at,last_scanned_at',
-            );
-        if (rows.isNotEmpty) {
-          updatedRow = Map<String, dynamic>.from(rows.first);
-        }
-      } catch (_) {}
-    }
-
+    // Anon writes revoked (051) — fail closed; do not spam Postgres ERROR.
     return updatedRow;
   }
 
   Future<Map<String, dynamic>?> _patchSessionAttendanceAbsent({
+    required String eventId,
     required String sessionId,
     required String registrationId,
     required String ticketId,
@@ -1001,82 +1008,64 @@ class EventService {
     final table = prefersSessionAttendance
         ? 'event_session_attendance'
         : 'attendance';
-    final selectColumns = prefersSessionAttendance
-        ? 'id,session_id,registration_id,ticket_id,status,check_in_at,last_scanned_at'
-        : 'id,session_id,ticket_id,status,check_in_at,last_scanned_at';
     Map<String, dynamic>? updatedRow;
     final existingId = (existingRow?['id']?.toString() ?? '').trim();
+    final absentPayload = <String, dynamic>{
+      'status': 'absent',
+      'last_scanned_at': nowIso,
+    };
 
-    if (existingId.isNotEmpty) {
-      try {
-        final rows = await _supabase
-            .from(table)
-            .update({'status': 'absent', 'last_scanned_at': nowIso})
-            .eq('id', existingId)
-            .isFilter('check_in_at', null)
-            .select(selectColumns);
-        if (rows.isNotEmpty) {
-          updatedRow = Map<String, dynamic>.from(rows.first);
-        }
-      } catch (_) {}
-    }
-
-    if (updatedRow == null && prefersSessionAttendance) {
-      try {
-        final rows = await _supabase
-            .from(table)
-            .update({'status': 'absent', 'last_scanned_at': nowIso})
-            .eq('session_id', sessionId)
-            .eq('registration_id', registrationId)
-            .isFilter('check_in_at', null)
-            .select(selectColumns);
-        if (rows.isNotEmpty) {
-          updatedRow = Map<String, dynamic>.from(rows.first);
-        }
-      } catch (_) {}
-    }
-
-    if (updatedRow == null) {
-      try {
-        final rows = await _supabase
-            .from(table)
-            .update({'status': 'absent', 'last_scanned_at': nowIso})
-            .eq('session_id', sessionId)
-            .eq('ticket_id', ticketId)
-            .isFilter('check_in_at', null)
-            .select(selectColumns);
-        if (rows.isNotEmpty) {
-          updatedRow = Map<String, dynamic>.from(rows.first);
-        }
-      } catch (_) {}
-    }
-
-    if (updatedRow == null) {
-      try {
-        final payload = prefersSessionAttendance
-            ? <String, dynamic>{
+    if (MobileBackendService.isConfigured && eventId.trim().isNotEmpty) {
+      if (existingId.isNotEmpty) {
+        updatedRow = await _secureAttendanceWrite(
+          eventId: eventId,
+          table: table,
+          method: 'PATCH',
+          filter: 'id=eq.$existingId&check_in_at=is.null',
+          payload: absentPayload,
+        );
+      }
+      if (updatedRow == null && prefersSessionAttendance) {
+        updatedRow = await _secureAttendanceWrite(
+          eventId: eventId,
+          table: table,
+          method: 'PATCH',
+          filter:
+              'session_id=eq.$sessionId&registration_id=eq.$registrationId&check_in_at=is.null',
+          payload: absentPayload,
+        );
+      }
+      updatedRow ??= await _secureAttendanceWrite(
+        eventId: eventId,
+        table: table,
+        method: 'PATCH',
+        filter:
+            'session_id=eq.$sessionId&ticket_id=eq.$ticketId&check_in_at=is.null',
+        payload: absentPayload,
+      );
+      updatedRow ??= await _secureAttendanceWrite(
+        eventId: eventId,
+        table: table,
+        method: 'POST',
+        payload: prefersSessionAttendance
+            ? {
                 'session_id': sessionId,
                 'registration_id': registrationId,
                 'ticket_id': ticketId,
                 'status': 'absent',
                 'last_scanned_at': nowIso,
               }
-            : <String, dynamic>{
+            : {
                 'session_id': sessionId,
                 'ticket_id': ticketId,
                 'status': 'absent',
                 'last_scanned_at': nowIso,
-              };
-        final rows = await _supabase
-            .from(table)
-            .insert(payload)
-            .select(selectColumns);
-        if (rows.isNotEmpty) {
-          updatedRow = Map<String, dynamic>.from(rows.first);
-        }
-      } catch (_) {}
+              },
+      );
+      if (updatedRow != null) return updatedRow;
     }
 
+    // Anon writes revoked (051) — fail closed; do not spam Postgres ERROR.
     return updatedRow;
   }
 
@@ -1135,6 +1124,7 @@ class EventService {
           .toLowerCase();
       if (status == 'absent') continue;
       final updated = await _patchSimpleAttendanceAbsent(
+        eventId: (event['id']?.toString() ?? '').trim(),
         ticketId: ticketId,
         existingRow: existing,
         nowIso: nowIso,
@@ -1252,6 +1242,7 @@ class EventService {
             .toLowerCase();
         if (status == 'absent') continue;
         final updated = await _patchSessionAttendanceAbsent(
+          eventId: eventId,
           sessionId: sessionId,
           registrationId: registrationId,
           ticketId: ticketId,
@@ -1361,14 +1352,32 @@ class EventService {
                   incomingScanAtIso: effectiveScanAtIso,
                   recordedCheckInAt: attendance['check_in_at'],
                 )) {
-              await _supabase
-                  .from('event_session_attendance')
-                  .update({
-                    'status': 'present',
-                    'check_in_at': effectiveScanAtIso,
-                    'updated_at': nowIso,
-                  })
-                  .eq('id', attendance['id']);
+              final eventId = (session['event_id']?.toString() ?? '').trim();
+              if (eventId.isEmpty || !MobileBackendService.isConfigured) {
+                return {
+                  'ok': false,
+                  'error': 'Check-in requires a secure backend connection.',
+                  'status': 'error',
+                };
+              }
+              final updated = await _secureAttendanceWrite(
+                eventId: eventId,
+                table: 'event_session_attendance',
+                method: 'PATCH',
+                filter: 'id=eq.${attendance['id']}',
+                payload: {
+                  'status': 'present',
+                  'check_in_at': effectiveScanAtIso,
+                  'updated_at': nowIso,
+                },
+              );
+              if (updated == null) {
+                return {
+                  'ok': false,
+                  'error': 'Check-in failed. Please try again.',
+                  'status': 'error',
+                };
+              }
               return successResponse();
             }
             return alreadyRecordedResponse();
@@ -1378,17 +1387,34 @@ class EventService {
             return successResponse();
           }
 
-          await _supabase
-              .from('event_session_attendance')
-              .update({
-                'status': 'present',
-                'check_in_at': effectiveScanAtIso,
-                'last_scanned_by': teacherId,
-                'last_scanned_at': effectiveScanAtIso,
-                'updated_at': nowIso,
-              })
-              .eq('id', attendance['id']);
-
+          final eventId = (session['event_id']?.toString() ?? '').trim();
+          if (eventId.isEmpty || !MobileBackendService.isConfigured) {
+            return {
+              'ok': false,
+              'error': 'Check-in requires a secure backend connection.',
+              'status': 'error',
+            };
+          }
+          final updated = await _secureAttendanceWrite(
+            eventId: eventId,
+            table: 'event_session_attendance',
+            method: 'PATCH',
+            filter: 'id=eq.${attendance['id']}',
+            payload: {
+              'status': 'present',
+              'check_in_at': effectiveScanAtIso,
+              'last_scanned_by': teacherId,
+              'last_scanned_at': effectiveScanAtIso,
+              'updated_at': nowIso,
+            },
+          );
+          if (updated == null) {
+            return {
+              'ok': false,
+              'error': 'Check-in failed. Please try again.',
+              'status': 'error',
+            };
+          }
           return successResponse();
         }
 
@@ -1396,169 +1422,48 @@ class EventService {
           return successResponse();
         }
 
-        await _supabase.from('event_session_attendance').insert({
-          'session_id': sessionId,
-          'registration_id': registrationId,
-          'ticket_id': ticketId,
-          'status': 'present',
-          'check_in_at': effectiveScanAtIso,
-          'last_scanned_by': teacherId,
-          'last_scanned_at': effectiveScanAtIso,
-          'updated_at': nowIso,
-        });
-
+        final eventId = (session['event_id']?.toString() ?? '').trim();
+        if (eventId.isEmpty || !MobileBackendService.isConfigured) {
+          return {
+            'ok': false,
+            'error': 'Check-in requires a secure backend connection.',
+            'status': 'error',
+          };
+        }
+        final inserted = await _secureAttendanceWrite(
+          eventId: eventId,
+          table: 'event_session_attendance',
+          method: 'POST',
+          payload: {
+            'session_id': sessionId,
+            'registration_id': registrationId,
+            'ticket_id': ticketId,
+            'status': 'present',
+            'check_in_at': effectiveScanAtIso,
+            'last_scanned_by': teacherId,
+            'last_scanned_at': effectiveScanAtIso,
+            'updated_at': nowIso,
+          },
+        );
+        if (inserted == null) {
+          return {
+            'ok': false,
+            'error': 'Check-in failed. Please try again.',
+            'status': 'error',
+          };
+        }
         return successResponse();
       } catch (e) {
-        if (_isUniqueViolationError(e)) {
-          final existing = await _supabase
-              .from('event_session_attendance')
-              .select('id,status,check_in_at')
-              .eq('session_id', sessionId)
-              .eq('ticket_id', ticketId)
-              .limit(1);
-          if (existing.isNotEmpty && !dryRun) {
-            final attendance = Map<String, dynamic>.from(existing.first);
-            if (_shouldApplyIncomingCheckIn(
-              incomingScanAtIso: effectiveScanAtIso,
-              recordedCheckInAt: attendance['check_in_at'],
-            )) {
-              await _supabase
-                  .from('event_session_attendance')
-                  .update({
-                    'status': 'present',
-                    'check_in_at': effectiveScanAtIso,
-                    'updated_at': nowIso,
-                  })
-                  .eq('id', attendance['id']);
-              return successResponse();
-            }
-          }
-          return alreadyRecordedResponse();
-        }
-        if (!_isEventSessionAttendanceUnavailableError(e) &&
-            !_isAccessPolicyError(e)) {
+        if (_isEventSessionAttendanceUnavailableError(e) ||
+            _isAccessPolicyError(e)) {
+          // Fall through to fail-closed message below.
+        } else {
           rethrow;
         }
       }
     }
 
-    final supportsSessionId = await _supportsAttendanceColumn('session_id');
-    if (supportsSessionId) {
-      final supportsLastScannedAt = await _supportsAttendanceColumn(
-        'last_scanned_at',
-      );
-
-      try {
-        final existingRows = await _supabase
-            .from('attendance')
-            .select('id,status,check_in_at')
-            .eq('ticket_id', ticketId)
-            .eq('session_id', sessionId)
-            .limit(1);
-
-        if (existingRows.isNotEmpty) {
-          final attendance = Map<String, dynamic>.from(existingRows.first);
-          final alreadyCheckedIn =
-              _isCheckedInStatus(attendance['status']) ||
-              (attendance['check_in_at']?.toString().trim().isNotEmpty ??
-                  false);
-          if (alreadyCheckedIn) {
-            if (!dryRun &&
-                _shouldApplyIncomingCheckIn(
-                  incomingScanAtIso: effectiveScanAtIso,
-                  recordedCheckInAt: attendance['check_in_at'],
-                )) {
-              final payload = <String, dynamic>{
-                'status': 'present',
-                'check_in_at': effectiveScanAtIso,
-              };
-
-              await _supabase
-                  .from('attendance')
-                  .update(payload)
-                  .eq('id', attendance['id']);
-
-              return successResponse();
-            }
-            return alreadyRecordedResponse();
-          }
-
-          if (dryRun) {
-            return successResponse();
-          }
-
-          final payload = <String, dynamic>{
-            'status': 'present',
-            'check_in_at': effectiveScanAtIso,
-          };
-          if (supportsLastScannedAt) {
-            payload['last_scanned_at'] = effectiveScanAtIso;
-          }
-
-          await _supabase
-              .from('attendance')
-              .update(payload)
-              .eq('id', attendance['id']);
-
-          return successResponse();
-        }
-
-        final insertPayload = <String, dynamic>{
-          'ticket_id': ticketId,
-          'session_id': sessionId,
-          'status': 'present',
-          'check_in_at': effectiveScanAtIso,
-        };
-        if (supportsLastScannedAt) {
-          insertPayload['last_scanned_at'] = effectiveScanAtIso;
-        }
-
-        if (dryRun) {
-          return successResponse();
-        }
-
-        await _supabase.from('attendance').insert(insertPayload);
-
-        return successResponse();
-      } catch (e) {
-        if (_isUniqueViolationError(e)) {
-          final existingRows = await _supabase
-              .from('attendance')
-              .select('id,status,check_in_at')
-              .eq('ticket_id', ticketId)
-              .eq('session_id', sessionId)
-              .limit(1);
-          if (existingRows.isNotEmpty && !dryRun) {
-            final attendance = Map<String, dynamic>.from(existingRows.first);
-            if (_shouldApplyIncomingCheckIn(
-              incomingScanAtIso: effectiveScanAtIso,
-              recordedCheckInAt: attendance['check_in_at'],
-            )) {
-              final payload = <String, dynamic>{
-                'status': 'present',
-                'check_in_at': effectiveScanAtIso,
-              };
-              await _supabase
-                  .from('attendance')
-                  .update(payload)
-                  .eq('id', attendance['id']);
-              return successResponse();
-            }
-          }
-          return alreadyRecordedResponse();
-        }
-        if (_isAccessPolicyError(e)) {
-          return {
-            'ok': false,
-            'error':
-                'Check-in failed due to access policy. Please contact admin.',
-            'status': 'error',
-          };
-        }
-        rethrow;
-      }
-    }
-
+    // No attendance.session_id in production — do not probe (42703 ERROR).
     return {
       'ok': false,
       'error':
@@ -1950,27 +1855,34 @@ class EventService {
   ) async {
     try {
       final supportedColumns = await _eventSessionsSupportedColumns();
-      dynamic query = _supabase
-          .from('event_sessions')
-          .select(supportedColumns.join(','))
-          .eq('event_id', eventId);
-
-      if (supportedColumns.contains('sort_order')) {
-        query = query.order('sort_order', ascending: true);
-      } else if (supportedColumns.contains('session_no')) {
-        query = query.order('session_no', ascending: true);
-      }
-
-      query = query.order('start_at', ascending: true);
-
-      final rows = await query;
-      return _normalizeEventSessions(
-        List<Map<String, dynamic>>.from(rows),
-        eventId,
-      );
+      return await _queryEventSessions(eventId, supportedColumns);
     } catch (_) {
-      return [];
+      // One-shot fallback if a preferred column is missing — mark extras false.
+      for (final column in _eventSessionPreferredColumns) {
+        if (!_eventSessionBaseColumns.contains(column)) {
+          _eventSessionColumnSupport[column] = false;
+        }
+      }
+      try {
+        return await _queryEventSessions(eventId, _eventSessionBaseColumns);
+      } catch (_) {
+        return [];
+      }
     }
+  }
+
+  String _manilaClockLabel(DateTime utc) {
+    final local = utc.toUtc().add(_manilaOffset);
+    final hour = local.hour % 12 == 0 ? 12 : local.hour % 12;
+    final minute = local.minute.toString().padLeft(2, '0');
+    final period = local.hour >= 12 ? 'PM' : 'AM';
+    return '$hour:$minute $period';
+  }
+
+  bool _sameManilaDay(DateTime aUtc, DateTime bUtc) {
+    final a = aUtc.toUtc().add(_manilaOffset);
+    final b = bUtc.toUtc().add(_manilaOffset);
+    return a.year == b.year && a.month == b.month && a.day == b.day;
   }
 
   Map<String, dynamic> _resolveEventWindowContext(
@@ -1983,6 +1895,7 @@ class EventService {
     String waitingMessage = 'Waiting for event scan window.',
     String openMessage = 'Event scanning is open.',
     String closedMessage = 'Event scan window has closed.',
+    dynamic earlyOutEnabledAt,
   }) {
     final startAt = _toUtcDate(startRaw);
     if (startAt == null) {
@@ -2006,6 +1919,11 @@ class EventService {
       closesAt = endAt;
     }
     if (nowUtc.isBefore(startAt)) {
+      final earlyMessage = waitingMessage == 'Waiting for event scan window.'
+          ? (_sameManilaDay(nowUtc, startAt)
+              ? 'Too early to time in. Wait for the scheduled start (${_manilaClockLabel(startAt)}).'
+              : 'Too early to time in. Wait for the scheduled start.')
+          : waitingMessage;
       return {
         'status': 'waiting',
         'source': 'event',
@@ -2014,32 +1932,123 @@ class EventService {
         'opens_at': startAt.toIso8601String(),
         'closes_at': closesAt.toIso8601String(),
         'window_minutes': windowMinutes,
-        'message': waitingMessage,
+        'message': earlyMessage,
       };
     }
 
-    if (nowUtc.isAfter(closesAt)) {
+    if (!nowUtc.isAfter(closesAt)) {
+      final openLabel = openMessage == 'Event scanning is open.'
+          ? 'Time-in is open until ${_manilaClockLabel(closesAt)}.'
+          : openMessage;
       return {
-        'status': 'closed',
-        'source': 'event',
+        'status': 'open',
+        'source': source,
         'event': eventSummary,
         'session': null,
         'opens_at': startAt.toIso8601String(),
         'closes_at': closesAt.toIso8601String(),
         'window_minutes': windowMinutes,
-        'message': closedMessage,
+        'scan_mode': 'check_in',
+        'message': openLabel,
       };
     }
 
+    // Time-in grace ended — keep scanner open for Early Out / end+1h time-out.
+    final checkOutOpen = _resolveCheckOutScanOpen(
+      eventSummary: eventSummary,
+      endRaw: endRaw ?? eventSummary['end_at'],
+      earlyOutEnabledAt: earlyOutEnabledAt ?? eventSummary['early_out_enabled_at'],
+      nowUtc: nowUtc,
+      source: source,
+      session: null,
+    );
+    if (checkOutOpen != null) {
+      return checkOutOpen;
+    }
+
+    final resolvedEnd = _toUtcDate(endRaw ?? eventSummary['end_at']);
+    final earlyOutRaw = earlyOutEnabledAt ?? eventSummary['early_out_enabled_at'];
+    if (_toUtcDate(earlyOutRaw) == null &&
+        resolvedEnd != null &&
+        nowUtc.isBefore(resolvedEnd)) {
+      return {
+        'status': 'closed',
+        'source': source,
+        'event': eventSummary,
+        'session': null,
+        'opens_at': resolvedEnd.toIso8601String(),
+        'closes_at': resolvedEnd.add(const Duration(hours: 1)).toIso8601String(),
+        'window_minutes': windowMinutes,
+        'scan_mode': 'check_out',
+        'message':
+            'Too early to time out. Early Out is not enabled — time-out opens at the scheduled end ('
+            '${_manilaClockLabel(resolvedEnd)}).',
+      };
+    }
+
+    final graceClosedMessage =
+        closedMessage == 'Event scan window has closed.'
+            ? 'Time-in grace ended at ${_manilaClockLabel(closesAt)}. You can no longer time in for this schedule.'
+            : closedMessage;
     return {
-      'status': 'open',
-      'source': 'event',
+      'status': 'closed',
+      'source': source,
       'event': eventSummary,
       'session': null,
       'opens_at': startAt.toIso8601String(),
       'closes_at': closesAt.toIso8601String(),
       'window_minutes': windowMinutes,
-      'message': openMessage,
+      'message': graceClosedMessage,
+    };
+  }
+
+  /// Opens teacher/assistant scanner for time-out when Early Out is ON
+  /// (enabled_at → +1h, independent of event end_at), or during the normal
+  /// end_at → end_at+1h window when Early Out was never triggered.
+  Map<String, dynamic>? _resolveCheckOutScanOpen({
+    required Map<String, dynamic> eventSummary,
+    required dynamic endRaw,
+    required dynamic earlyOutEnabledAt,
+    required DateTime nowUtc,
+    required String source,
+    Map<String, dynamic>? session,
+  }) {
+    final enabledAt = _toUtcDate(earlyOutEnabledAt);
+    if (enabledAt != null) {
+      final expiresAt = enabledAt.add(const Duration(hours: 1));
+      if (!nowUtc.isBefore(enabledAt) && !nowUtc.isAfter(expiresAt)) {
+        return {
+          'status': 'open',
+          'source': source,
+          'event': eventSummary,
+          'session': session,
+          'opens_at': enabledAt.toIso8601String(),
+          'closes_at': expiresAt.toIso8601String(),
+          'window_minutes': 60,
+          'scan_mode': 'check_out',
+          'message': 'Early time-out is open. Scan tickets to time out.',
+        };
+      }
+      // Early Out was used — do not also open the normal end_at window.
+      return null;
+    }
+
+    final endAt = _toUtcDate(endRaw);
+    if (endAt == null) return null;
+    final closesAt = endAt.add(const Duration(hours: 1));
+    if (nowUtc.isBefore(endAt) || nowUtc.isAfter(closesAt)) {
+      return null;
+    }
+    return {
+      'status': 'open',
+      'source': source,
+      'event': eventSummary,
+      'session': session,
+      'opens_at': endAt.toIso8601String(),
+      'closes_at': closesAt.toIso8601String(),
+      'window_minutes': 60,
+      'scan_mode': 'check_out',
+      'message': 'Time-out is open. Scan tickets to time out.',
     };
   }
 
@@ -2055,6 +2064,7 @@ class EventService {
       'start_at': event['start_at']?.toString() ?? '',
       'end_at': event['end_at']?.toString() ?? '',
       'grace_time': event['grace_time'],
+      'early_out_enabled_at': event['early_out_enabled_at'],
     };
 
     if (eventId.isEmpty) {
@@ -2154,16 +2164,22 @@ class EventService {
         };
       }
 
-      // If a previous seminar already closed but a later seminar is still upcoming,
-      // show Waiting for the next seminar (gap between sessions).
+      // Gap between seminars: do NOT sync absences on every context poll.
+      // That RPC was revoked for anon and was flooding API Gateway + ERROR %.
       if (waiting.isNotEmpty) {
-        try {
-          await _supabase.rpc(
-            'sync_closed_session_absences',
-            params: {'p_event_id': eventId},
-          );
-        } catch (e) {
-          debugPrint('[scanContext] sync_closed_session_absences failed: $e');
+        final lastSync = _absenceSyncAttemptedAtUtc[eventId];
+        final nowUtc = DateTime.now().toUtc();
+        final shouldSync = lastSync == null ||
+            nowUtc.difference(lastSync) >= _absenceSyncCooldown;
+        if (shouldSync && MobileBackendService.isConfigured) {
+          _absenceSyncAttemptedAtUtc[eventId] = nowUtc;
+          try {
+            await _mobileBackend.secureWrite('sync_closed_session_absences', {
+              'event_id': eventId,
+            });
+          } catch (e) {
+            debugPrint('[scanContext] sync_closed_session_absences failed: $e');
+          }
         }
 
         waiting.sort(
@@ -2173,6 +2189,17 @@ class EventService {
         );
         final item = waiting.first;
         final session = Map<String, dynamic>.from(item['session']);
+        final checkOutDuringGap = _resolveCheckOutScanOpen(
+          eventSummary: eventSummary,
+          endRaw: event['end_at'],
+          earlyOutEnabledAt: event['early_out_enabled_at'],
+          nowUtc: nowUtc,
+          source: 'session',
+          session: null,
+        );
+        if (checkOutDuringGap != null) {
+          return checkOutDuringGap;
+        }
         return {
           'status': 'waiting',
           'source': 'session',
@@ -2203,6 +2230,7 @@ class EventService {
           waitingMessage: 'Waiting for event scan window.',
           openMessage: 'Scanning is open for this event.',
           closedMessage: 'Event scan window has closed.',
+          earlyOutEnabledAt: event['early_out_enabled_at'],
         );
       }
 
@@ -2215,21 +2243,35 @@ class EventService {
       final session = last != null
           ? Map<String, dynamic>.from(last['session'] as Map<String, dynamic>)
           : <String, dynamic>{};
+      final sessionSummary = last == null
+          ? null
+          : {
+              'id': session['id']?.toString() ?? '',
+              'title': session['title']?.toString() ?? '',
+              'topic': session['topic']?.toString() ?? '',
+              'display_name': _sessionDisplayName(session),
+              'start_at': session['start_at']?.toString() ?? '',
+              'end_at': session['end_at']?.toString() ?? '',
+              'scan_window_minutes': last['window_minutes'],
+              'early_out_enabled_at': session['early_out_enabled_at'],
+            };
+      final checkOutOpen = _resolveCheckOutScanOpen(
+        eventSummary: eventSummary,
+        endRaw: session['end_at'] ?? event['end_at'],
+        earlyOutEnabledAt:
+            session['early_out_enabled_at'] ?? event['early_out_enabled_at'],
+        nowUtc: nowUtc,
+        source: 'session',
+        session: sessionSummary,
+      );
+      if (checkOutOpen != null) {
+        return checkOutOpen;
+      }
       return {
         'status': 'closed',
         'source': 'session',
         'event': eventSummary,
-        'session': last == null
-            ? null
-            : {
-                'id': session['id']?.toString() ?? '',
-                'title': session['title']?.toString() ?? '',
-                'topic': session['topic']?.toString() ?? '',
-                'display_name': _sessionDisplayName(session),
-                'start_at': session['start_at']?.toString() ?? '',
-                'end_at': session['end_at']?.toString() ?? '',
-                'scan_window_minutes': last['window_minutes'],
-              },
+        'session': sessionSummary,
         'opens_at': last?['opens_at'],
         'closes_at': last?['closes_at'],
         'window_minutes': last?['window_minutes'] ?? 30,
@@ -2242,6 +2284,7 @@ class EventService {
       event['start_at'],
       event['end_at'],
       nowUtc,
+      earlyOutEnabledAt: event['early_out_enabled_at'],
     );
   }
 
@@ -2435,36 +2478,27 @@ class EventService {
       return {'courseCode': 'ALL', 'yearLevel': 'ALL', 'specialization': ''};
     }
 
+    final cached = _studentTargetScopeCache[trimmedUserId];
+    if (cached != null) return Map<String, String>.from(cached);
+
     String courseCode = 'ALL';
     String yearLevel = 'ALL';
     String specialization = '';
     String sectionId = '';
 
+    // Never SELECT users via anon — table is locked (048). Use login prefs.
     try {
-      dynamic rows;
-      try {
-        rows = await _supabase
-            .from('users')
-            .select('course,year_level,section_id')
-            .eq('id', trimmedUserId)
-            .limit(1);
-      } catch (_) {
-        rows = await _supabase
-            .from('users')
-            .select('course,section_id')
-            .eq('id', trimmedUserId)
-            .limit(1);
-      }
-
-        if ((rows as List).isNotEmpty) {
-        final row = Map<String, dynamic>.from(rows.first as Map);
-        courseCode = _normalizeStudentCourse(row['course']?.toString());
-        yearLevel = _normalizeStudentYearFromRaw(row['year_level']);
-        sectionId = row['section_id']?.toString().trim() ?? '';
-        specialization = _extractStudentSpecialization(row['course']?.toString());
+      final user = await AuthService().getCurrentUser();
+      final prefsId = (user?['id']?.toString() ?? '').trim();
+      if (prefsId.isEmpty || prefsId == trimmedUserId) {
+        courseCode = _normalizeStudentCourse(user?['course']?.toString());
+        yearLevel = _normalizeStudentYearFromRaw(user?['year_level']);
+        sectionId = user?['section_id']?.toString().trim() ?? '';
+        specialization =
+            _extractStudentSpecialization(user?['course']?.toString());
       }
     } catch (_) {
-      // Fall back to defaults.
+      // Fall through with defaults / section lookup.
     }
 
     if (sectionId.isNotEmpty) {
@@ -2490,15 +2524,15 @@ class EventService {
       } catch (_) {
         // Keep best-effort values.
       }
-    } else if (courseCode == 'ALL' || yearLevel == 'ALL') {
-      // Legacy path when section_id missing.
     }
 
-    return {
+    final scope = {
       'courseCode': courseCode,
       'yearLevel': yearLevel,
       'specialization': specialization,
     };
+    _studentTargetScopeCache[trimmedUserId] = scope;
+    return Map<String, String>.from(scope);
   }
 
   bool isStudentAllowedForEvent(
@@ -2590,6 +2624,7 @@ class EventService {
         yearLevel: yearLevel,
         courseCode: courseCode,
         specialization: specialization,
+        forceFresh: forceFresh,
       ),
       forceFresh: forceFresh,
     );
@@ -2600,10 +2635,45 @@ class EventService {
     String? yearLevel,
     String? courseCode,
     String? specialization,
+    bool forceFresh = false,
   }) async {
     try {
       final now = DateTime.now().toUtc().toIso8601String();
-      final response = await _selectPublishedActiveEvents(now);
+      List<dynamic> response = [];
+
+      // Live/publish refreshes must hit Supabase — Firestore catalog can lag
+      // behind admin publish and was returning a warm-but-stale event list.
+      if (!forceFresh) {
+        try {
+          final catalog =
+              await PublicCatalogService.instance.loadIfRevisionChanged(
+            limit: 120,
+          );
+          if (catalog == null) {
+            final warm = _readListCache(cacheKey, _activeEventsTtl);
+            if (warm != null && warm.isNotEmpty) {
+              return warm;
+            }
+          } else if (catalog.isNotEmpty) {
+            final nowDt = DateTime.now().toUtc();
+            response = catalog.where((row) {
+              final endRaw = (row['end_at'] ?? '').toString().trim();
+              if (endRaw.isEmpty) return true;
+              try {
+                return DateTime.parse(endRaw).toUtc().isAfter(nowDt);
+              } catch (_) {
+                return true;
+              }
+            }).toList();
+          }
+        } catch (_) {
+          response = [];
+        }
+      }
+
+      if (response.isEmpty) {
+        response = await _selectPublishedActiveEvents(now);
+      }
       final list = List<Map<String, dynamic>>.from(response);
       final filtered = _filterByTargetParticipant(
         list,
@@ -2972,40 +3042,43 @@ class EventService {
     String eventId,
     String studentId,
   ) async {
-    // Prefer local Supabase first — hosted PHP is often the slow path.
-    final requirements = await fetchEventStudentRequirementsList(
-      eventId,
-      studentId: studentId,
-    );
-    if (requirements.isNotEmpty) {
-      final localGate = await _buildStudentDocumentAccessGate(
-        eventId: eventId,
-        studentId: studentId,
-        requirements: requirements,
-      );
-      if (localGate != null) {
-        return localGate;
-      }
-    }
-
+    // BFF first — event_student_* tables are locked from anon (048).
     if (MobileBackendService.isConfigured) {
       try {
         final hosted = await _fetchStudentDocumentAccessGateFromHosted(
           eventId,
           studentId,
         ).timeout(
-          const Duration(seconds: 3),
+          const Duration(seconds: 8),
           onTimeout: () => null,
         );
         if (hosted != null) {
           return hosted;
         }
       } catch (_) {
-        // Ignore hosted failures.
+        // Fall through only for catalog RPC (no locked-table SELECT).
       }
     }
 
-    return null;
+    final requirements = await fetchEventStudentRequirementsList(
+      eventId,
+      studentId: studentId,
+    );
+    if (requirements.isEmpty) {
+      return null;
+    }
+
+    // Building the gate locally needs locked document tables — skip when BFF
+    // is configured (already tried above). Without BFF, best-effort only.
+    if (MobileBackendService.isConfigured) {
+      return null;
+    }
+
+    return _buildStudentDocumentAccessGate(
+      eventId: eventId,
+      studentId: studentId,
+      requirements: requirements,
+    );
   }
 
   Future<Map<String, dynamic>?> _fetchStudentDocumentAccessGateFromHosted(
@@ -3241,38 +3314,8 @@ class EventService {
       return cached;
     }
 
-    // Supabase first — avoid blocking event details on a hung PHP host.
-    try {
-      final rpcRows = await _supabase.rpc(
-        'get_event_student_requirements',
-        params: {'p_event_id': trimmedEventId},
-      );
-      final rpcRequirements = List<Map<String, dynamic>>.from(rpcRows);
-      if (rpcRequirements.isNotEmpty) {
-        _writeCachedStudentRequirements(trimmedEventId, rpcRequirements);
-        return rpcRequirements;
-      }
-    } catch (_) {
-      // Fall through to direct table read.
-    }
-
-    try {
-      final rows = List<Map<String, dynamic>>.from(
-        await _supabase
-            .from('event_student_requirements')
-            .select('id,code,label,sort_order,created_at')
-            .eq('event_id', trimmedEventId)
-            .order('sort_order'),
-      );
-      if (rows.isNotEmpty) {
-        _writeCachedStudentRequirements(trimmedEventId, rows);
-        return rows;
-      }
-    } catch (_) {
-      // Fall through to hosted lookup.
-    }
-
     final trimmedStudentId = studentId?.trim() ?? '';
+    // Prefer PHP — event_student_requirements SELECT is revoked for anon.
     if (MobileBackendService.isConfigured && trimmedStudentId.isNotEmpty) {
       try {
         final hosted = await _mobileBackend
@@ -3281,24 +3324,34 @@ class EventService {
               userId: trimmedStudentId,
             )
             .timeout(
-              const Duration(seconds: 3),
+              const Duration(seconds: 8),
               onTimeout: () => {'ok': false},
             );
         if (hosted['ok'] == true) {
           final hostedRequirements = List<Map<String, dynamic>>.from(
             hosted['requirements'] as List? ?? const [],
           );
-          if (hostedRequirements.isNotEmpty) {
-            _writeCachedStudentRequirements(trimmedEventId, hostedRequirements);
-            return hostedRequirements;
-          }
+          _writeCachedStudentRequirements(trimmedEventId, hostedRequirements);
+          return hostedRequirements;
         }
       } catch (_) {
-        // No readable requirements source available.
+        // Fall through to public RPC only.
       }
     }
 
-    // Cache empty so we don't keep re-hitting slow hosts for events with no docs.
+    try {
+      final rpcRows = await _supabase.rpc(
+        'get_event_student_requirements',
+        params: {'p_event_id': trimmedEventId},
+      );
+      final rpcRequirements = List<Map<String, dynamic>>.from(rpcRows);
+      // Empty is a valid answer — do NOT fall through to locked table SELECT.
+      _writeCachedStudentRequirements(trimmedEventId, rpcRequirements);
+      return rpcRequirements;
+    } catch (_) {
+      // No readable requirements source.
+    }
+
     _writeCachedStudentRequirements(trimmedEventId, const []);
     return [];
   }
@@ -3307,58 +3360,8 @@ class EventService {
     String eventId,
     String studentId,
   ) async {
-    try {
-      final requirements = await fetchEventStudentRequirementsList(
-        eventId,
-        studentId: studentId,
-      );
-      if (requirements.isNotEmpty) {
-        final documents = List<Map<String, dynamic>>.from(
-          await _supabase
-              .from('event_student_documents')
-              .select(
-                'id,event_id,requirement_id,student_id,file_name,file_path,file_url,mime_type,uploaded_at,updated_at',
-              )
-              .eq('event_id', eventId)
-              .eq('student_id', studentId),
-        );
-        final submissionRows = List<Map<String, dynamic>>.from(
-          await _supabase
-              .from('event_student_submissions')
-              .select(
-                'id,event_id,student_id,status,submitted_at,reviewed_at,decline_reason,updated_at',
-              )
-              .eq('event_id', eventId)
-              .eq('student_id', studentId)
-              .limit(1),
-        );
-
-        final gate = await _buildStudentDocumentAccessGate(
-          eventId: eventId,
-          studentId: studentId,
-          requirements: requirements,
-        );
-
-        return {
-          'ok': true,
-          'requirements': requirements,
-          'documents': documents,
-          'submission': submissionRows.isNotEmpty ? submissionRows.first : null,
-          'access': {
-            'required': true,
-            'complete': gate?['requirementsComplete'] == true,
-            'approved': gate?['requirementsApproved'] == true,
-            'status': gate?['requirementsStatus'] ?? 'incomplete',
-            'message': gate?['message'] ??
-                'Upload the required documents before registering.',
-            'decline_reason': gate?['requirementsDeclineReason'] ?? '',
-          },
-        };
-      }
-    } catch (_) {
-      // Fall through to hosted / empty.
-    }
-
+    // Prefer PHP BFF after security lockdown — anon cannot reliably read
+    // event_student_submissions, which caused "Submit" while already pending.
     if (MobileBackendService.isConfigured) {
       try {
         final hosted = await _mobileBackend
@@ -3367,7 +3370,7 @@ class EventService {
               userId: studentId,
             )
             .timeout(
-              const Duration(seconds: 3),
+              const Duration(seconds: 12),
               onTimeout: () => {'ok': false},
             );
         if (hosted['ok'] == true) {
@@ -3392,9 +3395,24 @@ class EventService {
               },
             };
           }
+          // Hosted says no requirements — trust that.
+          return {
+            'ok': true,
+            'requirements': <Map<String, dynamic>>[],
+            'documents': <Map<String, dynamic>>[],
+            'submission': null,
+            'access': {
+              'required': false,
+              'complete': true,
+              'approved': true,
+              'status': '',
+              'message': '',
+              'decline_reason': '',
+            },
+          };
         }
       } catch (_) {
-        // Fall through to empty requirements response.
+        // Fail closed — do not SELECT locked event_student_* tables.
       }
     }
 
@@ -3426,54 +3444,38 @@ class EventService {
       if (hosted['ok'] == true || hosted['already_approved'] == true) {
         return hosted;
       }
-    }
-
-    try {
-      final gate = await _fetchStudentDocumentAccessGate(eventId, studentId);
-      if (gate == null) {
-        return {'ok': false, 'error': 'This event has no student requirements.'};
-      }
-      if (gate['requirementsComplete'] != true) {
+      // Idempotent: already pending is success for the student UI.
+      final err = (hosted['error']?.toString() ?? '').toLowerCase();
+      if (hosted['already_pending'] == true ||
+          err.contains('already under review') ||
+          err.contains('under review')) {
         return {
-          'ok': false,
-          'error': 'Upload all required documents before submitting.',
+          'ok': true,
+          'already_pending': true,
+          'submission': hosted['submission'],
         };
       }
-      if (gate['requirementsStatus'] == 'pending_review') {
-        return {'ok': false, 'error': 'Your documents are already under review.'};
-      }
-      if (gate['requirementsApproved'] == true) {
-        return {'ok': true, 'already_approved': true};
-      }
-
-      final nowIso = DateTime.now().toUtc().toIso8601String();
-      await _supabase.from('event_student_submissions').upsert(
-        {
-          'event_id': eventId,
-          'student_id': studentId,
-          'status': 'pending_review',
-          'submitted_at': nowIso,
-          'reviewed_at': null,
-          'reviewed_by': null,
-          'decline_reason': null,
-          'updated_at': nowIso,
-        },
-        onConflict: 'event_id,student_id',
-      );
-
-      return {'ok': true};
-    } catch (error) {
-      return {'ok': false, 'error': error.toString()};
+      // Do not fall through to anon upsert after lockdown — return PHP error.
+      return {
+        'ok': false,
+        'error': hosted['error']?.toString() ?? 'Submit failed.',
+      };
     }
+
+    return {
+      'ok': false,
+      'error': 'Submit requires the mobile backend.',
+    };
   }
 
   Future<Map<String, dynamic>> uploadStudentRequirementDocument({
     required String eventId,
     required String requirementId,
     required String studentId,
-    required List<int> bytes,
     required String fileName,
     required String mimeType,
+    List<int>? bytes,
+    String? filePath,
   }) async {
     if (MobileBackendService.isConfigured) {
       final hosted = await _mobileBackend.uploadStudentRequirementFile(
@@ -3481,98 +3483,28 @@ class EventService {
         requirementId: requirementId,
         userId: studentId,
         bytes: bytes,
+        filePath: filePath,
         fileName: fileName,
         mimeType: mimeType,
       );
       if (hosted['ok'] == true) {
         return hosted;
       }
+      return {
+        'ok': false,
+        'error': hosted['error']?.toString() ?? 'Upload failed.',
+      };
     }
 
-    try {
-      final extension = fileName.contains('.')
-          ? fileName.split('.').last.toLowerCase()
-          : 'pdf';
-      final storagePath =
-          '$eventId/$studentId/$requirementId-${DateTime.now().millisecondsSinceEpoch}.$extension';
-
-      await _supabase.storage.from('student-documents').uploadBinary(
-        storagePath,
-        Uint8List.fromList(bytes),
-        fileOptions: FileOptions(
-          cacheControl: '0',
-          upsert: true,
-          contentType: mimeType,
-        ),
-      );
-
-      final publicUrl =
-          _supabase.storage.from('student-documents').getPublicUrl(storagePath);
-
-      final nowIso = DateTime.now().toUtc().toIso8601String();
-      final savedRows = await _supabase.from('event_student_documents').upsert(
-        {
-          'event_id': eventId,
-          'requirement_id': requirementId,
-          'student_id': studentId,
-          'file_name': fileName,
-          'file_path': storagePath,
-          'file_url': publicUrl,
-          'mime_type': mimeType,
-          'uploaded_at': nowIso,
-          'updated_at': nowIso,
-        },
-        onConflict: 'requirement_id,student_id',
-      ).select();
-
-      final document = savedRows.isNotEmpty
-          ? Map<String, dynamic>.from(savedRows.first as Map)
-          : {
-              'event_id': eventId,
-              'requirement_id': requirementId,
-              'student_id': studentId,
-              'file_name': fileName,
-              'file_path': storagePath,
-              'file_url': publicUrl,
-              'mime_type': mimeType,
-              'uploaded_at': nowIso,
-              'updated_at': nowIso,
-            };
-
-      return {'ok': true, 'document': document};
-    } catch (error) {
-      return {'ok': false, 'error': error.toString()};
-    }
+    return {
+      'ok': false,
+      'error': 'Upload requires the mobile backend.',
+    };
   }
 
   Future<int?> _fetchEventRegisteredCountColumn(String eventId) async {
-    const selectAttempts = [
-      'registered_count',
-      'registered_count,registration_limit',
-    ];
-
-    for (final fields in selectAttempts) {
-      try {
-        final response = await _supabase
-            .from('events')
-            .select(fields)
-            .eq('id', eventId)
-            .maybeSingle();
-        if (response == null) {
-          return null;
-        }
-
-        final parsed = int.tryParse(
-          (response as Map)['registered_count']?.toString() ?? '',
-        );
-        if (parsed != null) {
-          return parsed;
-        }
-      } catch (_) {
-        continue;
-      }
-    }
-
+    // Skip probing registered_count — column often missing and each miss is a
+    // Postgres ERROR. Prefer RPC / hosted snapshot instead.
     return null;
   }
 
@@ -3620,15 +3552,8 @@ class EventService {
       // Fall back when RPC is not deployed yet.
     }
 
-    try {
-      final rows = await _supabase
-          .from('event_registrations')
-          .select('id')
-          .eq('event_id', eventId);
-      return List<Map<String, dynamic>>.from(rows).length;
-    } catch (_) {
-      return 0;
-    }
+    // Do not count via anon table SELECT — prefer 0 over ERROR spam.
+    return 0;
   }
 
   bool _isEventRegistrationFullSync(
@@ -3676,9 +3601,30 @@ class EventService {
             .from('events')
             .update({'allow_registration': false})
             .eq('id', eventId);
+        event['allow_registration'] = false;
       }
     } catch (_) {
       // Best-effort only.
+    }
+  }
+
+  /// When the scheduled registration close date has passed, turn Allow OFF.
+  /// Re-opening via web toggle clears the close-limit so it is not enforced again.
+  Future<void> _maybeCloseRegistrationByWindow(
+    String eventId,
+    Map<String, dynamic> event,
+  ) async {
+    if (!_asRegistrationBool(event['allow_registration'])) return;
+    if (!isEventRegistrationWindowClosed(event)) return;
+
+    try {
+      await _supabase
+          .from('events')
+          .update({'allow_registration': false})
+          .eq('id', eventId);
+      event['allow_registration'] = false;
+    } catch (_) {
+      // Best-effort only (PHP pages also auto-close).
     }
   }
 
@@ -3878,6 +3824,8 @@ class EventService {
       };
     }
 
+    await _maybeCloseRegistrationByWindow(eventId, event);
+
     if (isEventRegistrationWindowClosed(event)) {
       return {
         'allowed': false,
@@ -4066,154 +4014,30 @@ class EventService {
         eventId: eventId,
         userId: userId,
       );
+      // Never fall back to anon PostgREST writes (revoked after security lockdown).
       if (result['ok'] == true) {
-        return {
-          'ok': true,
-          if (result['already_registered'] == true) 'already_registered': true,
-        };
+        // Tickets tab keeps a TTL cache; clear it so the new ticket appears.
+        unawaited(invalidateMyTicketsCache(userId));
+        invalidateEventDetailCache(eventId);
       }
-      if (result['endpoint_unavailable'] != true) {
-        return {
-          'ok': false,
-          'error': (result['error'] as String?)?.trim().isNotEmpty == true
-              ? result['error'] as String
-              : 'Registration failed.',
-        };
-      }
+      return result;
     }
-
-    return _registerForEventViaSupabase(eventId, userId);
+    return {
+      'ok': false,
+      'error':
+          'Hosted backend is required for registration. Set mobilePushApiBaseUrl in env.dart.',
+    };
   }
 
   Future<Map<String, dynamic>> _registerForEventViaSupabase(
     String eventId,
     String userId,
   ) async {
-    String registrationId = '';
-    try {
-      // 1. Check if already registered
-      final existing = await _supabase
-          .from('event_registrations')
-          .select('id')
-          .eq('event_id', eventId)
-          .eq('student_id', userId)
-          .limit(1);
-
-      if (existing.isNotEmpty) {
-        return {'ok': true, 'already_registered': true};
-      }
-
-      // 1.5 Validate event availability and approval-aware registration access.
-      final event = await _fetchRegistrationEvent(eventId);
-      if (event == null) {
-        return {'ok': false, 'error': 'Event not found.'};
-      }
-
-      final availability = await getStudentRegistrationAvailability(
-        eventId,
-        userId,
-        preloadedEvent: event,
-      );
-      if (!(availability['allowed'] == true)) {
-        return {
-          'ok': false,
-          'error':
-              availability['message'] as String? ??
-              'Registration is not allowed for this event.',
-        };
-      }
-
-      final latestCount = await _fetchEventRegistrationCount(
-        eventId,
-        eventHint: event,
-      );
-      event['registered_count'] = latestCount;
-
-      final latestSnapshot = await _fetchRegistrationSnapshot(eventId);
-      if (latestSnapshot != null && latestSnapshot['is_full'] == true) {
-        return {
-          'ok': false,
-          'error': 'Registration is full for this event.',
-        };
-      }
-
-      if (_isEventRegistrationFullSync(event, participantCount: latestCount)) {
-        return {
-          'ok': false,
-          'error': 'Registration is full for this event.',
-        };
-      }
-
-      // 2. Create registration
-      final regRes = await _supabase
-          .from('event_registrations')
-          .insert({'event_id': eventId, 'student_id': userId})
-          .select()
-          .single();
-
-      final regId = regRes['id']?.toString() ?? '';
-      registrationId = regId;
-
-      // 3. Create ticket
-      final token = _generateToken();
-      final ticketRes = await _supabase
-          .from('tickets')
-          .insert({'registration_id': regId, 'token': token})
-          .select()
-          .single();
-
-      final ticketId = ticketRes['id']?.toString() ?? '';
-
-      // 4. Create attendance
-      // Attendance row creation can be restricted by RLS in some deployments.
-      // Registration should still be considered successful even if attendance
-      // bootstrap insert is blocked; the scanner flow will create/update it later.
-      if (ticketId.isNotEmpty) {
-        try {
-          await _supabase.from('attendance').insert({
-            'ticket_id': ticketId,
-            'status': 'unscanned',
-          });
-        } catch (_) {
-          // Best-effort only.
-        }
-      }
-
-      await _maybeCloseRegistrationAtCapacity(eventId, event);
-
-      return {'ok': true};
-    } catch (e) {
-      // If registration/ticket was created but a later step failed (commonly
-      // attendance bootstrap insert blocked by RLS), treat as success.
-      if (registrationId.isNotEmpty) {
-        return {'ok': true};
-      }
-
-      // Final safety net: re-check whether the user is now registered.
-      // This prevents confusing UX where the first tap registers successfully
-      // but UI shows an error due to a non-critical post-step failure.
-      try {
-        final existing = await _supabase
-            .from('event_registrations')
-            .select('id')
-            .eq('event_id', eventId)
-            .eq('student_id', userId)
-            .limit(1);
-        if (existing.isNotEmpty) {
-          return {'ok': true};
-        }
-      } catch (_) {}
-
-      final errorText = e.toString().toLowerCase();
-      if (errorText.contains('registration is full')) {
-        return {
-          'ok': false,
-          'error': 'Registration is full for this event.',
-        };
-      }
-
-      return {'ok': false, 'error': 'Registration failed: ${e.toString()}'};
-    }
+    // Direct anon writes revoked after security lockdown — use PHP register path.
+    return {
+      'ok': false,
+      'error': 'Direct Supabase registration is disabled for security.',
+    };
   }
 
   // Get events the user registered for (tickets)
@@ -4271,52 +4095,33 @@ class EventService {
   }
 
   Future<List<Map<String, dynamic>>> _fetchMyTickets(String userId) async {
-    final response = await _supabase
-        .from('event_registrations')
-        .select('*, events(*), tickets(*, attendance(*))')
-        .eq('student_id', userId)
-        .order('registered_at', ascending: false);
-    final rows = List<Map<String, dynamic>>.from(response);
-
-    // Best-effort: if a registration exists but its ticket row was deleted
-    // (common during manual DB cleanup), recreate the missing ticket so the
-    // student can still "See Ticket" from My Tickets.
-    for (final reg in rows) {
-      final regId = reg['id']?.toString() ?? '';
-      if (regId.isEmpty) continue;
-
-      final ticketData = reg['tickets'];
-      final existingTicketId = ticketData is List && ticketData.isNotEmpty
-          ? (ticketData.first['id'] ?? '').toString()
-          : ticketData is Map
-          ? (ticketData['id'] ?? '').toString()
-          : '';
-      if (existingTicketId.trim().isNotEmpty) continue;
-
+    if (MobileBackendService.isConfigured) {
       try {
-        final token = _generateToken();
-        final ticketRes = await _supabase
-            .from('tickets')
-            .insert({'registration_id': regId, 'token': token})
-            .select()
-            .single();
-        final ticketId = ticketRes['id']?.toString() ?? '';
-        if (ticketId.isNotEmpty) {
-          reg['tickets'] = [ticketRes];
-          // Bootstrap attendance is best-effort only.
-          try {
-            await _supabase.from('attendance').insert({
-              'ticket_id': ticketId,
-              'status': 'unscanned',
-            });
-          } catch (_) {}
+        final result = await _mobileBackend.getMyTicketsSecure();
+        if (result['ok'] == true && result['rows'] is List) {
+          return List<Map<String, dynamic>>.from(
+            (result['rows'] as List).map(
+              (e) => Map<String, dynamic>.from(e as Map),
+            ),
+          );
         }
-      } catch (_) {
-        // If ticket recreate fails due to policy/schema, skip silently.
+      } catch (e) {
+        debugPrint('[tickets] BFF failed: $e');
       }
+      // Fail closed — anon embed path floods Postgres ERROR after lockdown.
+      return [];
     }
 
-    return rows;
+    try {
+      final response = await _supabase
+          .from('event_registrations')
+          .select('*, events(*), tickets(*, attendance(*))')
+          .eq('student_id', userId)
+          .order('registered_at', ascending: false);
+      return List<Map<String, dynamic>>.from(response);
+    } catch (_) {
+      return [];
+    }
   }
 
   Future<List<Map<String, dynamic>>> getTicketSeminarAttendance({
@@ -4332,19 +4137,24 @@ class EventService {
     if (sessions.isEmpty) return [];
 
     final checkInBySession = <String, String>{};
+    final checkOutBySession = <String, String>{};
 
     if (await _supportsEventSessionAttendanceTable()) {
       try {
         final rows = await _supabase
             .from('event_session_attendance')
-            .select('session_id,status,check_in_at')
+            .select('session_id,status,check_in_at,check_out_at')
             .eq('registration_id', registrationId);
         for (final row in List<Map<String, dynamic>>.from(rows)) {
           if (!_hasCheckInRecord(row)) continue;
           final sessionId = row['session_id']?.toString() ?? '';
           final checkInAt = row['check_in_at']?.toString() ?? '';
+          final checkOutAt = row['check_out_at']?.toString() ?? '';
           if (sessionId.isEmpty || checkInAt.isEmpty) continue;
           checkInBySession.putIfAbsent(sessionId, () => checkInAt);
+          if (checkOutAt.trim().isNotEmpty) {
+            checkOutBySession.putIfAbsent(sessionId, () => checkOutAt);
+          }
         }
       } catch (_) {
         // Fallback below handles older schemas.
@@ -4356,15 +4166,19 @@ class EventService {
       try {
         final rows = await _supabase
             .from('attendance')
-            .select('session_id,status,check_in_at')
+            .select('session_id,status,check_in_at,check_out_at')
             .eq('ticket_id', ticketId)
             .not('session_id', 'is', null);
         for (final row in List<Map<String, dynamic>>.from(rows)) {
           if (!_hasCheckInRecord(row)) continue;
           final sessionId = row['session_id']?.toString() ?? '';
           final checkInAt = row['check_in_at']?.toString() ?? '';
+          final checkOutAt = row['check_out_at']?.toString() ?? '';
           if (sessionId.isEmpty || checkInAt.isEmpty) continue;
           checkInBySession.putIfAbsent(sessionId, () => checkInAt);
+          if (checkOutAt.trim().isNotEmpty) {
+            checkOutBySession.putIfAbsent(sessionId, () => checkOutAt);
+          }
         }
       } catch (_) {}
     }
@@ -4376,6 +4190,7 @@ class EventService {
         'id': sessionId,
         'title': _sessionDisplayName(sessionMap),
         'check_in_at': checkInBySession[sessionId] ?? '',
+        'check_out_at': checkOutBySession[sessionId] ?? '',
       };
     }).toList();
   }
@@ -4390,15 +4205,35 @@ class EventService {
 
   // Check if user is registered for an event
   Future<bool> isRegistered(String eventId, String userId) async {
+    final eId = eventId.trim();
+    final uId = userId.trim();
+    if (eId.isEmpty || uId.isEmpty) return false;
+
+    if (MobileBackendService.isConfigured) {
+      try {
+        final res = await _mobileBackend.secureRead(
+          table: 'event_registrations',
+          select: 'id',
+          filters: {'event_id': eId, 'student_id': uId},
+          limit: 1,
+        );
+        if (res['ok'] == true && res['rows'] is List) {
+          return (res['rows'] as List).isNotEmpty;
+        }
+      } catch (_) {}
+      // Fail closed — do not anon-SELECT (avoids ERROR spam / RLS noise).
+      return false;
+    }
+
     try {
       final response = await _supabase
           .from('event_registrations')
           .select('id')
-          .eq('event_id', eventId)
-          .eq('student_id', userId)
+          .eq('event_id', eId)
+          .eq('student_id', uId)
           .limit(1);
       return response.isNotEmpty;
-    } catch (e) {
+    } catch (_) {
       return false;
     }
   }
@@ -4672,12 +4507,33 @@ class EventService {
     String eventId,
     String userId,
   ) async {
+    final eId = eventId.trim();
+    final uId = userId.trim();
+    if (eId.isEmpty || uId.isEmpty) return {};
+
+    if (MobileBackendService.isConfigured) {
+      try {
+        final rows = await _fetchMyTickets(uId);
+        for (final row in rows) {
+          final rowEventId = (row['event_id']?.toString() ?? '').trim();
+          final nested = row['events'];
+          final nestedId = nested is Map
+              ? (nested['id']?.toString() ?? '').trim()
+              : '';
+          if (rowEventId == eId || nestedId == eId) {
+            return Map<String, dynamic>.from(row);
+          }
+        }
+      } catch (_) {}
+      return {};
+    }
+
     try {
       final rows = await _supabase
           .from('event_registrations')
           .select('event_id, events(*), tickets(*, attendance(*))')
-          .eq('student_id', userId)
-          .eq('event_id', eventId)
+          .eq('student_id', uId)
+          .eq('event_id', eId)
           .limit(1);
 
       if (rows.isEmpty) {
@@ -4877,6 +4733,41 @@ class EventService {
     }
   }
 
+  /// Prefer BFF early_out flag — fresher than anon event embeds after web toggle.
+  Future<List<Map<String, dynamic>>> _enrichEventsWithEarlyOut(
+    List<Map<String, dynamic>> events,
+  ) async {
+    if (events.isEmpty || !MobileBackendService.isConfigured) {
+      return events;
+    }
+
+    final ids = events
+        .map((e) => e['id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList();
+    if (ids.isEmpty) return events;
+
+    final byId = <String, dynamic>{};
+    await Future.wait(ids.map((id) async {
+      try {
+        final res = await _mobileBackend.getEventEarlyOutStatus(eventId: id);
+        if (res['ok'] != true) return;
+        final earlyOut = res['early_out'];
+        if (earlyOut is! Map) return;
+        final enabled = earlyOut['enabled'] == true;
+        byId[id] = enabled ? earlyOut['enabled_at'] : null;
+      } catch (_) {}
+    }));
+
+    if (byId.isEmpty) return events;
+    return events.map((event) {
+      final id = event['id']?.toString() ?? '';
+      if (id.isEmpty || !byId.containsKey(id)) return event;
+      return {...event, 'early_out_enabled_at': byId[id]};
+    }).toList();
+  }
+
   Map<String, dynamic> _finalizeTeacherScanContext({
     required List<Map<String, dynamic>> events,
     required List<Map<String, dynamic>> contexts,
@@ -5045,13 +4936,14 @@ class EventService {
         );
       }
 
+      final enrichedEvents = await _enrichEventsWithEarlyOut(events);
       final nowUtc = DateTime.now().toUtc();
       final contexts = <Map<String, dynamic>>[];
-      for (final event in events) {
+      for (final event in enrichedEvents) {
         contexts.add(await _resolveSingleEventScanContext(event, nowUtc));
       }
       return _finalizeTeacherScanContext(
-        events: events,
+        events: enrichedEvents,
         contexts: contexts,
         nowUtc: nowUtc,
       );
@@ -5215,13 +5107,14 @@ class EventService {
         );
       }
 
+      final enrichedEvents = await _enrichEventsWithEarlyOut(events);
       final nowUtc = DateTime.now().toUtc();
       final contexts = <Map<String, dynamic>>[];
-      for (final event in events) {
+      for (final event in enrichedEvents) {
         contexts.add(await _resolveSingleEventScanContext(event, nowUtc));
       }
       return _finalizeTeacherScanContext(
-        events: events,
+        events: enrichedEvents,
         contexts: contexts,
         nowUtc: nowUtc,
       );
@@ -5253,6 +5146,15 @@ class EventService {
 
   // Create a new event (pending approval)
   Future<Map<String, dynamic>> createEvent(Map<String, dynamic> payload) async {
+    if (MobileBackendService.isConfigured) {
+      try {
+        final result = await _mobileBackend.createEventSecure(payload);
+        return Map<String, dynamic>.from(result);
+      } catch (e) {
+        return {'ok': false, 'error': 'Failed to create event: ${e.toString()}'};
+      }
+    }
+
     try {
       final work = Map<String, dynamic>.from(payload);
       final rawSessions = work['sessions'];
@@ -5380,11 +5282,9 @@ class EventService {
       if (endAt != null && endAt.isNotEmpty) {
         payload['end_at'] = endAt;
       }
-      payload['session_no'] = i + 1;
       payload['sort_order'] = i;
       payload['scan_window_minutes'] =
-          int.tryParse(source['scan_window_minutes']?.toString() ?? '') ?? 30;
-      payload['attendance_window_minutes'] =
+          int.tryParse(source['scan_window_minutes']?.toString() ?? '') ??
           int.tryParse(source['attendance_window_minutes']?.toString() ?? '') ??
           30;
 
@@ -5412,9 +5312,7 @@ class EventService {
         'description',
         'location',
         'scan_window_minutes',
-        'attendance_window_minutes',
         'sort_order',
-        'session_no',
         'end_at',
       ];
 
@@ -5486,40 +5384,38 @@ class EventService {
     String eventId,
   ) async {
     Future<List<Map<String, dynamic>>> loadParticipants() async {
+      if (MobileBackendService.isConfigured) {
+        try {
+          final res = await _mobileBackend.getEventRosterSecure(
+            eventId: eventId,
+            type: 'participants',
+          );
+          if (res['ok'] == true && res['rows'] is List) {
+            final rows = List<Map<String, dynamic>>.from(res['rows'] as List);
+            if (rows.isNotEmpty) {
+              return _enrichParticipantsWithSeminarAttendance(eventId, rows);
+            }
+            return rows;
+          }
+        } catch (_) {}
+        // Fail closed — no anon event_registrations fallback after lockdown.
+        return <Map<String, dynamic>>[];
+      }
+
       try {
+        // No users(...) embed — users table is locked from anon (048).
         final response = await _supabase
             .from('event_registrations')
             .select(
-              'id, registered_at, student_id, '
-              'users(first_name, middle_name, last_name, suffix, email, student_id, photo_url), '
-              'tickets(*, attendance(*))',
+              'id, registered_at, student_id, tickets(*, attendance(*))',
             )
             .eq('event_id', eventId)
             .order('registered_at', ascending: false);
 
         final list = List<Map<String, dynamic>>.from(response);
-        if (list.isNotEmpty && list[0]['users'] == null) {
-          final enriched = await _enrichParticipantsWithUsers(list);
-          return _enrichParticipantsWithSeminarAttendance(eventId, enriched);
-        }
-
         return _enrichParticipantsWithSeminarAttendance(eventId, list);
       } catch (_) {
-        try {
-          final base = await _supabase
-              .from('event_registrations')
-              .select(
-                'id, registered_at, student_id, tickets(*, attendance(*))',
-              )
-              .eq('event_id', eventId)
-              .order('registered_at', ascending: false);
-          final enriched = await _enrichParticipantsWithUsers(
-            List<Map<String, dynamic>>.from(base),
-          );
-          return _enrichParticipantsWithSeminarAttendance(eventId, enriched);
-        } catch (_) {
-          return <Map<String, dynamic>>[];
-        }
+        return <Map<String, dynamic>>[];
       }
     }
 
@@ -5649,25 +5545,12 @@ class EventService {
       try {
         final response = await _supabase
             .from('event_registrations')
-            .select(
-              'id, registered_at, student_id, '
-              'users(first_name, middle_name, last_name, suffix, email, student_id, photo_url)',
-            )
-            .eq('event_id', eventId)
-            .order('registered_at', ascending: false);
-        registrations = List<Map<String, dynamic>>.from(response);
-        if (registrations.isNotEmpty && registrations.first['users'] == null) {
-          registrations = await _enrichParticipantsWithUsers(registrations);
-        }
-      } catch (_) {
-        final base = await _supabase
-            .from('event_registrations')
             .select('id, registered_at, student_id')
             .eq('event_id', eventId)
             .order('registered_at', ascending: false);
-        registrations = await _enrichParticipantsWithUsers(
-          List<Map<String, dynamic>>.from(base),
-        );
+        registrations = List<Map<String, dynamic>>.from(response);
+      } catch (_) {
+        return <Map<String, dynamic>>[];
       }
 
       if (registrations.isEmpty) {
@@ -6122,61 +6005,27 @@ class EventService {
   Future<List<Map<String, dynamic>>> _enrichParticipantsWithUsers(
     List<Map<String, dynamic>> regs,
   ) async {
-    if (regs.isEmpty) return regs;
-
-    final ids = regs
-        .map((r) => r['student_id']?.toString() ?? '')
-        .where((id) => id.isNotEmpty)
-        .toSet()
-        .toList();
-
-    if (ids.isEmpty) return regs;
-
-    try {
-      final usersRes = await _supabase
-          .from('users')
-          .select(
-            'id, first_name, middle_name, last_name, suffix, email, student_id, photo_url',
-          )
-          .inFilter('id', ids);
-
-      final users = List<Map<String, dynamic>>.from(usersRes);
-      final byId = <String, Map<String, dynamic>>{};
-      for (final u in users) {
-        final uid = u['id']?.toString() ?? '';
-        if (uid.isNotEmpty) byId[uid] = u;
-      }
-
-      final enriched = <Map<String, dynamic>>[];
-      for (final reg in regs) {
-        final item = Map<String, dynamic>.from(reg);
-        final sid = item['student_id']?.toString() ?? '';
-        if (sid.isNotEmpty && byId.containsKey(sid)) {
-          final u = byId[sid]!;
-          item['users'] = {
-            'first_name': u['first_name'],
-            'middle_name': u['middle_name'],
-            'last_name': u['last_name'],
-            'suffix': u['suffix'],
-            'email': u['email'],
-            'student_id': u['student_id'],
-            'photo_url': u['photo_url'],
-            // Keep compatibility with existing UI renderers.
-            'id_number': u['id_number'] ?? u['student_id'],
-            'course': u['course'],
-            'year_level': u['year_level'],
-          };
-        }
-        enriched.add(item);
-      }
-      return enriched;
-    } catch (_) {
-      return regs;
-    }
+    // users table is locked from anon — never SELECT it here.
+    // Prefer BFF roster (already includes user fields) or leave rows as-is.
+    return regs;
   }
 
   // Get assistants (authorized student scanners) for a specific event
   Future<List<Map<String, dynamic>>> getEventAssistants(String eventId) async {
+    if (MobileBackendService.isConfigured) {
+      try {
+        final res = await _mobileBackend.getEventRosterSecure(
+          eventId: eventId,
+          type: 'assistants',
+        );
+        if (res['ok'] == true && res['rows'] is List) {
+          return List<Map<String, dynamic>>.from(res['rows'] as List);
+        }
+      } catch (_) {
+        // Fall back to direct Supabase when BFF is unavailable.
+      }
+    }
+
     try {
       // By fetching base table and enriching, we avoid ambiguous relation embed
       // errors from Supabase due to multiple foreign keys linking to users table.
@@ -6199,52 +6048,8 @@ class EventService {
   Future<List<Map<String, dynamic>>> _enrichAssistantsWithUsers(
     List<Map<String, dynamic>> assistants,
   ) async {
-    if (assistants.isEmpty) return assistants;
-
-    final ids = assistants
-        .map((a) => a['student_id']?.toString() ?? '')
-        .where((id) => id.isNotEmpty)
-        .toSet()
-        .toList();
-
-    if (ids.isEmpty) return assistants;
-
-    try {
-      final usersRes = await _supabase
-          .from('users')
-          .select('id, first_name, middle_name, last_name, suffix, student_id')
-          .inFilter('id', ids);
-
-      final users = List<Map<String, dynamic>>.from(usersRes);
-      final byId = <String, Map<String, dynamic>>{};
-      for (final u in users) {
-        final uid = u['id']?.toString() ?? '';
-        if (uid.isNotEmpty) byId[uid] = u;
-      }
-
-      final enriched = <Map<String, dynamic>>[];
-      for (final a in assistants) {
-        final item = Map<String, dynamic>.from(a);
-        final sid = item['student_id']?.toString() ?? '';
-        if (sid.isNotEmpty) {
-          final u = byId[sid];
-          if (u != null) {
-            item['users'] = {
-              'first_name': u['first_name'],
-              'middle_name': u['middle_name'],
-              'last_name': u['last_name'],
-              'suffix': u['suffix'],
-              'id_number': u['id_number'] ?? u['student_id'],
-              'student_id': u['student_id'],
-            };
-          }
-        }
-        enriched.add(item);
-      }
-      return enriched;
-    } catch (_) {
-      return assistants;
-    }
+    // users table is locked from anon — BFF roster should already include names.
+    return assistants;
   }
 
   Future<void> _dispatchAssistantAssignmentPush({
@@ -6300,42 +6105,8 @@ class EventService {
     required String eventId,
     required String studentId,
   }) async {
-    final eId = eventId.trim();
-    final sId = studentId.trim();
-    if (eId.isEmpty || sId.isEmpty) return;
-    final nowIso = DateTime.now().toUtc().toIso8601String();
-
-    try {
-      await _supabase
-          .from('event_assistants')
-          .update({'assigned_at': nowIso, 'updated_at': nowIso})
-          .eq('event_id', eId)
-          .eq('student_id', sId);
-      return;
-    } catch (_) {
-      // Keep fallback attempts below.
-    }
-
-    try {
-      await _supabase
-          .from('event_assistants')
-          .update({'assigned_at': nowIso})
-          .eq('event_id', eId)
-          .eq('student_id', sId);
-      return;
-    } catch (_) {
-      // Keep fallback attempts below.
-    }
-
-    try {
-      await _supabase
-          .from('event_assistants')
-          .update({'updated_at': nowIso})
-          .eq('event_id', eId)
-          .eq('student_id', sId);
-    } catch (_) {
-      // Ignore when assignment timestamp columns do not exist.
-    }
+    // event_assistants writes revoked for anon (052). Timestamps are set by
+    // PHP assistant_assign / assistant_update_access — do not anon UPDATE.
   }
 
   // Assign or re-assign assistant access for an event.
@@ -6376,6 +6147,44 @@ class EventService {
       }
     } catch (_) {
       // If validation query fails, proceed to write path to avoid false blocking.
+    }
+
+    if (MobileBackendService.isConfigured) {
+      try {
+        final result = await _mobileBackend.assignAssistantSecure(
+          eventId: eventId,
+          studentId: resolvedStudentId,
+          allowScan: allowScan,
+        );
+        if (result['ok'] == true) {
+          await _dispatchAssistantAssignmentPush(
+            eventId: eventId,
+            studentId: resolvedStudentId,
+            teacherId: teacherId,
+            allowScan: allowScan,
+          );
+          return {
+            'ok': true,
+            'assistant': result['assistant'] ?? {
+              'event_id': eventId,
+              'student_id': resolvedStudentId,
+              'allow_scan': allowScan,
+              'assigned_by_teacher_id': teacherId,
+            },
+          };
+        }
+        return {
+          'ok': false,
+          'error': result['error']?.toString() ??
+              'Failed to assign assistant. Please try again.',
+        };
+      } catch (e) {
+        return {
+          'ok': false,
+          'error': 'Failed to assign assistant. Please try again.',
+          'debug': e.toString(),
+        };
+      }
     }
 
     final payload = {
@@ -6569,6 +6378,41 @@ class EventService {
       };
     }
 
+    if (MobileBackendService.isConfigured) {
+      try {
+        final normalizedId = assistantId?.toString() ?? '';
+        final resolvedStudentId = studentId?.toString().trim() ?? '';
+        final result = await _mobileBackend.updateAssistantAccessSecure(
+          eventId: eId,
+          assistantId: normalizedId.isNotEmpty ? normalizedId : null,
+          studentId: resolvedStudentId.isNotEmpty ? resolvedStudentId : null,
+          allowScan: allowScan,
+        );
+        if (result['ok'] == true) {
+          if (resolvedStudentId.isNotEmpty) {
+            await _dispatchAssistantAssignmentPush(
+              eventId: eId,
+              studentId: resolvedStudentId,
+              teacherId: teacherId,
+              allowScan: allowScan,
+            );
+          }
+          return {'ok': true};
+        }
+        return {
+          'ok': false,
+          'error': result['error']?.toString() ??
+              'Failed to update assistant access.',
+        };
+      } catch (e) {
+        return {
+          'ok': false,
+          'error': 'Failed to update assistant access.',
+          'debug': e.toString(),
+        };
+      }
+    }
+
     try {
       final normalizedId = assistantId?.toString() ?? '';
       if (normalizedId.isNotEmpty) {
@@ -6650,13 +6494,42 @@ class EventService {
     String teacherId, {
     bool dryRun = false,
     String? scannedAtIso,
+    String? expectedEventId,
   }) async {
-    if (!ticketPayload.startsWith('PULSE-')) {
+    if (!ticketPayload.startsWith('PULSE-') ||
+        ticketPayload.toUpperCase().startsWith('PULSE-EVENT-')) {
       return {
         'ok': false,
         'error': 'Invalid QR Code Format',
         'status': 'invalid',
       };
+    }
+
+    if (MobileBackendService.isConfigured) {
+      try {
+        return Map<String, dynamic>.from(
+          await _mobileBackend.scanTicket(
+            ticketPayload: ticketPayload,
+            dryRun: dryRun,
+            scannedAtIso: scannedAtIso,
+            expectedEventId: expectedEventId,
+          ),
+        );
+      } catch (e) {
+        final msg = e.toString().toLowerCase();
+        final likelyOffline = msg.contains('socketexception') ||
+            msg.contains('timed out') ||
+            msg.contains('failed host lookup') ||
+            msg.contains('network');
+        return {
+          'ok': false,
+          'error': likelyOffline
+              ? 'Check-in failed. Check internet connection.'
+              : 'Check-in failed. Please try again.',
+          'status': 'error',
+          'debug': e.toString(),
+        };
+      }
     }
 
     final ticketId = ticketPayload.replaceFirst('PULSE-', '').trim();
@@ -6916,13 +6789,42 @@ class EventService {
     String studentId, {
     bool dryRun = false,
     String? scannedAtIso,
+    String? expectedEventId,
   }) async {
-    if (!ticketPayload.startsWith('PULSE-')) {
+    if (!ticketPayload.startsWith('PULSE-') ||
+        ticketPayload.toUpperCase().startsWith('PULSE-EVENT-')) {
       return {
         'ok': false,
         'error': 'Invalid QR Code Format',
         'status': 'invalid',
       };
+    }
+
+    if (MobileBackendService.isConfigured) {
+      try {
+        return Map<String, dynamic>.from(
+          await _mobileBackend.scanTicket(
+            ticketPayload: ticketPayload,
+            dryRun: dryRun,
+            scannedAtIso: scannedAtIso,
+            expectedEventId: expectedEventId,
+          ),
+        );
+      } catch (e) {
+        final msg = e.toString().toLowerCase();
+        final likelyOffline = msg.contains('socketexception') ||
+            msg.contains('timed out') ||
+            msg.contains('failed host lookup') ||
+            msg.contains('network');
+        return {
+          'ok': false,
+          'error': likelyOffline
+              ? 'Check-in failed. Check internet connection.'
+              : 'Check-in failed. Please try again.',
+          'status': 'error',
+          'debug': e.toString(),
+        };
+      }
     }
 
     final ticketId = ticketPayload.replaceFirst('PULSE-', '').trim();
@@ -7175,6 +7077,55 @@ class EventService {
         'debug': e.toString(),
       };
     }
+  }
+
+  static String buildEventQrPayload(String eventId) {
+    final id = eventId.trim();
+    if (id.isEmpty) return '';
+    return 'PULSE-EVENT-$id';
+  }
+
+  Future<Map<String, dynamic>> checkInSelfViaEventQr(
+    String eventQrPayload,
+  ) async {
+    final payload = eventQrPayload.trim();
+    if (!payload.toUpperCase().startsWith('PULSE-EVENT-')) {
+      return {
+        'ok': false,
+        'error': 'Invalid event QR code.',
+        'status': 'invalid',
+      };
+    }
+
+    if (MobileBackendService.isConfigured) {
+      try {
+        return Map<String, dynamic>.from(
+          await _mobileBackend.selfCheckInViaEventQr(
+            eventQrPayload: payload,
+          ),
+        );
+      } catch (e) {
+        final msg = e.toString().toLowerCase();
+        final likelyOffline = msg.contains('socketexception') ||
+            msg.contains('timed out') ||
+            msg.contains('failed host lookup') ||
+            msg.contains('network');
+        return {
+          'ok': false,
+          'error': likelyOffline
+              ? 'Check-in failed. Check internet connection.'
+              : 'Check-in failed. Please try again.',
+          'status': 'error',
+          'debug': e.toString(),
+        };
+      }
+    }
+
+    return {
+      'ok': false,
+      'error': 'Mobile backend is not configured.',
+      'status': 'error',
+    };
   }
 
   // Check in a participant via their ticket token/ID
@@ -7485,16 +7436,48 @@ class EventService {
         return {'ok': false, 'error': 'No answers provided.'};
       }
 
-      if (eventPayloads.isNotEmpty) {
-        await _supabase.from('evaluation_answers').upsert(eventPayloads);
-      }
-      if (sessionPayloads.isNotEmpty) {
-        await _supabase
-            .from('event_session_evaluation_answers')
-            .upsert(sessionPayloads);
+      if (MobileBackendService.isConfigured) {
+        if (eventPayloads.isNotEmpty) {
+          final res = await _mobileBackend.secureWrite('evaluation_upsert', {
+            'table': 'evaluation_answers',
+            'rows': eventPayloads,
+          });
+          if (res['ok'] != true) {
+            return {
+              'ok': false,
+              'error': res['error']?.toString() ?? 'Evaluation submission failed.',
+            };
+          }
+        }
+        if (sessionPayloads.isNotEmpty) {
+          final res = await _mobileBackend.secureWrite('evaluation_upsert', {
+            'table': 'event_session_evaluation_answers',
+            'rows': sessionPayloads,
+          });
+          if (res['ok'] != true) {
+            return {
+              'ok': false,
+              'error': res['error']?.toString() ?? 'Evaluation submission failed.',
+            };
+          }
+        }
+
+        // Separate BFF step: issue cert only after answers are persisted + eval complete.
+        final certRes = await _mobileBackend.secureWrite('certificate_auto_issue', {
+          'event_id': eventId,
+        });
+        final cert = certRes['certificate'];
+        return {
+          'ok': true,
+          if (cert is Map) 'certificate': Map<String, dynamic>.from(cert),
+        };
       }
 
-      return {'ok': true};
+      // Fail closed: evaluation writes are locked to service-role / PHP BFF.
+      return {
+        'ok': false,
+        'error': 'Secure backend is required to submit evaluation.',
+      };
     } catch (e) {
       return {'ok': false, 'error': 'Evaluation submission failed.'};
     }
@@ -7571,6 +7554,14 @@ class EventService {
         _isCheckedInStatus(row['status']);
   }
 
+  bool _hasCheckOutRecord(Map<String, dynamic> row) {
+    return row['check_out_at']?.toString().trim().isNotEmpty ?? false;
+  }
+
+  bool _hasCompletedAttendanceForEval(Map<String, dynamic> row) {
+    return _hasCheckInRecord(row) && _hasCheckOutRecord(row);
+  }
+
   bool _isNonEmptyAnswer(dynamic value) {
     return (value?.toString().trim().isNotEmpty ?? false);
   }
@@ -7618,11 +7609,13 @@ class EventService {
     try {
       final rows = await _supabase
           .from('attendance')
-          .select('status, check_in_at')
+          .select('status, check_in_at, check_out_at')
           .eq('ticket_id', ticketId)
           .limit(1);
       if (rows.isEmpty) return false;
-      return _hasCheckInRecord(Map<String, dynamic>.from(rows.first));
+      return _hasCompletedAttendanceForEval(
+        Map<String, dynamic>.from(rows.first),
+      );
     } catch (_) {
       return false;
     }
@@ -7642,10 +7635,10 @@ class EventService {
       try {
         final rows = await _supabase
             .from('event_session_attendance')
-            .select('session_id, status, check_in_at')
+            .select('session_id, status, check_in_at, check_out_at')
             .eq('registration_id', registrationId);
         for (final row in List<Map<String, dynamic>>.from(rows)) {
-          if (!_hasCheckInRecord(row)) continue;
+          if (!_hasCompletedAttendanceForEval(row)) continue;
           final sessionId = row['session_id']?.toString() ?? '';
           if (sessionId.isNotEmpty) {
             attended.add(sessionId);
@@ -7778,7 +7771,7 @@ class EventService {
           'is_complete': false,
           'sections': const <Map<String, dynamic>>[],
           'message':
-              'No attended seminar sessions were found for this student.',
+              'Time-out required before evaluation. Scan the event QR to check out first.',
         };
       }
 
@@ -7878,7 +7871,8 @@ class EventService {
         'has_questions': false,
         'is_complete': false,
         'sections': const <Map<String, dynamic>>[],
-        'message': 'No attendance record found for this event.',
+        'message':
+            'Time-out required before evaluation. Scan the event QR to check out first.',
       };
     }
 
@@ -7927,7 +7921,6 @@ class EventService {
       }
     }
 
-    final nowUtc = DateTime.now().toUtc();
     List<Map<String, dynamic>> publishedEvents = [];
 
     try {
@@ -7964,11 +7957,6 @@ class EventService {
           sessions = await _fetchSessionsForEvent(eventId);
         }
 
-        final effectiveEnd = _effectiveEventEndAt(event, sessions);
-        if (effectiveEnd == null || effectiveEnd.isAfter(nowUtc)) {
-          return null;
-        }
-
         final bundle = await getEvaluationBundle(
           eventId: eventId,
           studentId: studentId,
@@ -7980,10 +7968,13 @@ class EventService {
           return null;
         }
 
+        final effectiveEnd = _effectiveEventEndAt(event, sessions);
+
         return <String, dynamic>{
           ...event,
           if (sessions.isNotEmpty) 'sessions': sessions,
-          'effective_end_at': effectiveEnd.toIso8601String(),
+          if (effectiveEnd != null)
+            'effective_end_at': effectiveEnd.toIso8601String(),
           'evaluation_bundle': bundle,
           'evaluation_complete': bundle['is_complete'] == true,
         };
@@ -8017,27 +8008,80 @@ class EventService {
   Future<List<Map<String, dynamic>>> _fetchStudentRegistrationRowsWithEvents(
     String studentId,
   ) async {
-    final selectVariants = <String>[
-      'id,event_id,registered_at,events(id,title,start_at,end_at,status,location,event_mode,event_structure,uses_sessions)',
-      'id,event_id,registered_at,events(id,title,start_at,end_at,status,location,event_structure,uses_sessions)',
-      'id,event_id,registered_at,events(id,title,start_at,end_at,status,location,uses_sessions)',
-      'id,event_id,registered_at,events(id,title,start_at,end_at,status,location)',
-    ];
+    final sid = studentId.trim();
+    if (sid.isEmpty) return [];
 
-    for (final selectClause in selectVariants) {
+    List<Map<String, dynamic>> regs = [];
+    if (MobileBackendService.isConfigured) {
+      try {
+        final res = await _mobileBackend.secureRead(
+          table: 'event_registrations',
+          select: 'id,event_id,registered_at',
+          filters: {'student_id': sid},
+          limit: 200,
+        );
+        if (res['ok'] == true && res['rows'] is List) {
+          regs = List<Map<String, dynamic>>.from(
+            (res['rows'] as List).map((e) => Map<String, dynamic>.from(e as Map)),
+          );
+        }
+      } catch (_) {
+        return [];
+      }
+    } else {
       try {
         final rows = await _supabase
             .from('event_registrations')
-            .select(selectClause)
-            .eq('student_id', studentId)
+            .select('id,event_id,registered_at')
+            .eq('student_id', sid)
             .order('registered_at', ascending: false);
-        return List<Map<String, dynamic>>.from(rows);
+        regs = List<Map<String, dynamic>>.from(rows);
       } catch (_) {
-        // Try next projection for backward-compatible schemas.
+        return [];
       }
     }
 
-    return [];
+    if (regs.isEmpty) return [];
+
+    final eventIds = regs
+        .map((r) => r['event_id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList();
+    if (eventIds.isEmpty) return regs;
+
+    final eventsById = <String, Map<String, dynamic>>{};
+    try {
+      final events = await _supabase
+          .from('events')
+          .select(
+            'id,title,start_at,end_at,status,location,event_mode,event_structure',
+          )
+          .inFilter('id', eventIds);
+      for (final raw in List<Map<String, dynamic>>.from(events)) {
+        final id = raw['id']?.toString() ?? '';
+        if (id.isNotEmpty) eventsById[id] = raw;
+      }
+    } catch (_) {
+      try {
+        final events = await _supabase
+            .from('events')
+            .select('id,title,start_at,end_at,status,location')
+            .inFilter('id', eventIds);
+        for (final raw in List<Map<String, dynamic>>.from(events)) {
+          final id = raw['id']?.toString() ?? '';
+          if (id.isNotEmpty) eventsById[id] = raw;
+        }
+      } catch (_) {}
+    }
+
+    return regs.map((reg) {
+      final eventId = reg['event_id']?.toString() ?? '';
+      return {
+        ...reg,
+        'events': eventsById[eventId],
+      };
+    }).toList();
   }
 
   Future<({Map<String, Map<String, dynamic>> map, bool resolved})>
@@ -8513,16 +8557,28 @@ class EventService {
         'submitted_at': nowIso,
       };
 
-      if (existingId.isNotEmpty) {
-        await _supabase
-            .from('attendance_absence_reasons')
-            .update(payload)
-            .eq('id', existingId);
-      } else {
-        await _supabase.from('attendance_absence_reasons').insert(payload);
+      if (MobileBackendService.isConfigured) {
+        final res = await _mobileBackend.secureWrite('absence_reason_upsert', {
+          'method': existingId.isNotEmpty ? 'PATCH' : 'POST',
+          if (existingId.isNotEmpty) 'filter': 'id=eq.$existingId',
+          'payload': payload,
+        });
+        if (res['ok'] != true) {
+          return {
+            'ok': false,
+            'error':
+                res['error']?.toString() ??
+                'Failed to submit your reason. Please try again.',
+          };
+        }
+        return {'ok': true};
       }
 
-      return {'ok': true};
+      // Anon writes revoked (051) — require BFF.
+      return {
+        'ok': false,
+        'error': 'Unable to submit reason. Please try again when online.',
+      };
     } catch (e) {
       if (_isAbsenceReasonsTableUnavailableError(e)) {
         return {
@@ -8541,12 +8597,51 @@ class EventService {
   // Manual check-out for a participant
   Future<Map<String, dynamic>> manualCheckOut(String ticketId) async {
     try {
-      final now = DateTime.now();
-      await _supabase
-          .from('attendance')
-          .update({'check_out_at': now.toIso8601String()})
-          .eq('ticket_id', ticketId);
-      return {'ok': true, 'message': 'Check-out recorded!'};
+      if (!MobileBackendService.isConfigured) {
+        return {
+          'ok': false,
+          'error': 'Check-out requires a secure backend connection.',
+        };
+      }
+      final trimmed = ticketId.trim();
+      if (trimmed.isEmpty) {
+        return {'ok': false, 'error': 'ticket_id required.'};
+      }
+      // Resolve event via ticket so attendance_upsert auth can run.
+      final ticketRows = await _supabase
+          .from('tickets')
+          .select('id, registration_id, event_registrations(event_id)')
+          .eq('id', trimmed)
+          .limit(1);
+      if (ticketRows.isEmpty) {
+        return {'ok': false, 'error': 'Ticket not found.'};
+      }
+      final reg = ticketRows.first['event_registrations'];
+      String eventId = '';
+      if (reg is Map) {
+        eventId = (reg['event_id']?.toString() ?? '').trim();
+      } else if (reg is List && reg.isNotEmpty && reg.first is Map) {
+        eventId = (reg.first['event_id']?.toString() ?? '').trim();
+      }
+      if (eventId.isEmpty) {
+        return {'ok': false, 'error': 'Could not resolve event for ticket.'};
+      }
+      final res = await _mobileBackend.secureWrite('attendance_upsert', {
+        'event_id': eventId,
+        'table': 'attendance',
+        'method': 'PATCH',
+        'filter': 'ticket_id=eq.$trimmed',
+        'payload': {
+          'check_out_at': DateTime.now().toIso8601String(),
+        },
+      });
+      if (res['ok'] == true) {
+        return {'ok': true, 'message': 'Check-out recorded!'};
+      }
+      return {
+        'ok': false,
+        'error': res['error']?.toString() ?? 'Check-out failed.',
+      };
     } catch (e) {
       return {'ok': false, 'error': 'Manual check-out failed.'};
     }

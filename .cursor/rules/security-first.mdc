@@ -1,0 +1,26 @@
+---
+description: Always prioritize security — no data leaks, BFF auth, never trust anon/client
+alwaysApply: true
+---
+
+# Security-first (CCS PulseConnect App)
+
+Real student/teacher data is in this system. **Every feature must preserve the security lockdown.**
+
+## Non-negotiables
+
+- Auth, OTP, password reset, trust-device, FCM, notifications, registrations → **PHP backend** (`MobileBackendService`), not direct Supabase anon writes on sensitive tables.
+- Store only opaque **session tokens** in secure storage; never keep password hashes in SharedPreferences.
+- Never embed service role / SMTP / real AI keys in the APK (`env.dart` = anon + shared mobile API key only).
+- Do not add `.from('users').select()` that returns `password`, or direct access to `*_codes` / `trusted_devices`.
+- Match `mobilePushApiKey` to Hostinger `MOBILE_PUSH_API_KEY`; fail closed if backend is misconfigured.
+
+## When adding features
+
+1. Can someone with the anon key dump or forge this? → use session + PHP API.
+2. Prefer existing mobile secure read/write endpoints over new table grants to anon.
+3. Avoid logging tokens, OTPs, or PII.
+
+## Reference
+
+Website `SECURITY.md` and migration `048_security_lockdown.sql`.

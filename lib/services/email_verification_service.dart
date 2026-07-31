@@ -1,16 +1,14 @@
-import 'dart:convert';
-
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'mobile_backend_service.dart';
 import 'auth_service.dart';
 
 class EmailVerificationService {
-  final _supabase = Supabase.instance.client;
   final _mobileBackend = MobileBackendService();
   static const Duration codeTtl = Duration(minutes: 5);
   static const Duration resendCooldown = Duration(seconds: 60);
+  /// Prevents double-mount (home+route) from sending two different codes.
+  static final Map<String, Future<Map<String, dynamic>>> _inFlightSend = {};
 
   String _cooldownKey(String userId) => 'email_verify_cooldown_until_$userId';
 
@@ -22,9 +20,10 @@ class EmailVerificationService {
     return ((untilMs - now) / 1000).ceil();
   }
 
-  Future<void> _setCooldown(String userId) async {
+  Future<void> _setCooldown(String userId, {int? seconds}) async {
     final prefs = await SharedPreferences.getInstance();
-    final until = DateTime.now().add(resendCooldown).millisecondsSinceEpoch;
+    final wait = Duration(seconds: (seconds ?? resendCooldown.inSeconds).clamp(1, 300));
+    final until = DateTime.now().add(wait).millisecondsSinceEpoch;
     await prefs.setInt(_cooldownKey(userId), until);
   }
 
@@ -35,35 +34,68 @@ class EmailVerificationService {
     required bool forceResend,
   }) async {
     final remaining = await getRemainingCooldownSeconds(userId);
-    if (forceResend && remaining > 0) {
+    if (remaining > 0) {
+      if (forceResend) {
+        return {
+          'ok': false,
+          'error': 'Please wait ${remaining}s before resending.',
+          'cooldown_seconds': remaining,
+        };
+      }
+      // Auto-send on screen open: don't fire a second email while cooldown runs.
       return {
-        'ok': false,
-        'error': 'Please wait ${remaining}s before resending.',
+        'ok': true,
         'cooldown_seconds': remaining,
+        'skipped': true,
       };
     }
 
-    final delivery = await _mobileBackend.sendEmailVerificationCode(
-      userId: userId,
-      email: email,
-      fullName: fullName,
-    );
-    if (delivery['ok'] != true) {
+    // Coalesce concurrent auto-sends for the same user (back → login remount).
+    final existing = _inFlightSend[userId];
+    if (existing != null && !forceResend) {
+      return existing;
+    }
+
+    final future = () async {
+      final delivery = await _mobileBackend.sendEmailVerificationCode(
+        userId: userId,
+        email: email,
+        fullName: fullName,
+      );
+      if (delivery['ok'] != true) {
+        return {
+          'ok': false,
+          'error': delivery['error']?.toString() ??
+              'Failed to deliver verification email. Please try again.',
+        };
+      }
+
+      final serverCooldown = delivery['cooldown_seconds'];
+      final cooldownSecs = serverCooldown is num
+          ? serverCooldown.toInt()
+          : int.tryParse(serverCooldown?.toString() ?? '') ??
+              resendCooldown.inSeconds;
+      await _setCooldown(userId, seconds: cooldownSecs);
+      final skipped = delivery['skipped'] == true;
+      final expiresAtRaw = delivery['expires_at']?.toString() ?? '';
+      final expiresAt = DateTime.tryParse(expiresAtRaw)?.toUtc();
       return {
-        'ok': false,
-        'error': delivery['error']?.toString() ??
-            'Failed to deliver verification email. Please try again.',
+        'ok': true,
+        'skipped': skipped,
+        'cooldown_seconds': cooldownSecs,
+        'expires_at': (expiresAt ?? DateTime.now().toUtc().add(codeTtl))
+            .toIso8601String(),
       };
-    }
+    }();
 
-    await _setCooldown(userId);
-    final expiresAtRaw = delivery['expires_at']?.toString() ?? '';
-    final expiresAt = DateTime.tryParse(expiresAtRaw)?.toUtc();
-    return {
-      'ok': true,
-      'expires_at': (expiresAt ?? DateTime.now().toUtc().add(codeTtl))
-          .toIso8601String(),
-    };
+    _inFlightSend[userId] = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_inFlightSend[userId], future)) {
+        _inFlightSend.remove(userId);
+      }
+    }
   }
 
   Future<bool> sendUnderReviewEmail({
@@ -94,81 +126,31 @@ class EmailVerificationService {
       return {'ok': false, 'error': 'Verification code must be 6 digits.'};
     }
 
-    final row = await _supabase
-        .from('email_verification_codes')
-        .select('code, expires_at')
-        .eq('user_id', userId)
-        .maybeSingle();
-
-    if (row == null) {
+    final result = await _mobileBackend.verifyEmailCode(
+      code: trimmed,
+      userId: userId,
+    );
+    if (result['ok'] != true) {
       return {
         'ok': false,
-        'error': 'No verification code found. Please resend.',
+        'error': result['error']?.toString() ?? 'Invalid verification code.',
       };
     }
 
-    final storedCode = row['code']?.toString() ?? '';
-    final expiresAtRaw = row['expires_at']?.toString();
-    final expiresAt = DateTime.tryParse(expiresAtRaw ?? '')?.toUtc();
-    final now = DateTime.now().toUtc();
-
-    if (expiresAt == null || now.isAfter(expiresAt)) {
-      return {
-        'ok': false,
-        'error': 'Verification code expired. Please resend.',
-      };
+    Map<String, dynamic>? updatedUser;
+    final userRaw = result['user'];
+    if (userRaw is Map) {
+      updatedUser = Map<String, dynamic>.from(userRaw);
+      updatedUser.remove('password');
+      updatedUser.remove('password_hash');
     }
 
-    if (storedCode != trimmed) {
-      return {'ok': false, 'error': 'Invalid verification code.'};
-    }
-
-    final updatedPayload = <String, dynamic>{
-      'email_verified': true,
-      'email_verified_at': now.toIso8601String(),
-    };
-
-    // Only move preverify → pending on first-time registration OTP.
-    // Daily / new-device re-verification must not lock approved accounts.
-    final current = await _supabase
-        .from('users')
-        .select('account_status')
-        .eq('id', userId)
-        .maybeSingle();
-    final currentStatus =
-        (current?['account_status']?.toString() ?? '').trim().toLowerCase();
-    if (currentStatus == 'preverify' || currentStatus.isEmpty) {
-      updatedPayload['account_status'] = 'pending';
-    }
-
-    final updatedUser = await _supabase
-        .from('users')
-        .update(updatedPayload)
-        .eq('id', userId)
-        .select()
-        .single();
-
-    await _supabase
-        .from('email_verification_codes')
-        .delete()
-        .eq('user_id', userId);
-
-    // Trust this public IP after successful OTP (daily + new-IP gate).
     try {
       await AuthService().trustCurrentDevice(userId);
     } catch (_) {}
 
-    if (persistLocalUser) {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(
-        'user_id',
-        (updatedUser['id']?.toString() ?? userId),
-      );
-      await prefs.setString(
-        'user_role',
-        (updatedUser['role']?.toString() ?? 'student').toLowerCase(),
-      );
-      await prefs.setString('user_data', jsonEncode(updatedUser));
+    if (persistLocalUser && updatedUser != null) {
+      await AuthService().persistUserAfterOtp(updatedUser);
     }
 
     return {'ok': true, 'user': updatedUser};

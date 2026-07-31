@@ -6,6 +6,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'app_cache_service.dart';
 import 'event_service.dart';
 import 'notification_service.dart';
+import 'public_catalog_service.dart';
 
 /// Broadcasts debounced live-data refresh signals for events-related screens.
 class EventLiveService {
@@ -60,6 +61,16 @@ class EventLiveService {
           reason.startsWith('events:') ||
           reason.startsWith('push:')) {
         EventService.invalidateEventListCache();
+        unawaited(PublicCatalogService.instance.invalidateLocal());
+      }
+      // New registrations/tickets must drop TTL cache or Tickets tab stays stale.
+      if (reason == 'tickets' ||
+          reason == 'registrations' ||
+          reason.startsWith('tickets:') ||
+          reason.startsWith('registrations:') ||
+          reason.contains('registrations') ||
+          reason.contains('tickets')) {
+        unawaited(EventService().invalidateMyTicketsCache());
       }
       // Requirement review status lives outside list cache — clear it on live pulses.
       if (reason.contains('student_requirements') ||
@@ -81,6 +92,23 @@ class EventLiveService {
     final label = reason.trim().isEmpty ? 'push' : 'push:$reason';
     // Zero delay — push means the write already happened server-side.
     _schedule(label, delay: Duration.zero);
+  }
+
+  /// Local write completed on this device (register / checkout) — refresh UIs.
+  void pulseLocal([String reason = 'tickets']) {
+    final label = reason.trim().isEmpty ? 'tickets' : reason.trim();
+    _schedule(label, delay: Duration.zero);
+  }
+
+  /// Tickets tab only — skip notification/catalog side effects.
+  void pulseTicketsUi() {
+    unawaited(() async {
+      await EventService().invalidateMyTicketsCache();
+      AppCacheService().cancelInFlightPrefix('fetch:tickets:');
+      if (!_controller.isClosed) {
+        _controller.add('tickets');
+      }
+    }());
   }
 
   /// Faster targeted pulse for document review (approve/decline).
@@ -163,21 +191,9 @@ class EventLiveService {
       callback: (_) => _schedule('teacher_assignments'),
     );
 
-    _channel!.onPostgresChanges(
-      event: PostgresChangeEvent.all,
-      schema: 'public',
-      table: 'event_student_requirements',
-      callback: (_) => _schedule('student_requirements'),
-    );
-
-    // Approve/decline patches this table — without it, UI stays on Under Review.
-    _channel!.onPostgresChanges(
-      event: PostgresChangeEvent.all,
-      schema: 'public',
-      table: 'event_student_submissions',
-      callback: (_) => _schedule('student_submissions'),
-    );
-
+    // Proposal requirements remain SELECT-open after 052; documents/submissions
+    // and student requirement tables are locked — do not Realtime-subscribe
+    // (anon auth fails → Postgres ERROR spam on every connect).
     _channel!.onPostgresChanges(
       event: PostgresChangeEvent.all,
       schema: 'public',
@@ -188,30 +204,12 @@ class EventLiveService {
     _channel!.onPostgresChanges(
       event: PostgresChangeEvent.all,
       schema: 'public',
-      table: 'event_proposal_submissions',
-      callback: (_) => _schedule('proposal_submissions'),
-    );
-
-    _channel!.onPostgresChanges(
-      event: PostgresChangeEvent.all,
-      schema: 'public',
       table: 'attendance',
       callback: (_) => _schedule('attendance'),
     );
 
+    // Inbox / student docs: locked after 048 — poll via BFF / FCM instead.
     if (_activeUserId != null) {
-      _channel!.onPostgresChanges(
-        event: PostgresChangeEvent.all,
-        schema: 'public',
-        table: 'user_notifications',
-        filter: PostgresChangeFilter(
-          type: PostgresChangeFilterType.eq,
-          column: 'user_id',
-          value: _activeUserId!,
-        ),
-        callback: (_) => _schedule('inbox'),
-      );
-
       _channel!.onPostgresChanges(
         event: PostgresChangeEvent.all,
         schema: 'public',

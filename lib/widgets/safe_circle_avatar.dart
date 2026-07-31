@@ -55,11 +55,14 @@ class SafeCircleAvatar extends StatelessWidget {
     if (value.isEmpty) return _buildFallback();
 
     if (_isRemoteUrl(value)) {
+      final cachePx = (size * 3).round().clamp(64, 512);
       return Image.network(
         value,
         width: size,
         height: size,
         fit: fit,
+        cacheWidth: cachePx,
+        cacheHeight: cachePx,
         errorBuilder: (context, error, stackTrace) => _buildFallback(),
       );
     }

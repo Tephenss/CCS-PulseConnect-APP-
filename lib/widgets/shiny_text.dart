@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../services/device_performance_service.dart';
+
 class ShinyText extends StatefulWidget {
   final String text;
   final double speed; // seconds
@@ -34,8 +36,12 @@ class ShinyText extends StatefulWidget {
   State<ShinyText> createState() => _ShinyTextState();
 }
 
-class _ShinyTextState extends State<ShinyText> with SingleTickerProviderStateMixin {
+class _ShinyTextState extends State<ShinyText>
+    with SingleTickerProviderStateMixin {
   late AnimationController _controller;
+
+  bool get _shineEnabled =>
+      !widget.disabled && DevicePerformance.instance.enableShine;
 
   @override
   void initState() {
@@ -44,76 +50,99 @@ class _ShinyTextState extends State<ShinyText> with SingleTickerProviderStateMix
       vsync: this,
       duration: Duration(milliseconds: (widget.speed * 1000).toInt()),
     );
-    if (!widget.disabled) {
+    DevicePerformance.instance.addListener(_onPerfChanged);
+    if (_shineEnabled) {
       _controller.repeat();
     }
+  }
+
+  void _onPerfChanged() {
+    if (!mounted) return;
+    setState(() {
+      if (_shineEnabled) {
+        if (!_controller.isAnimating) _controller.repeat();
+      } else {
+        _controller.stop();
+      }
+    });
   }
 
   @override
   void didUpdateWidget(ShinyText oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.disabled != oldWidget.disabled) {
-      if (widget.disabled) {
-        _controller.stop();
-      } else {
-        _controller.repeat();
-      }
+    if (_shineEnabled) {
+      if (!_controller.isAnimating) _controller.repeat();
+    } else {
+      _controller.stop();
     }
   }
 
   @override
   void dispose() {
+    DevicePerformance.instance.removeListener(_onPerfChanged);
     _controller.dispose();
     super.dispose();
   }
 
+  Widget _staticText({Color? color, List<Shadow>? shadows}) {
+    return Text(
+      widget.text,
+      textAlign: widget.textAlign,
+      maxLines: widget.maxLines,
+      overflow: widget.overflow,
+      style: TextStyle(
+        fontSize: widget.fontSize,
+        fontWeight: widget.fontWeight,
+        letterSpacing: 0.5,
+        fontFamily: 'Orbitron',
+        color: color,
+        shadows: shadows,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    // Low/mid devices: solid text — no ShaderMask loop (big GPU win).
+    if (!_shineEnabled) {
+      return _staticText(
+        color: widget.shineColor,
+        shadows: widget.shadows
+            ?.map(
+              (s) => Shadow(
+                color: Colors.black,
+                offset: s.offset,
+                blurRadius: DevicePerformance.instance.shadowBlur(s.blurRadius),
+              ),
+            )
+            .toList(),
+      );
+    }
+
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {
-        final textWidget = Text(
-          widget.text,
-          textAlign: widget.textAlign,
-          maxLines: widget.maxLines,
-          overflow: widget.overflow,
-          style: TextStyle(
-            fontSize: widget.fontSize,
-            fontWeight: widget.fontWeight,
-            letterSpacing: 0.5,
-            fontFamily: 'Orbitron',
-          ),
-        );
+        final textWidget = _staticText();
 
         return Stack(
           alignment: Alignment.centerLeft,
           children: [
-            // Background Shadow Layer (Solid Black)
             if (widget.shadows != null)
-              Text(
-                widget.text,
-                textAlign: widget.textAlign,
-                maxLines: widget.maxLines,
-                overflow: widget.overflow,
-                style: TextStyle(
-                  fontSize: widget.fontSize,
-                  fontWeight: widget.fontWeight,
-                  letterSpacing: 0.5,
-                  fontFamily: 'Orbitron',
-                  color: Colors.transparent, // Don't show text, just shadows
-                  shadows: widget.shadows!.map((s) => Shadow(
-                    color: Colors.black, // Force shadow to be black
-                    offset: s.offset,
-                    blurRadius: s.blurRadius,
-                  )).toList(),
-                ),
+              _staticText(
+                color: Colors.transparent,
+                shadows: widget.shadows!
+                    .map(
+                      (s) => Shadow(
+                        color: Colors.black,
+                        offset: s.offset,
+                        blurRadius: s.blurRadius,
+                      ),
+                    )
+                    .toList(),
               ),
-
-            // Shiny Foreground Layer — horizontal left → right sweep
             ShaderMask(
               blendMode: BlendMode.srcIn,
               shaderCallback: (bounds) {
-                // Slide highlight from left of text to right, then loop
                 final double x = -1.6 + (_controller.value * 3.2);
                 return LinearGradient(
                   begin: Alignment(x - 0.45, 0),

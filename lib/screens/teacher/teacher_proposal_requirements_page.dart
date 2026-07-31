@@ -8,6 +8,7 @@ import 'package:path/path.dart' as path;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../services/auth_service.dart';
+import '../../services/mobile_backend_service.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/teacher_theme_utils.dart';
 import '../../widgets/custom_loader.dart';
@@ -115,7 +116,7 @@ class _TeacherProposalRequirementsPageState
 
   void _startAutoRefresh() {
     _refreshTimer?.cancel();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+    _refreshTimer = Timer.periodic(const Duration(seconds: 40), (_) {
       if (!mounted || _isLoading || _isUploading || _isSubmitting) return;
       if (_requirementsFeatureUnavailable || _proposalStage == 'approved') {
         return;
@@ -273,43 +274,56 @@ class _TeacherProposalRequirementsPageState
     });
 
     try {
-      final extension = path
-          .extension(file.path)
-          .toLowerCase()
-          .replaceFirst('.', '');
-      final safeExtension = extension.isEmpty ? 'jpg' : extension;
-      final storagePath =
-          '$_teacherId/$_eventId/$requirementId-${DateTime.now().millisecondsSinceEpoch}.$safeExtension';
+      if (MobileBackendService.isConfigured) {
+        final bytes = await file.readAsBytes();
+        final result = await MobileBackendService().uploadProposalDocumentFile(
+          eventId: _eventId,
+          requirementId: requirementId,
+          bytes: bytes,
+          fileName: path.basename(file.path),
+        );
+        if (result['ok'] != true) {
+          throw Exception(result['error']?.toString() ?? 'Upload failed');
+        }
+      } else {
+        final extension = path
+            .extension(file.path)
+            .toLowerCase()
+            .replaceFirst('.', '');
+        final safeExtension = extension.isEmpty ? 'jpg' : extension;
+        final storagePath =
+            '$_teacherId/$_eventId/$requirementId-${DateTime.now().millisecondsSinceEpoch}.$safeExtension';
 
-      await _supabase.storage
-          .from('proposal-documents')
-          .upload(
-            storagePath,
-            file,
-            fileOptions: FileOptions(
-              cacheControl: '0',
-              upsert: true,
-              contentType: _detectMimeType(file.path),
-            ),
-          );
+        await _supabase.storage
+            .from('proposal-documents')
+            .upload(
+              storagePath,
+              file,
+              fileOptions: FileOptions(
+                cacheControl: '0',
+                upsert: true,
+                contentType: _detectMimeType(file.path),
+              ),
+            );
 
-      final publicUrl = _supabase.storage
-          .from('proposal-documents')
-          .getPublicUrl(storagePath);
+        final publicUrl = _supabase.storage
+            .from('proposal-documents')
+            .getPublicUrl(storagePath);
 
-      await _supabase.from('event_proposal_documents').upsert({
-        'event_id': _eventId,
-        'requirement_id': requirementId,
-        'teacher_id': _teacherId,
-        'file_name': path.basename(file.path),
-        'file_path': storagePath,
-        'file_url': publicUrl,
-        'mime_type': _detectMimeType(file.path),
-        'admin_visible': false,
-        'visible_at': null,
-        'uploaded_at': DateTime.now().toUtc().toIso8601String(),
-        'updated_at': DateTime.now().toUtc().toIso8601String(),
-      }, onConflict: 'requirement_id,teacher_id');
+        await _supabase.from('event_proposal_documents').upsert({
+          'event_id': _eventId,
+          'requirement_id': requirementId,
+          'teacher_id': _teacherId,
+          'file_name': path.basename(file.path),
+          'file_path': storagePath,
+          'file_url': publicUrl,
+          'mime_type': _detectMimeType(file.path),
+          'admin_visible': false,
+          'visible_at': null,
+          'uploaded_at': DateTime.now().toUtc().toIso8601String(),
+          'updated_at': DateTime.now().toUtc().toIso8601String(),
+        }, onConflict: 'requirement_id,teacher_id');
+      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -336,26 +350,37 @@ class _TeacherProposalRequirementsPageState
 
     setState(() => _isSubmitting = true);
     try {
-      final nowIso = DateTime.now().toUtc().toIso8601String();
+      if (MobileBackendService.isConfigured) {
+        final result = await MobileBackendService().submitProposalReviewSecure(
+          eventId: _eventId,
+        );
+        if (result['ok'] != true) {
+          throw Exception(
+            result['error']?.toString() ?? 'Submit failed',
+          );
+        }
+      } else {
+        final nowIso = DateTime.now().toUtc().toIso8601String();
 
-      await _supabase
-          .from('event_proposal_documents')
-          .update({
-            'admin_visible': true,
-            'visible_at': nowIso,
-            'updated_at': nowIso,
-          })
-          .eq('event_id', _eventId)
-          .eq('teacher_id', _teacherId);
+        await _supabase
+            .from('event_proposal_documents')
+            .update({
+              'admin_visible': true,
+              'visible_at': nowIso,
+              'updated_at': nowIso,
+            })
+            .eq('event_id', _eventId)
+            .eq('teacher_id', _teacherId);
 
-      await _supabase
-          .from('events')
-          .update({
-            'proposal_stage': 'under_review',
-            'requirements_submitted_at': nowIso,
-            'updated_at': nowIso,
-          })
-          .eq('id', _eventId);
+        await _supabase
+            .from('events')
+            .update({
+              'proposal_stage': 'under_review',
+              'requirements_submitted_at': nowIso,
+              'updated_at': nowIso,
+            })
+            .eq('id', _eventId);
+      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

@@ -1,18 +1,50 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:intl/intl.dart';
 import 'dart:io';
 import 'dart:async';
+import 'dart:ui' as ui;
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:gal/gal.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import '../../services/auth_service.dart';
 import '../../services/app_cache_service.dart';
 import '../../services/event_service.dart';
+import '../../services/mobile_backend_service.dart';
 import '../../services/offline_sync_service.dart';
+import '../../services/device_performance_service.dart';
+import '../../services/scan_ingress_signal_service.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/shiny_text.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/teacher_theme_utils.dart';
+
+class _TeacherManageSnapshot {
+  final Map<String, dynamic> event;
+  final List<Map<String, dynamic>> participants;
+  final List<Map<String, dynamic>> assistants;
+  final List<Map<String, dynamic>> sessions;
+  final bool canManageAssistants;
+  final String currentTeacherId;
+  final bool rosterLoaded;
+  final DateTime cachedAt;
+
+  const _TeacherManageSnapshot({
+    required this.event,
+    required this.participants,
+    required this.assistants,
+    required this.sessions,
+    required this.canManageAssistants,
+    required this.currentTeacherId,
+    required this.rosterLoaded,
+    required this.cachedAt,
+  });
+}
 
 class TeacherEventManage extends StatefulWidget {
   final Map<String, dynamic> event;
@@ -24,16 +56,21 @@ class TeacherEventManage extends StatefulWidget {
 
 class _TeacherEventManageState extends State<TeacherEventManage>
     with SingleTickerProviderStateMixin {
+  static final Map<String, _TeacherManageSnapshot> _manageCache = {};
+  static const Duration _manageUiTtl = Duration(minutes: 3);
+
   late TabController _tabController;
   final _eventService = EventService();
   final _authService = AuthService();
   final _appCacheService = AppCacheService();
   final _offlineSyncService = OfflineSyncService();
+  final _scanIngressSignalService = ScanIngressSignalService();
+  final _mobileBackend = MobileBackendService();
 
   List<Map<String, dynamic>> _participants = [];
   List<Map<String, dynamic>> _assistants = [];
   List<Map<String, dynamic>> _eventSessions = [];
-  bool _isLoading = true;
+  bool _isLoading = false;
   String _searchQuery = '';
   String _currentTeacherId = '';
   bool _canManageAssistants = false;
@@ -43,13 +80,29 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   Set<String> _eventSessionIds = <String>{};
   bool _usingCachedParticipants = false;
   int _pendingOfflineParticipantCount = 0;
+  bool _earlyOutEnabled = false;
+  String? _earlyOutExpiresAt;
+  bool? _earlyOutCanEnable;
+  String? _earlyOutGraceEndsAt;
+  bool _earlyOutBusy = false;
+  final Map<String, Map<String, dynamic>> _sessionEarlyOut = {};
+  Timer? _earlyOutTick;
   bool _isOfflineMode = false;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+  late Map<String, dynamic> _event;
+  bool _isRefreshingEvent = false;
+  bool _isLoadingRoster = false;
+  bool _rosterLoaded = false;
+  int? _lastScanIngressRevision;
+  bool _scanIngressListenerBound = false;
+  final GlobalKey _eventQrKey = GlobalKey();
+  bool _isSavingEventQr = false;
 
   @override
   void initState() {
     super.initState();
-    final status = (widget.event['status']?.toString() ?? 'pending')
+    _event = Map<String, dynamic>.from(widget.event);
+    final status = (_event['status']?.toString() ?? 'pending')
         .toLowerCase();
     // Only show Participants and Assistants tabs for Published or Expired events
     _isApprovalPhase = status != 'published' && status != 'expired';
@@ -58,7 +111,100 @@ class _TeacherEventManageState extends State<TeacherEventManage>
       vsync: this,
     );
     unawaited(_initConnectivityMonitoring());
+    _hydrateFromMemoryCache();
+    if (!_isApprovalPhase && !_rosterLoaded) {
+      _isLoadingRoster = true;
+    }
     _loadData();
+    if (!_isApprovalPhase) {
+      _bindScanIngressListener();
+    }
+    unawaited(_refreshEarlyOutStatus());
+    _earlyOutTick = Timer.periodic(const Duration(seconds: 15), (_) {
+      unawaited(_refreshEarlyOutStatus(silent: true));
+    });
+  }
+
+  bool _participantHasProfile(Map<String, dynamic> participant) {
+    final users = participant['users'];
+    if (users is! Map) return false;
+    return _eventService
+        .composeParticipantDisplayName(Map<String, dynamic>.from(users))
+        .isNotEmpty;
+  }
+
+  bool _assistantHasProfile(Map<String, dynamic> assistant) {
+    final users = assistant['users'];
+    if (users is! Map) return false;
+    return _eventService
+        .composeParticipantDisplayName(Map<String, dynamic>.from(users))
+        .isNotEmpty;
+  }
+
+  bool _rosterRowsAreComplete(
+    List<Map<String, dynamic>> participants,
+    List<Map<String, dynamic>> assistants,
+  ) {
+    if (participants.any((row) => !_participantHasProfile(row))) {
+      return false;
+    }
+    if (assistants.any((row) => !_assistantHasProfile(row))) {
+      return false;
+    }
+    return true;
+  }
+
+  void _hydrateFromMemoryCache() {
+    final eventId = widget.event['id']?.toString() ?? '';
+    if (eventId.isEmpty) return;
+
+    final cached = _manageCache[eventId];
+    if (cached != null &&
+        DateTime.now().difference(cached.cachedAt) <= _manageUiTtl) {
+      _event = Map<String, dynamic>.from(cached.event);
+      _eventSessions = List<Map<String, dynamic>>.from(cached.sessions);
+      _eventSessionIds = _eventSessions
+          .map((s) => s['id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet();
+      _canManageAssistants = cached.canManageAssistants;
+      _currentTeacherId = cached.currentTeacherId;
+
+      if (cached.rosterLoaded &&
+          _rosterRowsAreComplete(cached.participants, cached.assistants)) {
+        _participants = List<Map<String, dynamic>>.from(cached.participants);
+        _assistants = List<Map<String, dynamic>>.from(cached.assistants);
+        _rosterLoaded = true;
+        _isLoadingRoster = false;
+        _pendingOfflineParticipantCount = _participants
+            .where(_participantHasPendingSync)
+            .length;
+      }
+
+      _isLoading = false;
+    }
+  }
+
+  void _storeManageSnapshot() {
+    final eventId = _event['id']?.toString() ?? '';
+    if (eventId.isEmpty) return;
+
+    _manageCache[eventId] = _TeacherManageSnapshot(
+      event: Map<String, dynamic>.from(_event),
+      participants: _participants
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList(growable: false),
+      assistants: _assistants
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList(growable: false),
+      sessions: _eventSessions
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList(growable: false),
+      canManageAssistants: _canManageAssistants,
+      currentTeacherId: _currentTeacherId,
+      rosterLoaded: _rosterLoaded,
+      cachedAt: DateTime.now(),
+    );
   }
 
   bool _resultsAreOffline(List<ConnectivityResult> results) {
@@ -326,14 +472,22 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   }
 
   Future<void> _loadData([bool showLoader = false]) async {
-    if (showLoader && mounted) {
-      setState(() => _isLoading = true);
-    }
-
     final eventId = widget.event['id']?.toString() ?? '';
     if (eventId.isEmpty) {
       if (mounted) setState(() => _isLoading = false);
       return;
+    }
+
+    final hasVisibleData = _participants.isNotEmpty ||
+        _assistants.isNotEmpty ||
+        _eventSessions.isNotEmpty ||
+        (_event['title']?.toString() ?? '').trim().isNotEmpty;
+
+    if (showLoader && !hasVisibleData && mounted) {
+      setState(() => _isLoading = true);
+    }
+    if (!_isApprovalPhase && (!_rosterLoaded || showLoader) && mounted) {
+      setState(() => _isLoadingRoster = true);
     }
 
     final user = await _authService.getCurrentUser();
@@ -358,20 +512,29 @@ class _TeacherEventManageState extends State<TeacherEventManage>
           .where((id) => id.isNotEmpty)
           .toSet();
       setState(() {
-        _participants = cachedParticipants;
-        _assistants = cachedAssistants;
         _eventSessions = cachedSessions;
         _eventSessionIds = cachedEventSessionIds;
         _currentTeacherId = teacherId;
-        _pendingOfflineParticipantCount = cachedParticipants
-            .where(_participantHasPendingSync)
-            .length;
+        if (_rosterRowsAreComplete(cachedParticipants, cachedAssistants)) {
+          _participants = cachedParticipants;
+          _assistants = cachedAssistants;
+          _rosterLoaded = true;
+          _isLoadingRoster = false;
+          _pendingOfflineParticipantCount = cachedParticipants
+              .where(_participantHasPendingSync)
+              .length;
+        }
         _usingCachedParticipants = true;
         if (!showLoader) {
           _isLoading = false;
         }
       });
+      if (_rosterLoaded) {
+        _storeManageSnapshot();
+      }
     }
+
+    unawaited(_refreshEventDetails(eventId, forceFresh: showLoader));
 
     try {
       final results = await Future.wait([
@@ -415,6 +578,8 @@ class _TeacherEventManageState extends State<TeacherEventManage>
       if (mounted) {
         setState(() {
           _isLoading = false;
+          _isLoadingRoster = false;
+          _rosterLoaded = true;
           _participants = mergedParticipants;
           _assistants = assistants;
           _eventSessions = eventSessions;
@@ -426,6 +591,8 @@ class _TeacherEventManageState extends State<TeacherEventManage>
               .length;
           _usingCachedParticipants = offlineParticipants.isNotEmpty;
         });
+        _storeManageSnapshot();
+        unawaited(_refreshEarlyOutStatus());
       }
       _bindAttendanceRealtime();
     } catch (_) {
@@ -454,12 +621,21 @@ class _TeacherEventManageState extends State<TeacherEventManage>
             fallbackSessions.length <= _eventSessions.length;
         setState(() {
           _isLoading = false;
+          _isLoadingRoster = false;
+          _rosterLoaded = _rosterRowsAreComplete(
+            keepCurrentParticipants ? _participants : fallbackParticipants,
+            keepCurrentAssistants ? _assistants : fallbackAssistants,
+          );
           _participants = keepCurrentParticipants
               ? _participants
-              : fallbackParticipants;
+              : (_rosterRowsAreComplete(fallbackParticipants, fallbackAssistants)
+                    ? fallbackParticipants
+                    : _participants);
           _assistants = keepCurrentAssistants
               ? _assistants
-              : fallbackAssistants;
+              : (_rosterRowsAreComplete(fallbackParticipants, fallbackAssistants)
+                    ? fallbackAssistants
+                    : _assistants);
           _eventSessions = keepCurrentSessions
               ? _eventSessions
               : fallbackSessions;
@@ -557,10 +733,27 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     }
   }
 
+  void _bindScanIngressListener() {
+    if (_scanIngressListenerBound || _isApprovalPhase) return;
+    final eventId = widget.event['id']?.toString() ?? '';
+    if (eventId.isEmpty) return;
+
+    _scanIngressListenerBound = true;
+    _scanIngressSignalService.listenToEvent(
+      eventId: eventId,
+      onRevision: (revision) {
+        if (!mounted) return;
+        final previous = _lastScanIngressRevision;
+        _lastScanIngressRevision = revision;
+        if (previous == null || revision <= previous) return;
+        _scheduleParticipantsRefresh();
+      },
+    );
+  }
+
   void _bindAttendanceRealtime() {
     final eventId = widget.event['id']?.toString() ?? '';
     if (eventId.isEmpty) return;
-    if (_eventSessionIds.isEmpty) return;
     if (_attendanceChannel != null) return;
 
     final supabase = Supabase.instance.client;
@@ -568,9 +761,11 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     _attendanceChannel = supabase.channel(channelName);
 
     void handlePayload(PostgresChangePayload payload) {
-      final sid = _payloadSessionId(payload);
-      if (sid.isEmpty) return;
-      if (!_eventSessionIds.contains(sid)) return;
+      if (_eventSessionIds.isNotEmpty) {
+        final sid = _payloadSessionId(payload);
+        if (sid.isEmpty) return;
+        if (!_eventSessionIds.contains(sid)) return;
+      }
       _scheduleParticipantsRefresh();
     }
 
@@ -594,8 +789,15 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   @override
   void dispose() {
     _participantsRefreshDebounce?.cancel();
+    _earlyOutTick?.cancel();
     _connectivitySubscription?.cancel();
     _attendanceChannel?.unsubscribe();
+    final eventId = widget.event['id']?.toString() ?? '';
+    if (eventId.isNotEmpty) {
+      unawaited(_scanIngressSignalService.cancelEvent(eventId));
+    } else {
+      unawaited(_scanIngressSignalService.cancelAll());
+    }
     _tabController.dispose();
     super.dispose();
   }
@@ -605,16 +807,14 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     final displayName = (p['display_name']?.toString() ?? '').trim();
     if (displayName.isNotEmpty) return displayName;
     final u = p['users'];
-    if (u == null) return 'Unknown Student';
     if (u is Map) {
-      final fullName = (u['full_name']?.toString() ?? '').trim();
+      final user = Map<String, dynamic>.from(u);
+      final composed = _eventService.composeParticipantDisplayName(user);
+      if (composed.isNotEmpty) return composed;
+      final fullName = (user['full_name']?.toString() ?? '').trim();
       if (fullName.isNotEmpty) return fullName;
-      final mappedDisplay = (u['display_name']?.toString() ?? '').trim();
+      final mappedDisplay = (user['display_name']?.toString() ?? '').trim();
       if (mappedDisplay.isNotEmpty) return mappedDisplay;
-      final first = (u['first_name'] ?? '').toString().trim();
-      final last = (u['last_name'] ?? '').toString().trim();
-      final name = '$first $last'.trim();
-      return name.isEmpty ? 'Unknown Student' : name;
     }
     return 'Unknown Student';
   }
@@ -630,10 +830,10 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   String _getAssistantName(Map<String, dynamic> assistant) {
     final u = assistant['users'];
     if (u is Map) {
-      final first = (u['first_name'] ?? '').toString().trim();
-      final last = (u['last_name'] ?? '').toString().trim();
-      final full = '$first $last'.trim();
-      if (full.isNotEmpty) return full;
+      final composed = _eventService.composeParticipantDisplayName(
+        Map<String, dynamic>.from(u),
+      );
+      if (composed.isNotEmpty) return composed;
     }
     final legacy = (assistant['name'] ?? '').toString().trim();
     if (legacy.isNotEmpty) return legacy;
@@ -686,19 +886,69 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   // â”€â”€â”€ Helper: attendance status â”€â”€â”€
   bool _isSeminarBasedEvent() {
     if (_eventSessions.isNotEmpty) return true;
-    final usesSessionsRaw = widget.event['uses_sessions'];
-    if (usesSessionsRaw == true ||
-        (usesSessionsRaw?.toString().toLowerCase().trim() == 'true')) {
-      return true;
+    return usesEventSessions(_event);
+  }
+
+  Future<void> _refreshEventDetails(
+    String eventId, {
+    bool forceFresh = false,
+  }) async {
+    if (eventId.trim().isEmpty) return;
+
+    final hasCover = (_event['cover_image_url']?.toString() ?? '').trim().isNotEmpty;
+    if (!hasCover && mounted) {
+      setState(() => _isRefreshingEvent = true);
     }
-    final eventMode = (widget.event['event_mode']?.toString() ?? '')
-        .toLowerCase()
-        .trim();
-    if (eventMode == 'seminar_based') return true;
-    final eventStructure = (widget.event['event_structure']?.toString() ?? '')
-        .toLowerCase()
-        .trim();
-    return eventStructure == 'one_seminar' || eventStructure == 'two_seminars';
+
+    try {
+      final results = await Future.wait([
+        _eventService.getEventById(eventId, forceFresh: forceFresh),
+        _eventService.getEventRegistrationSettings(
+          eventId,
+          forceFresh: forceFresh,
+        ),
+      ]);
+      if (!mounted) return;
+
+      final fresh = results[0];
+      final regSettings = results[1];
+      if (fresh == null) return;
+
+      final merged = _eventService.mergeEventRegistrationSettings(
+        fresh,
+        regSettings,
+      );
+      final knownCover = (_event['cover_image_url'] ?? '').toString().trim();
+      if ((merged['cover_image_url'] ?? '').toString().trim().isEmpty &&
+          knownCover.isNotEmpty) {
+        merged['cover_image_url'] = knownCover;
+      }
+
+      setState(() => _event = merged);
+      _storeManageSnapshot();
+    } catch (_) {
+      // Keep list-passed event data when refresh fails (offline / RLS).
+    } finally {
+      if (mounted) setState(() => _isRefreshingEvent = false);
+    }
+  }
+
+  String _eventStatusLabel(String? status) {
+    switch ((status ?? '').toLowerCase()) {
+      case 'published':
+        return 'Published';
+      case 'pending':
+        return 'Pending Approval';
+      case 'approved':
+        return 'Approved';
+      case 'rejected':
+        return 'Rejected';
+      case 'expired':
+        return 'Expired';
+      default:
+        final raw = (status ?? 'Unknown').toString().trim();
+        return raw.isEmpty ? 'Unknown' : raw;
+    }
   }
 
   List<Map<String, dynamic>> _getSessionAttendance(Map<String, dynamic> p) {
@@ -1473,26 +1723,15 @@ class _TeacherEventManageState extends State<TeacherEventManage>
 
   @override
   Widget build(BuildContext context) {
-    final isPending = widget.event['status'] == 'pending';
-    final isApproved = widget.event['status'] == 'approved';
-    final isRejected = widget.event['status'] == 'rejected';
+    final isPending = _event['status'] == 'pending';
+    final isApproved = _event['status'] == 'approved';
+    final isRejected = _event['status'] == 'rejected';
 
     return Scaffold(
-      backgroundColor: const Color(0xFFF8F9FA),
-      appBar: AppBar(
-        backgroundColor: TeacherThemeUtils.primary,
-        foregroundColor: Colors.white,
-        title: Text(
-          widget.event['title'] ?? 'Manage Event',
-          style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
-        centerTitle: true,
-        elevation: 0,
-      ),
+      backgroundColor: Colors.white,
       body: Column(
         children: [
+          _buildHeroHeader(),
           if (isPending || isRejected || isApproved)
             Container(
               color: isApproved
@@ -1538,11 +1777,24 @@ class _TeacherEventManageState extends State<TeacherEventManage>
             ),
           if (!_isApprovalPhase)
             Container(
-              color: Colors.white,
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                border: Border(
+                  bottom: BorderSide(color: Color(0xFFF3F4F6)),
+                ),
+              ),
               child: TabBar(
                 controller: _tabController,
-                indicatorColor: TeacherThemeUtils.primary,
-                indicatorWeight: 3,
+                overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+                splashFactory: NoSplash.splashFactory,
+                dividerHeight: 0,
+                indicatorSize: TabBarIndicatorSize.label,
+                indicator: const UnderlineTabIndicator(
+                  borderSide: BorderSide(
+                    width: 3,
+                    color: TeacherThemeUtils.primary,
+                  ),
+                ),
                 labelColor: TeacherThemeUtils.primary,
                 unselectedLabelColor: Colors.grey.shade500,
                 labelStyle: const TextStyle(
@@ -1565,12 +1817,122 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 ? const Center(child: PulseConnectLoader())
                 : TabBarView(
                     controller: _tabController,
+                    // Avoid clipping the first Details widgets (event-type chip)
+                    // under the tab bar during the initial layout pass.
+                    clipBehavior: Clip.none,
                     children: [
-                      _buildDetailsTab(),
+                      ColoredBox(
+                        color: Colors.white,
+                        child: _buildDetailsTab(),
+                      ),
                       if (!_isApprovalPhase) _buildParticipantsTab(),
                       if (!_isApprovalPhase) _buildAssistantsTab(),
                     ],
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHeroHeader() {
+    final title = (_event['title'] ?? 'Manage Event').toString();
+    final coverImageUrl = (_event['cover_image_url']?.toString() ?? '').trim();
+    final topInset = MediaQuery.paddingOf(context).top;
+    const heroHeight = 232.0;
+
+    return SizedBox(
+      height: heroHeight + topInset,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (coverImageUrl.isNotEmpty)
+            RepaintBoundary(
+              child: CachedNetworkImage(
+                imageUrl: coverImageUrl,
+                fit: BoxFit.cover,
+                fadeInDuration: Duration.zero,
+                fadeOutDuration: Duration.zero,
+                memCacheWidth: DevicePerformance.instance.imageCacheWidth,
+                placeholder: (context, url) => _coverLoadingPlaceholder(),
+                errorWidget: (context, url, error) => _coverFallback(),
+              ),
+            )
+          else if (_isRefreshingEvent)
+            _coverLoadingPlaceholder()
+          else
+            _coverFallback(),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.black.withValues(alpha: 0.35),
+                  Colors.black.withValues(alpha: 0.1),
+                  Colors.black.withValues(alpha: 0.72),
+                ],
+                stops: const [0.0, 0.45, 1.0],
+              ),
+            ),
+          ),
+          Positioned(
+            left: 20,
+            right: 20,
+            bottom: 36,
+            child: ShinyText(
+              text: title,
+              fontSize: 22,
+              speed: 2.5,
+              fontWeight: FontWeight.w900,
+              color: const Color(0xFFB5B5B5),
+              shineColor: Colors.white,
+              textAlign: TextAlign.left,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              shadows: const [
+                Shadow(
+                  color: Color(0x99000000),
+                  blurRadius: 8,
+                  offset: Offset(0, 1),
+                ),
+              ],
+            ),
+          ),
+          Positioned(
+            left: 8,
+            top: topInset + 4,
+            child: IconButton(
+              icon: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.35),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.arrow_back_ios_rounded,
+                  size: 18,
+                  color: Colors.white,
+                ),
+              ),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: const SizedBox(
+              height: 28,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.vertical(
+                    top: Radius.circular(28),
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
@@ -1618,123 +1980,364 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     return map[val] ?? val;
   }
 
+  Future<void> _refreshEarlyOutStatus({bool silent = false}) async {
+    if (!MobileBackendService.isConfigured) return;
+    final eventId = (_event['id']?.toString() ?? '').trim();
+    if (eventId.isEmpty) return;
+
+    try {
+      if (!_isSeminarBasedEvent()) {
+        final res = await _mobileBackend.getEventEarlyOutStatus(eventId: eventId);
+        if (!mounted) return;
+        final eo = res['early_out'];
+        final map = eo is Map ? Map<String, dynamic>.from(eo) : <String, dynamic>{};
+        setState(() {
+          _earlyOutEnabled = map['enabled'] == true;
+          _earlyOutExpiresAt = map['expires_at']?.toString();
+          _earlyOutCanEnable = map.containsKey('can_enable')
+              ? map['can_enable'] == true
+              : null;
+          _earlyOutGraceEndsAt = map['grace_ends_at']?.toString();
+        });
+      } else {
+        final next = <String, Map<String, dynamic>>{};
+        for (final session in _eventSessions) {
+          final sid = (session['id']?.toString() ?? '').trim();
+          if (sid.isEmpty) continue;
+          final res = await _mobileBackend.getEventEarlyOutStatus(
+            eventId: eventId,
+            sessionId: sid,
+          );
+          final eo = res['early_out'];
+          next[sid] = eo is Map
+              ? Map<String, dynamic>.from(eo)
+              : <String, dynamic>{'enabled': false};
+        }
+        if (!mounted) return;
+        setState(() => _sessionEarlyOut
+          ..clear()
+          ..addAll(next));
+      }
+    } catch (_) {
+      if (!silent && mounted) {
+        // Keep quiet on poll failures.
+      }
+    }
+  }
+
+  bool _isWithinEarlyOutSchedule({String? sessionId}) {
+    // Prefer server flag when status was fetched.
+    if (sessionId != null && sessionId.isNotEmpty) {
+      final status = _sessionEarlyOut[sessionId];
+      if (status != null && status.containsKey('can_enable')) {
+        return status['can_enable'] == true;
+      }
+    } else if (_earlyOutCanEnable != null) {
+      return _earlyOutCanEnable!;
+    }
+
+    DateTime? start;
+    DateTime? end;
+    int graceMinutes = 30;
+    if (sessionId != null && sessionId.isNotEmpty) {
+      Map<String, dynamic>? session;
+      for (final s in _eventSessions) {
+        if ((s['id']?.toString() ?? '') == sessionId) {
+          session = s;
+          break;
+        }
+      }
+      start = parseStoredEventDateTime(session?['start_at']);
+      end = parseStoredEventDateTime(session?['end_at']);
+      graceMinutes = int.tryParse(
+            session?['scan_window_minutes']?.toString() ?? '',
+          ) ??
+          30;
+    } else {
+      start = parseStoredEventDateTime(_event['start_at']);
+      end = parseStoredEventDateTime(_event['end_at']);
+      graceMinutes = int.tryParse(_event['grace_time']?.toString() ?? '') ?? 30;
+    }
+    if (start == null || end == null) return false;
+    graceMinutes = graceMinutes < 0 ? 0 : graceMinutes;
+    final graceEnds = start.add(Duration(minutes: graceMinutes));
+    final now = DateTime.now();
+    // Clickable only after grace ends, until event/seminar end.
+    return !now.isBefore(graceEnds) && !now.isAfter(end);
+  }
+
+  Future<void> _setEarlyOut({
+    required bool enabled,
+    String? sessionId,
+  }) async {
+    if (!MobileBackendService.isConfigured) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Mobile backend is not configured.')),
+      );
+      return;
+    }
+    final eventId = (_event['id']?.toString() ?? '').trim();
+    if (eventId.isEmpty || _earlyOutBusy) return;
+
+    if (enabled && !_isWithinEarlyOutSchedule(sessionId: sessionId)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Early Out is available only after the grace period ends.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _earlyOutBusy = true);
+    try {
+      final res = await _mobileBackend.setEventEarlyOut(
+        eventId: eventId,
+        sessionId: sessionId,
+        enabled: enabled,
+      );
+      if (!mounted) return;
+      if (res['ok'] != true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              (res['error']?.toString().trim().isNotEmpty ?? false)
+                  ? res['error'].toString()
+                  : 'Failed to update Early Out.',
+            ),
+          ),
+        );
+        return;
+      }
+      final eo = res['early_out'];
+      final map = eo is Map ? Map<String, dynamic>.from(eo) : <String, dynamic>{};
+      setState(() {
+        if (sessionId != null && sessionId.isNotEmpty) {
+          _sessionEarlyOut[sessionId] = map;
+        } else {
+          _earlyOutEnabled = map['enabled'] == true;
+          _earlyOutExpiresAt = map['expires_at']?.toString();
+          _earlyOutCanEnable = map.containsKey('can_enable')
+              ? map['can_enable'] == true
+              : null;
+          _earlyOutGraceEndsAt = map['grace_ends_at']?.toString();
+        }
+      });
+    } finally {
+      if (mounted) setState(() => _earlyOutBusy = false);
+    }
+  }
+
+  String _earlyOutSubtitle(Map<String, dynamic>? status, {String? sessionId}) {
+    final isOn = status != null && status['enabled'] == true;
+    if (!isOn && !_isWithinEarlyOutSchedule(sessionId: sessionId)) {
+      final graceRaw = (status?['grace_ends_at']?.toString() ??
+              _earlyOutGraceEndsAt ??
+              '')
+          .trim();
+      if (graceRaw.isNotEmpty) {
+        final graceEnds = parseStoredEventDateTime(graceRaw);
+        if (graceEnds != null) {
+          final hour = graceEnds.hour % 12 == 0 ? 12 : graceEnds.hour % 12;
+          final minute = graceEnds.minute.toString().padLeft(2, '0');
+          final period = graceEnds.hour >= 12 ? 'PM' : 'AM';
+          return 'Available after grace ends ($hour:$minute $period).';
+        }
+      }
+      return 'Available only after the grace period ends.';
+    }
+    if (!isOn) {
+      return 'Opens time-out for 1 hour, then auto-off.';
+    }
+    final expires = (status['expires_at']?.toString() ?? '').trim();
+    if (expires.isEmpty) {
+      return 'Early Out is ON for 1 hour.';
+    }
+    final parsed = DateTime.tryParse(expires);
+    if (parsed == null) {
+      return 'Early Out is ON for 1 hour.';
+    }
+    final local = parsed.toLocal();
+    return 'Auto-off at ${DateFormat('h:mm a').format(local)}';
+  }
+
+  Widget _buildEarlyOutToggleCard({
+    required bool enabled,
+    required String subtitle,
+    required ValueChanged<bool> onChanged,
+    String title = 'Early Out',
+    bool interactable = true,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF111827),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF6B7280),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (_earlyOutBusy)
+            const SizedBox(
+              width: 28,
+              height: 28,
+              child: CircularProgressIndicator(strokeWidth: 2.5),
+            )
+          else
+            Switch.adaptive(
+              value: enabled,
+              onChanged: (!interactable || _earlyOutBusy) ? null : onChanged,
+              activeTrackColor: TeacherThemeUtils.primary.withValues(alpha: 0.5),
+              activeThumbColor: TeacherThemeUtils.primary,
+            ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildDetailsTab() {
-    final startDate = parseStoredEventDateTime(widget.event['start_at']);
-    final endDate = parseStoredEventDateTime(widget.event['end_at']);
-    final location = (widget.event['location'] ?? 'TBA').toString();
-    final eventType = (widget.event['event_type'] ?? '').toString().trim();
-    final graceTime = (widget.event['grace_time']?.toString() ?? '').trim();
-    final target = _getTargetLabel(widget.event['event_for']?.toString());
-    final description =
-        (widget.event['description'] ?? 'No description provided.').toString();
+    final startDate = parseStoredEventDateTime(_event['start_at']);
+    final endDate = parseStoredEventDateTime(_event['end_at']);
+    final location = (_event['location'] ?? 'TBA').toString();
+    final eventType = (_event['event_type'] ?? '').toString().trim();
+    final graceTime = (_event['grace_time']?.toString() ?? '').trim();
+    final eventFor = (_event['event_for']?.toString() ?? 'all').trim();
+    final description = (_event['description'] ?? '').toString().trim();
+    final eventSpan = (_event['event_span']?.toString() ?? '').trim();
     final isSeminarBased = _isSeminarBasedEvent();
 
     return ListView(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
       children: [
-        const Text(
-          'EVENT INFORMATION',
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w800,
-            letterSpacing: 1.2,
-            color: Color(0xFF6B7280),
-          ),
-        ),
-        const SizedBox(height: 12),
-        Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.02),
-                blurRadius: 15,
-                offset: const Offset(0, 4),
+        if (eventType.isNotEmpty) ...[
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: _getEventTypeColor(eventType).withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(10),
               ),
-            ],
-            border: Border.all(color: const Color(0xFFF3F4F6)),
-          ),
-          child: Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-                child: _buildTeacherScheduleInfoGrid(
-                  startDate: startDate,
-                  endDate: endDate,
-                  location: location,
-                  eventType: eventType,
-                  target: target,
-                  graceTime: graceTime,
-                ),
-              ),
-              if (isSeminarBased) ...[
-                const Divider(height: 1, color: Color(0xFFF3F4F6)),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                  child: Row(
-                    children: const [
-                      Icon(
-                        Icons.auto_stories_rounded,
-                        size: 16,
-                        color: TeacherThemeUtils.primary,
-                      ),
-                      SizedBox(width: 8),
-                      Text(
-                        'Seminar Sessions',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xFF111827),
-                        ),
-                      ),
-                    ],
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _getEventTypeIcon(eventType),
+                    size: 16,
+                    color: _getEventTypeColor(eventType),
                   ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
-                  child: _buildSessionScheduleSection(),
-                ),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(height: 28),
-        const Text(
-          'ABOUT THE EVENT',
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w800,
-            letterSpacing: 1.2,
-            color: Color(0xFF6B7280),
-          ),
-        ),
-        const SizedBox(height: 12),
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(20),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.02),
-                blurRadius: 15,
-                offset: const Offset(0, 4),
+                  const SizedBox(width: 6),
+                  Text(
+                    eventType,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: _getEventTypeColor(eventType),
+                    ),
+                  ),
+                ],
               ),
-            ],
-            border: Border.all(color: const Color(0xFFF3F4F6)),
-          ),
-          child: Text(
-            description,
-            style: const TextStyle(
-              fontSize: 15,
-              color: Color(0xFF374151),
-              height: 1.6,
-              fontWeight: FontWeight.w500,
             ),
           ),
+          const SizedBox(height: 16),
+        ],
+        _buildTeacherTopStatsGrid(eventSpan: eventSpan),
+        if (_shouldShowEventQr) ...[
+          const SizedBox(height: 24),
+          _buildEventQrSection(),
+        ],
+        const SizedBox(height: 28),
+        const Text(
+          'Event Schedule & Info',
+          style: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w800,
+            color: Color(0xFF1F2937),
+          ),
         ),
+        const SizedBox(height: 16),
+        _buildTeacherScheduleInfoGrid(
+          startDate: startDate,
+          endDate: endDate,
+          location: location,
+          eventType: eventType,
+          target: _getTargetLabel(eventFor),
+          graceTime: graceTime,
+        ),
+        if (!isSeminarBased) ...[
+          const SizedBox(height: 12),
+          _buildEarlyOutToggleCard(
+            enabled: _earlyOutEnabled,
+            subtitle: _earlyOutSubtitle({
+              'enabled': _earlyOutEnabled,
+              'expires_at': _earlyOutExpiresAt,
+            }),
+            interactable: _earlyOutEnabled || _isWithinEarlyOutSchedule(),
+            onChanged: (v) => _setEarlyOut(enabled: v),
+          ),
+        ],
+        if (isSeminarBased) ...[
+          const SizedBox(height: 12),
+          const Text(
+            'Seminar Sessions',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF1F2937),
+            ),
+          ),
+          const SizedBox(height: 12),
+          _buildSessionScheduleSection(),
+        ],
+        if (description.isNotEmpty) ...[
+          const SizedBox(height: 28),
+          const Text(
+            'Event Description',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF1F2937),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            description,
+            style: TextStyle(
+              fontSize: 14,
+              color: Colors.grey.shade700,
+              height: 1.6,
+            ),
+          ),
+        ],
+        const SizedBox(height: 16),
       ],
     );
   }
@@ -1782,9 +2385,9 @@ class _TeacherEventManageState extends State<TeacherEventManage>
           ),
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
-            color: const Color(0xFFF8FAFC),
+            color: const Color(0xFFF9FAFB),
             borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: const Color(0xFFF3F4F6)),
+            border: Border.all(color: const Color(0xFFE5E7EB)),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1830,10 +2433,174 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 'Time',
                 formatTimeRange(start, end),
               ),
+              const SizedBox(height: 12),
+              _buildEarlyOutToggleCard(
+                title: 'Early Out (this seminar)',
+                enabled: _sessionEarlyOut[session['id']?.toString() ?? '']
+                        ?['enabled'] ==
+                    true,
+                subtitle: _earlyOutSubtitle(
+                  _sessionEarlyOut[session['id']?.toString() ?? ''],
+                  sessionId: session['id']?.toString(),
+                ),
+                interactable: (_sessionEarlyOut[session['id']?.toString() ?? '']
+                            ?['enabled'] ==
+                        true) ||
+                    _isWithinEarlyOutSchedule(
+                      sessionId: session['id']?.toString(),
+                    ),
+                onChanged: (v) => _setEarlyOut(
+                  enabled: v,
+                  sessionId: session['id']?.toString(),
+                ),
+              ),
             ],
           ),
         );
       }).toList(),
+    );
+  }
+
+  Widget _coverLoadingPlaceholder() {
+    return ColoredBox(
+      color: TeacherThemeUtils.dark,
+      child: const Center(
+        child: PulseConnectLoader(
+          size: 22,
+          strokeWidth: 3.5,
+          color: Color(0xFFD4A843),
+        ),
+      ),
+    );
+  }
+
+  Widget _coverFallback() {
+    return DecoratedBox(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: TeacherThemeUtils.chromeGradient,
+        ),
+      ),
+      child: Center(
+        child: Container(
+          width: 64,
+          height: 64,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: Colors.white.withValues(alpha: 0.1),
+            border: Border.all(
+              color: const Color(0xFFD4A843).withValues(alpha: 0.5),
+              width: 2,
+            ),
+          ),
+          child: const Icon(
+            Icons.event_rounded,
+            color: Color(0xFFD4A843),
+            size: 32,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTeacherTopStatsGrid({required String eventSpan}) {
+    final hasSpan = eventSpan.isNotEmpty;
+
+    return Row(
+      children: [
+        Expanded(
+          child: _buildTeacherStatChip(
+            Icons.people_rounded,
+            _eventService.formatParticipantTotal(
+              _participants.length,
+              _event['registration_limit'],
+            ),
+            'Participants',
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _buildTeacherStatChip(
+            Icons.info_outline_rounded,
+            _eventStatusLabel(_event['status']?.toString()),
+            'Status',
+          ),
+        ),
+        if (hasSpan) ...[
+          const SizedBox(width: 8),
+          Expanded(
+            child: _buildTeacherStatChip(
+              Icons.date_range_rounded,
+              eventSpan == 'multi-day' || eventSpan == 'multi_day'
+                  ? 'Multi-Day'
+                  : 'Single',
+              'Span',
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildTeacherStatChip(
+    IconData icon,
+    String value,
+    String label,
+  ) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: const Color(0xFFE0F2FE), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: TeacherThemeUtils.primary.withValues(alpha: 0.04),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF0F9FF),
+              shape: BoxShape.circle,
+              border: Border.all(color: const Color(0xFFE0F2FE)),
+            ),
+            child: Icon(icon, color: TeacherThemeUtils.primary, size: 18),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            value,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontWeight: FontWeight.w900,
+              fontSize: 14,
+              color: TeacherThemeUtils.dark,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 9.5,
+              fontWeight: FontWeight.w700,
+              color: Colors.grey.shade500,
+              letterSpacing: 0.1,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
     );
   }
 
@@ -1845,17 +2612,8 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     required String target,
     required String graceTime,
   }) {
-    final screenWidth = MediaQuery.of(context).size.width;
-    final availableWidth = screenWidth - 72; // page padding + card padding
-    final spacing = 12.0;
-    final useTwoColumns = availableWidth >= 380;
-    final cardWidth = useTwoColumns
-        ? ((availableWidth - spacing) / 2)
-        : availableWidth;
-
     final cards = <Widget>[
       _buildTeacherScheduleInfoCard(
-        width: cardWidth,
         icon: Icons.calendar_month_rounded,
         title: 'Start Date & Time',
         value: startDate != null
@@ -1863,7 +2621,6 @@ class _TeacherEventManageState extends State<TeacherEventManage>
             : 'TBA',
       ),
       _buildTeacherScheduleInfoCard(
-        width: cardWidth,
         icon: Icons.event_available_rounded,
         title: 'End Date & Time',
         value: endDate != null
@@ -1871,29 +2628,26 @@ class _TeacherEventManageState extends State<TeacherEventManage>
             : 'TBA',
       ),
       _buildTeacherScheduleInfoCard(
-        width: cardWidth,
         icon: Icons.location_on_rounded,
         title: 'Location / Venue',
         value: location,
       ),
       _buildTeacherScheduleInfoCard(
-        width: cardWidth,
-        icon: Icons.style_rounded,
+        icon: _getEventTypeIcon(eventType),
         title: 'Event Type',
         value: eventType.isNotEmpty ? eventType : 'General Event',
       ),
       _buildTeacherScheduleInfoCard(
-        width: availableWidth,
-        icon: Icons.group_rounded,
+        icon: Icons.groups_rounded,
         title: 'Target Participants',
         value: target,
+        fullWidth: true,
       ),
     ];
 
     if (graceTime.isNotEmpty) {
       cards.add(
         _buildTeacherScheduleInfoCard(
-          width: useTwoColumns ? cardWidth : availableWidth,
           icon: Icons.timer_rounded,
           title: 'Grace Time',
           value: '$graceTime min',
@@ -1901,65 +2655,112 @@ class _TeacherEventManageState extends State<TeacherEventManage>
       );
     }
 
-    return Wrap(spacing: spacing, runSpacing: spacing, children: cards);
+    return Wrap(spacing: 12, runSpacing: 12, children: cards);
   }
 
   Widget _buildTeacherScheduleInfoCard({
-    required double width,
     required IconData icon,
     required String title,
     required String value,
+    bool fullWidth = false,
   }) {
-    return SizedBox(
-      width: width,
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: const Color(0xFFF8FAFC),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: const Color(0xFFF3F4F6)),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 30,
-              height: 30,
-              decoration: BoxDecoration(
-                color: TeacherThemeUtils.primary.withValues(alpha: 0.08),
-                borderRadius: BorderRadius.circular(9),
-              ),
-              child: Icon(icon, color: TeacherThemeUtils.primary, size: 15),
+    final screenWidth = MediaQuery.of(context).size.width;
+    final horizontalPadding = 24.0;
+    final wrapSpacing = 12.0;
+    final availableWidth = screenWidth - (horizontalPadding * 2);
+    final useTwoColumns = availableWidth >= 380;
+    final cardWidth = (fullWidth || !useTwoColumns)
+        ? availableWidth
+        : ((availableWidth - wrapSpacing) / 2);
+
+    return Container(
+      width: cardWidth,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFF3F4F6), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.02),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: const Color(0xFFF0F9FF),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFFE0F2FE)),
             ),
-            const SizedBox(width: 9),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF6B7280),
-                    ),
+            child: Icon(icon, color: TeacherThemeUtils.primary, size: 18),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    color: Colors.grey.shade500,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.2,
                   ),
-                  const SizedBox(height: 3),
-                  Text(
-                    value,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFF111827),
-                    ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF1F2937),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
+  }
+
+  Color _getEventTypeColor(String type) {
+    switch (type.toLowerCase()) {
+      case 'seminar':
+        return const Color(0xFF1D4ED8);
+      case 'off-campus activity':
+        return const Color(0xFF059669);
+      case 'sports event':
+        return const Color(0xFFD97706);
+      case 'other':
+        return const Color(0xFF7C3AED);
+      default:
+        return const Color(0xFF6B7280);
+    }
+  }
+
+  IconData _getEventTypeIcon(String type) {
+    switch (type.toLowerCase()) {
+      case 'seminar':
+        return Icons.school_rounded;
+      case 'off-campus activity':
+        return Icons.landscape_rounded;
+      case 'sports event':
+        return Icons.sports_soccer_rounded;
+      case 'other':
+        return Icons.category_rounded;
+      default:
+        return Icons.style_rounded;
+    }
   }
 
   Widget _buildTeacherSessionMetaRow(
@@ -2134,37 +2935,47 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                   'Joined',
                   _eventService.formatParticipantTotal(
                     _participants.length,
-                    widget.event['registration_limit'],
+                    _event['registration_limit'],
                   ),
                   TeacherThemeUtils.primary,
                   Icons.people_rounded,
                 ),
               ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: _buildStatChip(
-                  isSeminarBased ? 'Seminar 1' : 'Present',
-                  '${isSeminarBased ? seminarOneCount : presentCount}',
-                  const Color(0xFF60A5FA),
-                  isSeminarBased
-                      ? Icons.looks_one_rounded
-                      : Icons.login_rounded,
+              if (isSeminarBased) ...[
+                if (_eventSessions.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildStatChip(
+                      'Seminar 1',
+                      '$seminarOneCount',
+                      const Color(0xFF60A5FA),
+                      Icons.looks_one_rounded,
+                    ),
+                  ),
+                ],
+                if (_eventSessions.length > 1) ...[
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildStatChip(
+                      'Seminar 2',
+                      '$seminarTwoCount',
+                      const Color(0xFF1D4ED8),
+                      Icons.looks_two_rounded,
+                    ),
+                  ),
+                ],
+              ] else ...[
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _buildStatChip(
+                    'Present',
+                    '$presentCount',
+                    const Color(0xFF10B981),
+                    Icons.check_circle_rounded,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: _buildStatChip(
-                  isSeminarBased
-                      ? (_eventSessions.length > 1 ? 'Seminar 2' : 'Present')
-                      : 'Present',
-                  '${isSeminarBased ? (_eventSessions.length > 1 ? seminarTwoCount : presentCount) : presentCount}',
-                  const Color(0xFF1D4ED8),
-                  isSeminarBased && _eventSessions.length > 1
-                      ? Icons.looks_two_rounded
-                      : Icons.check_circle_rounded,
-                ),
-              ),
-              const SizedBox(width: 6),
+              ],
+              const SizedBox(width: 8),
               Expanded(
                 child: _buildStatChip(
                   'Absent',
@@ -2183,19 +2994,21 @@ class _TeacherEventManageState extends State<TeacherEventManage>
             children: [
               Expanded(
                 child: Container(
-                  height: 42,
+                  height: 46,
                   decoration: BoxDecoration(
-                    color: const Color(0xFFF3F4F6),
-                    borderRadius: BorderRadius.circular(12),
+                    color: const Color(0xFFF9FAFB),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFFE5E7EB)),
                   ),
                   child: TextField(
                     onChanged: (v) => setState(() => _searchQuery = v),
-                    style: const TextStyle(fontSize: 14),
+                    style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
                     decoration: const InputDecoration(
                       hintText: 'Search students...',
                       hintStyle: TextStyle(
                         color: Color(0xFF9CA3AF),
                         fontSize: 14,
+                        fontWeight: FontWeight.w500,
                       ),
                       prefixIcon: Icon(
                         Icons.search_rounded,
@@ -2210,10 +3023,14 @@ class _TeacherEventManageState extends State<TeacherEventManage>
               ),
               const SizedBox(width: 10),
               Container(
-                height: 42,
+                height: 46,
+                width: 46,
                 decoration: BoxDecoration(
                   color: TeacherThemeUtils.primary.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: TeacherThemeUtils.primary.withValues(alpha: 0.2),
+                  ),
                 ),
                 child: IconButton(
                   icon: const Icon(
@@ -2223,6 +3040,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                   ),
                   onPressed: () => _exportCsv(filtered),
                   tooltip: 'Export CSV',
+                  padding: EdgeInsets.zero,
                 ),
               ),
             ],
@@ -2231,7 +3049,9 @@ class _TeacherEventManageState extends State<TeacherEventManage>
         _buildParticipantsDataBanner(),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         Expanded(
-          child: filtered.isEmpty
+          child: _isLoadingRoster
+              ? const Center(child: PulseConnectLoader())
+              : filtered.isEmpty
               ? _buildEmptyState(
                   _searchQuery.isNotEmpty
                       ? 'No students match your search.'
@@ -2242,7 +3062,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 )
               : RefreshIndicator(
                   color: TeacherThemeUtils.primary,
-                  onRefresh: _loadData,
+                  onRefresh: () => _loadData(true),
                   child: ListView.separated(
                     padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
                     itemCount: filtered.length,
@@ -2264,32 +3084,50 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     IconData icon,
   ) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(12),
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withValues(alpha: 0.16), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: color.withValues(alpha: 0.03),
+            blurRadius: 8,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, color: color, size: 18),
-          const SizedBox(height: 6),
+          Container(
+            padding: const EdgeInsets.all(6),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.08),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: color, size: 16),
+          ),
+          const SizedBox(height: 8),
           Text(
             value,
             style: TextStyle(
               color: color,
-              fontWeight: FontWeight.w800,
-              fontSize: 20,
-              height: 1.0,
+              fontWeight: FontWeight.w900,
+              fontSize: 18,
+              height: 1.1,
             ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
           ),
           const SizedBox(height: 2),
           Text(
             label,
             style: TextStyle(
-              color: color.withValues(alpha: 0.75),
-              fontWeight: FontWeight.w600,
-              fontSize: 10,
+              color: Colors.grey.shade600,
+              fontWeight: FontWeight.w800,
+              fontSize: 9,
+              letterSpacing: 0.1,
             ),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
@@ -2325,15 +3163,15 @@ class _TeacherEventManageState extends State<TeacherEventManage>
 
     switch (attStatus) {
       case 'present':
-        statusColor = TeacherThemeUtils.primary;
-        statusBg = TeacherThemeUtils.primary.withValues(alpha: 0.1);
+        statusColor = const Color(0xFF10B981); // beautiful emerald-500
+        statusBg = const Color(0xFFECFDF5);
         statusLabel = isSeminarBased && sessionCount > 0
             ? '$sessionCount Present'
             : 'Present';
         statusIcon = Icons.check_circle_rounded;
         break;
       case 'absent':
-        statusColor = const Color(0xFFD97706);
+        statusColor = const Color(0xFFF59E0B); // beautiful amber-500
         statusBg = const Color(0xFFFEF3C7);
         statusLabel = 'Absent';
         statusIcon = Icons.warning_amber_rounded;
@@ -2357,26 +3195,40 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(20),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 12,
-            offset: const Offset(0, 2),
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
           ),
         ],
-        border: Border.all(color: const Color(0xFFF3F4F6)),
+        border: Border.all(color: const Color(0xFFF3F4F6), width: 1.5),
       ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Row(
           children: [
             Container(
-              width: 46,
-              height: 46,
+              width: 48,
+              height: 48,
               decoration: BoxDecoration(
-                color: avatarColor,
+                gradient: LinearGradient(
+                  colors: [
+                    avatarColor,
+                    avatarColor.withValues(alpha: 0.8),
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
                 shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: avatarColor.withValues(alpha: 0.25),
+                    blurRadius: 6,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
               ),
               child: Center(
                 child: Text(
@@ -2418,7 +3270,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                       style: const TextStyle(
                         color: Color(0xFF9CA3AF),
                         fontSize: 11,
-                        fontWeight: FontWeight.w600,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
                   ],
@@ -2433,7 +3285,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                           children: [
                             const Icon(
                               Icons.login_rounded,
-                              size: 11,
+                              size: 12,
                               color: Color(0xFF60A5FA),
                             ),
                             const SizedBox(width: 4),
@@ -2512,11 +3364,11 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 10,
-                    vertical: 5,
+                    vertical: 6,
                   ),
                   decoration: BoxDecoration(
                     color: statusBg,
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(10),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
@@ -2528,7 +3380,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                         style: TextStyle(
                           color: statusColor,
                           fontWeight: FontWeight.w700,
-                          fontSize: 10,
+                          fontSize: 10.5,
                         ),
                       ),
                     ],
@@ -2539,11 +3391,12 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                   Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 10,
-                      vertical: 5,
+                      vertical: 6,
                     ),
                     decoration: BoxDecoration(
                       color: const Color(0xFFFFF7ED),
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFFFED7AA)),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
@@ -2559,7 +3412,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                           style: TextStyle(
                             color: Color(0xFFD97706),
                             fontWeight: FontWeight.w700,
-                            fontSize: 10,
+                            fontSize: 10.5,
                           ),
                         ),
                       ],
@@ -2576,39 +3429,49 @@ class _TeacherEventManageState extends State<TeacherEventManage>
 
   Widget _buildEmptyState(String message, IconData icon) {
     return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF3F4F6),
-              shape: BoxShape.circle,
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF0F9FF),
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFFE0F2FE), width: 2),
+              ),
+              child: Icon(icon, size: 48, color: TeacherThemeUtils.primary),
             ),
-            child: Icon(icon, size: 40, color: Colors.grey.shade400),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            message,
-            style: const TextStyle(
-              color: Color(0xFF6B7280),
-              fontWeight: FontWeight.w600,
-              fontSize: 14,
+            const SizedBox(height: 20),
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                color: Color(0xFF1F2937),
+                fontWeight: FontWeight.w800,
+                fontSize: 15,
+                height: 1.4,
+              ),
             ),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Pull down to refresh',
-            style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12),
-          ),
-        ],
+            const SizedBox(height: 8),
+            Text(
+              'Pull down to refresh',
+              style: TextStyle(
+                color: Colors.grey.shade500,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  // â•â•â•â•â•â•â•â•â•â•â• ASSISTANTS TAB â•â•â•â•â•â•â•â•â•â•â•
+  // ===================== ASSISTANTS TAB =====================
   Widget _buildAssistantsTab() {
-    final isExpired = widget.event['status'] == 'expired';
+    final isExpired = _event['status'] == 'expired';
 
     return Column(
       children: [
@@ -2629,6 +3492,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                         color: Color(0xFF111827),
                       ),
                     ),
+                    const SizedBox(height: 2),
                     Text(
                       isExpired
                           ? 'This event is completed. Assistant management is disabled.'
@@ -2638,11 +3502,13 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                       style: const TextStyle(
                         color: Color(0xFF6B7280),
                         fontSize: 12,
+                        fontWeight: FontWeight.w500,
                       ),
                     ),
                   ],
                 ),
               ),
+              const SizedBox(width: 8),
               ElevatedButton.icon(
                 onPressed: (_canManageAssistants && !isExpired)
                     ? _showAssignAssistantSheet
@@ -2654,14 +3520,14 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                   foregroundColor: Colors.white,
                   elevation: 0,
                   shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(12),
                   ),
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 10,
+                    horizontal: 16,
+                    vertical: 11,
                   ),
                   textStyle: const TextStyle(
-                    fontWeight: FontWeight.w700,
+                    fontWeight: FontWeight.w800,
                     fontSize: 13,
                   ),
                 ),
@@ -2671,7 +3537,9 @@ class _TeacherEventManageState extends State<TeacherEventManage>
         ),
         const Divider(height: 1, color: Color(0xFFF3F4F6)),
         Expanded(
-          child: _assistants.isEmpty
+          child: _isLoadingRoster
+              ? const Center(child: PulseConnectLoader())
+              : _assistants.isEmpty
               ? RefreshIndicator(
                   color: TeacherThemeUtils.primary,
                   onRefresh: () => _loadData(true),
@@ -2719,24 +3587,38 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                       padding: const EdgeInsets.all(16),
                       decoration: BoxDecoration(
                         color: Colors.white,
-                        borderRadius: BorderRadius.circular(16),
+                        borderRadius: BorderRadius.circular(20),
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.black.withValues(alpha: 0.04),
-                            blurRadius: 12,
-                            offset: const Offset(0, 2),
+                            color: Colors.black.withValues(alpha: 0.03),
+                            blurRadius: 16,
+                            offset: const Offset(0, 4),
                           ),
                         ],
-                        border: Border.all(color: const Color(0xFFF3F4F6)),
+                        border: Border.all(color: const Color(0xFFF3F4F6), width: 1.5),
                       ),
                       child: Row(
                         children: [
                           Container(
-                            width: 46,
-                            height: 46,
+                            width: 48,
+                            height: 48,
                             decoration: BoxDecoration(
-                              color: avatarColor,
+                              gradient: LinearGradient(
+                                colors: [
+                                  avatarColor,
+                                  avatarColor.withValues(alpha: 0.8),
+                                ],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              ),
                               shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: avatarColor.withValues(alpha: 0.25),
+                                  blurRadius: 6,
+                                  offset: const Offset(0, 2),
+                                ),
+                              ],
                             ),
                             child: Center(
                               child: Text(
@@ -2762,20 +3644,20 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                                     color: Color(0xFF111827),
                                   ),
                                 ),
-                                const SizedBox(height: 2),
+                                const SizedBox(height: 3),
                                 Text(
                                   'Student ID: $assistantIdNumber',
                                   style: const TextStyle(
                                     fontSize: 12,
                                     color: Color(0xFF6B7280),
-                                    fontWeight: FontWeight.w500,
+                                    fontWeight: FontWeight.w600,
                                   ),
                                 ),
                               ],
                             ),
                           ),
                           Transform.scale(
-                            scale: 0.85,
+                            scale: 0.8,
                             child: Switch(
                               value: a['allow_scan'] == true,
                               activeThumbColor: Colors.white,
@@ -2795,5 +3677,233 @@ class _TeacherEventManageState extends State<TeacherEventManage>
         ),
       ],
     );
+  }
+
+  bool get _shouldShowEventQr {
+    final status = (_event['status']?.toString() ?? '').toLowerCase();
+    return status == 'published' ||
+        status == 'expired' ||
+        status == 'finished';
+  }
+
+  // ===================== EVENT QR (inline in Details) =====================
+  Widget _buildEventQrSection() {
+    final eventId = (_event['id']?.toString() ?? '').trim();
+    final qrPayload = EventService.buildEventQrPayload(eventId);
+    if (qrPayload.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: TeacherThemeUtils.primary.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  Icons.qr_code_2_rounded,
+                  color: TeacherThemeUtils.primary,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Event QR Code',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        fontSize: 16,
+                        color: Color(0xFF111827),
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Students scan this during the scan window',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: Color(0xFF6B7280),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          Center(
+            child: RepaintBoundary(
+              key: _eventQrKey,
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFFE5E7EB)),
+                ),
+                child: QrImageView(
+                  data: qrPayload,
+                  version: QrVersions.auto,
+                  size: 168,
+                  errorCorrectionLevel: QrErrorCorrectLevel.H,
+                  embeddedImage: const AssetImage('assets/CCS.png'),
+                  embeddedImageStyle: const QrEmbeddedImageStyle(
+                    size: Size(38, 38),
+                  ),
+                  eyeStyle: QrEyeStyle(
+                    eyeShape: QrEyeShape.square,
+                    color: TeacherThemeUtils.primary,
+                  ),
+                  dataModuleStyle: QrDataModuleStyle(
+                    dataModuleShape: QrDataModuleShape.square,
+                    color: TeacherThemeUtils.primary,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            height: 44,
+            child: OutlinedButton.icon(
+              onPressed: _isSavingEventQr ? null : _downloadEventQr,
+              icon: _isSavingEventQr
+                  ? SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: TeacherThemeUtils.primary,
+                      ),
+                    )
+                  : Icon(
+                      Icons.download_rounded,
+                      size: 18,
+                      color: TeacherThemeUtils.primary,
+                    ),
+              label: Text(
+                _isSavingEventQr ? 'Saving...' : 'Download QR',
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  color: TeacherThemeUtils.primary,
+                ),
+              ),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: TeacherThemeUtils.primary,
+                side: BorderSide(color: TeacherThemeUtils.primary.withValues(alpha: 0.35)),
+                backgroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _downloadEventQr() async {
+    final eventId = (_event['id']?.toString() ?? '').trim();
+    if (eventId.isEmpty) return;
+
+    setState(() => _isSavingEventQr = true);
+    try {
+      final boundary = _eventQrKey.currentContext?.findRenderObject()
+          as RenderRepaintBoundary?;
+      if (boundary == null) {
+        throw Exception('QR preview is not ready yet.');
+      }
+
+      final image = await boundary.toImage(pixelRatio: 3.0);
+      final byteData =
+          await image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) {
+        throw Exception('Could not capture QR image.');
+      }
+
+      final bytes = byteData.buffer.asUint8List();
+      final rawTitle = (_event['title']?.toString() ?? 'event')
+          .replaceAll(RegExp(r'[^\w\s-]+'), '')
+          .trim()
+          .replaceAll(RegExp(r'\s+'), '_');
+      final safeTitle = rawTitle.isEmpty ? 'event' : rawTitle;
+      final fileName = 'event_qr_${safeTitle}_$eventId.png';
+
+      try {
+        final hasAccess = await Gal.hasAccess(toAlbum: true);
+        if (!hasAccess) {
+          final granted = await Gal.requestAccess(toAlbum: true);
+          if (!granted) {
+            throw Exception('Gallery access was denied.');
+          }
+        }
+
+        await Gal.putImageBytes(bytes, name: fileName);
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('QR code saved to gallery.'),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      } on MissingPluginException {
+        // New native plugin needs a full app restart (hot reload is not enough).
+        final tempDir = await getTemporaryDirectory();
+        final file = File('${tempDir.path}/$fileName');
+        await file.writeAsBytes(bytes);
+        await SharePlus.instance.share(
+          ShareParams(
+            files: [XFile(file.path)],
+            text: 'Event QR for ${(_event['title']?.toString() ?? 'Event').trim()}',
+          ),
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Gallery plugin needs a full app restart. Shared QR instead — stop the app and rebuild to save directly to gallery.',
+              ),
+              behavior: SnackBarBehavior.floating,
+              duration: Duration(seconds: 5),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not save QR: $e'),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSavingEventQr = false);
+      }
+    }
   }
 }

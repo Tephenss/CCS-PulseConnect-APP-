@@ -1,0 +1,9 @@
+# Copy this file to key.properties and fill in your real passwords.
+# NEVER commit key.properties or *.jks to Git.
+#
+# storeFile is relative to the android/ folder.
+
+storePassword=PUT_YOUR_STORE_PASSWORD_HERE
+keyPassword=PUT_YOUR_KEY_PASSWORD_HERE
+keyAlias=upload
+storeFile=upload-keystore.jks

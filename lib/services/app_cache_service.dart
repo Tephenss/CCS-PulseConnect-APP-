@@ -193,4 +193,14 @@ class AppCacheService {
     if (raw.isEmpty) return null;
     return DateTime.tryParse(raw)?.toLocal();
   }
+
+  /// Drop memory + disk list cache so the next fetch cannot return stale rows.
+  Future<void> clearJsonList(String key) async {
+    _memory.remove(key);
+    _inFlight.remove(key);
+    _inFlight.remove('fetch:$key');
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_dataKey(key));
+    await prefs.remove(_updatedAtKey(key));
+  }
 }

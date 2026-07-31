@@ -123,7 +123,9 @@ int normalizeRegistrationCloseExtendDays(dynamic value) {
   final raw = value.toString().trim();
   if (raw.isEmpty) return 0;
   final parsed = int.tryParse(raw);
-  if (parsed == null || parsed < 0 || parsed > 3) return 0;
+  // Stored offset from base close (DB allows up to 60); close date still
+  // capped by organizers via edit UI / API at start-3 days.
+  if (parsed == null || parsed < 0 || parsed > 60) return 0;
   return parsed;
 }
 

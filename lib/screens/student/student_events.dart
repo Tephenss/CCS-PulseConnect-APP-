@@ -14,6 +14,7 @@ import 'student_event_evaluation.dart';
 import 'student_response_view.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/course_theme_utils.dart';
+import '../../utils/app_page_routes.dart';
 
 class StudentEvents extends StatefulWidget {
   const StudentEvents({super.key});
@@ -65,7 +66,7 @@ class _StudentEventsState extends State<StudentEvents>
         _loadEvents(showLoader: false, forceFresh: !offlinePulse),
       );
     });
-    _refreshTimer = Timer.periodic(const Duration(seconds: 40), (_) {
+    _refreshTimer = Timer.periodic(const Duration(seconds: 60), (_) {
       _reloadEventsSilently(forceFresh: true);
     });
     _loadEvents(forceFresh: true);
@@ -194,11 +195,18 @@ class _StudentEventsState extends State<StudentEvents>
 
   void _precacheEventCovers(List<Map<String, dynamic>> events) {
     if (!mounted) return;
+    var count = 0;
+    const maxCovers = 8;
     for (final event in events) {
+      if (count >= maxCovers) break;
       final url = (event['cover_image_url'] ?? '').toString().trim();
       if (url.isEmpty) continue;
+      count++;
       unawaited(
-        precacheImage(CachedNetworkImageProvider(url), context),
+        precacheImage(
+          CachedNetworkImageProvider(url, maxWidth: 800),
+          context,
+        ),
       );
     }
   }
@@ -634,7 +642,7 @@ class _StudentEventsState extends State<StudentEvents>
         } else {
           await Navigator.push(
             context,
-            MaterialPageRoute(
+            AppPageRoute(
               builder: (_) => StudentEventDetails(
                 eventId: event['id'].toString(),
                 initialEvent: event,
@@ -642,7 +650,11 @@ class _StudentEventsState extends State<StudentEvents>
             ),
           );
         }
-        _loadEvents();
+        // Defer list refresh until after the pop animation settles.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          unawaited(_loadEvents(showLoader: false));
+        });
       },
       child: Container(
         margin: const EdgeInsets.only(bottom: 20),

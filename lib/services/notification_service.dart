@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'app_cache_service.dart';
 import 'auth_service.dart';
 import 'event_service.dart';
+import 'mobile_backend_service.dart';
 import '../config/env.dart';
 
 enum NotificationType { info, success, warning, error, event }
@@ -142,22 +143,8 @@ class NotificationService {
       });
     }
 
-    // Listen for persisted inbox rows (catch-up after login / logged-out delivery).
-    _notifChannel!.onPostgresChanges(
-      event: PostgresChangeEvent.all,
-      schema: 'public',
-      table: 'user_notifications',
-      filter: PostgresChangeFilter(
-        type: PostgresChangeFilterType.eq,
-        column: 'user_id',
-        value: userId,
-      ),
-      callback: (payload) {
-        scheduleRefresh();
-      },
-    );
-
-    // Listen for any changes in events (since notifs are derived from these)
+    // Catalog realtime only — notification PII tables are locked from anon (048).
+    // Inbox refresh uses PHP secureRead + polling instead.
     _notifChannel!.onPostgresChanges(
       event: PostgresChangeEvent.all,
       schema: 'public',
@@ -170,50 +157,6 @@ class NotificationService {
         }
         invalidateLiveCaches();
         scheduleRefresh(force: true);
-      },
-    );
-
-    // Listen for explicit read status changes for this user
-    _notifChannel!.onPostgresChanges(
-      event: PostgresChangeEvent.all,
-      schema: 'public',
-      table: 'user_notification_reads',
-      filter: PostgresChangeFilter(
-        type: PostgresChangeFilterType.eq,
-        column: 'user_id',
-        value: userId,
-      ),
-      callback: (payload) {
-        final record = payload.newRecord.isNotEmpty
-            ? payload.newRecord
-            : payload.oldRecord;
-        final approvedEventId = _extractApprovedRegistrationEventId(
-          record['notification_id']?.toString(),
-        );
-        if (approvedEventId != null && approvedEventId.isNotEmpty) {
-          unawaited(
-            _eventService.cacheApprovedRegistrationAccess(
-              userId,
-              approvedEventId,
-            ),
-          );
-        }
-        scheduleRefresh();
-      },
-    );
-
-    // Listen for "read all" watermark changes
-    _notifChannel!.onPostgresChanges(
-      event: PostgresChangeEvent.all,
-      schema: 'public',
-      table: 'user_notification_watermarks',
-      filter: PostgresChangeFilter(
-        type: PostgresChangeFilterType.eq,
-        column: 'user_id',
-        value: userId,
-      ),
-      callback: (payload) {
-        scheduleRefresh();
       },
     );
 
@@ -285,9 +228,20 @@ class NotificationService {
 
   void _startPolling() {
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(seconds: 40), (_) {
+    _pollTimer = Timer.periodic(const Duration(seconds: 90), (_) {
       unawaited(refresh(force: false));
     });
+  }
+
+  /// Pause inbox polling while the app is backgrounded (resume via [resumePolling]).
+  void pausePolling() {
+    _pollTimer?.cancel();
+    _pollTimer = null;
+  }
+
+  void resumePolling() {
+    if (_activeUserId == null || _activeUserId!.isEmpty) return;
+    _startPolling();
   }
 
   void _emitUnreadCount() {
@@ -628,7 +582,8 @@ class NotificationService {
           isProposalRequirementsRequested ||
           isProposalUnderReview ||
           isProposalApproved ||
-          isProposalRejected;
+          isProposalRejected ||
+          isEvalOpen;
 
       // Registration open/closed updates are already emitted as push from web APIs.
       // Never mirror them as local popup to prevent duplicate tray notifications.
@@ -786,15 +741,50 @@ class NotificationService {
     }
 
     try {
-      final rows = await _supabase
-          .from('user_notifications')
-          .select('id,title,body,notification_type,event_id,data,created_at,updated_at')
-          .eq('user_id', userId)
-          .order('created_at', ascending: false)
-          .limit(50);
+      List<Map<String, dynamic>> rows = [];
+      if (MobileBackendService.isConfigured) {
+        final res = await MobileBackendService().secureRead(
+          table: 'user_notifications',
+          select:
+              'id,title,body,notification_type,event_id,data,created_at,updated_at',
+          filters: {'user_id': userId},
+          limit: 50,
+        );
+        if (res['ok'] == true && res['rows'] is List) {
+          rows = List<Map<String, dynamic>>.from(
+            (res['rows'] as List).map((e) => Map<String, dynamic>.from(e as Map)),
+          );
+        } else if (res['ok'] != true) {
+          debugPrint('Notifications: inbox fetch error: ${res['error']}');
+          return [];
+        }
+      } else {
+        final raw = await _supabase
+            .from('user_notifications')
+            .select(
+              'id,title,body,notification_type,event_id,data,created_at,updated_at',
+            )
+            .eq('user_id', userId)
+            .order('created_at', ascending: false)
+            .limit(50);
+        rows = List<Map<String, dynamic>>.from(raw);
+      }
+
+      // Newest first if backend didn't order.
+      rows.sort((a, b) {
+        final aAt = DateTime.tryParse(
+              (a['updated_at'] ?? a['created_at'] ?? '').toString(),
+            ) ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+        final bAt = DateTime.tryParse(
+              (b['updated_at'] ?? b['created_at'] ?? '').toString(),
+            ) ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+        return bAt.compareTo(aAt);
+      });
 
       final notifications = <AppNotification>[];
-      for (final raw in List<Map<String, dynamic>>.from(rows)) {
+      for (final raw in rows) {
         final row = _asStringMap(raw);
         final id = row['id']?.toString().trim() ?? '';
         if (id.isEmpty) {
@@ -923,14 +913,21 @@ class NotificationService {
 
       if (role == 'student' && currentUserId.isNotEmpty) {
         try {
-          final regs = await _supabase
-              .from('event_registrations')
-              .select('event_id')
-              .eq('student_id', currentUserId);
-          for (final row in (regs as List)) {
-            final eventId = row['event_id']?.toString() ?? '';
-            if (eventId.isNotEmpty) {
-              registeredEventIds.add(eventId);
+          if (MobileBackendService.isConfigured) {
+            final res = await MobileBackendService().secureRead(
+              table: 'event_registrations',
+              select: 'event_id',
+              filters: {'student_id': currentUserId},
+              limit: 500,
+            );
+            if (res['ok'] == true && res['rows'] is List) {
+              for (final row in (res['rows'] as List)) {
+                if (row is! Map) continue;
+                final eventId = row['event_id']?.toString() ?? '';
+                if (eventId.isNotEmpty) {
+                  registeredEventIds.add(eventId);
+                }
+              }
             }
           }
         } catch (_) {
@@ -956,29 +953,34 @@ class NotificationService {
         }
 
         try {
-          final signalRows = await _supabase
-              .from('user_notification_reads')
-              .select('notification_id,read_at')
-              .eq('user_id', currentUserId)
-              .like('notification_id', 'reg_access_approved_%')
-              .limit(60);
-
-          for (final raw in List<Map<String, dynamic>>.from(signalRows)) {
-            final row = _asStringMap(raw);
-            final signalEventId = _extractApprovedRegistrationEventId(
-              row['notification_id']?.toString(),
+          if (MobileBackendService.isConfigured) {
+            final res = await MobileBackendService().secureRead(
+              table: 'user_notification_reads',
+              select: 'notification_id,read_at',
+              filters: {'user_id': currentUserId},
+              limit: 60,
             );
-            if (signalEventId == null || signalEventId.isEmpty) {
-              continue;
+            if (res['ok'] == true && res['rows'] is List) {
+              for (final raw in List<Map<String, dynamic>>.from(
+                (res['rows'] as List)
+                    .map((e) => Map<String, dynamic>.from(e as Map)),
+              )) {
+                final row = _asStringMap(raw);
+                final nid = row['notification_id']?.toString() ?? '';
+                if (!nid.startsWith('reg_access_approved_')) continue;
+                final signalEventId = _extractApprovedRegistrationEventId(nid);
+                if (signalEventId == null || signalEventId.isEmpty) continue;
+                approvedSignalRows.add({
+                  'event_id': signalEventId,
+                  'payment_status': 'paid',
+                  'payment_note': '',
+                  'updated_at':
+                      row['read_at'] ?? DateTime.now().toIso8601String(),
+                });
+              }
             }
-
-            approvedSignalRows.add({
-              'event_id': signalEventId,
-              'payment_status': 'paid',
-              'payment_note': '',
-              'updated_at': row['read_at'] ?? DateTime.now().toIso8601String(),
-            });
           }
+          // Do not SELECT user_notification_reads via anon (locked in 048).
         } catch (_) {
           // Keep notifications working even if signal lookup fails.
         }
@@ -1417,122 +1419,10 @@ class NotificationService {
           );
         }
 
-        try {
-          dynamic rows;
-          try {
-            rows = await _supabase
-                .from('event_assistants')
-                .select(
-                  'id, event_id, assigned_by_teacher_id, allow_scan, assigned_at, created_at, updated_at, events(title)',
-                )
-                .eq('student_id', currentUserId)
-                .eq('allow_scan', true)
-                .limit(60);
-          } catch (_) {
-            try {
-              rows = await _supabase
-                  .from('event_assistants')
-                  .select(
-                    'id, event_id, assigned_by_teacher_id, allow_scan, assigned_at, events(title)',
-                  )
-                  .eq('student_id', currentUserId)
-                  .eq('allow_scan', true)
-                  .limit(60);
-            } catch (_) {
-              // Compatibility fallback for old schemas where timestamp
-              // and/or assigning-teacher columns are unavailable.
-              rows = await _supabase
-                  .from('event_assistants')
-                  .select('id, event_id, allow_scan, assigned_at')
-                  .eq('student_id', currentUserId)
-                  .eq('allow_scan', true)
-                  .limit(60);
-            }
-          }
-
-          final candidateRows = <Map<String, dynamic>>[];
-          final teacherIds = <String>{};
-          final eventIds = <String>{};
-
-          for (final raw in (rows as List)) {
-            final row = _asStringMap(raw);
-            final eventId = row['event_id']?.toString().trim() ?? '';
-            final assignedBy =
-                row['assigned_by_teacher_id']?.toString().trim() ?? '';
-            if (eventId.isEmpty || assignedBy.isEmpty) continue;
-
-            candidateRows.add(row);
-            teacherIds.add(assignedBy);
-            eventIds.add(eventId);
-          }
-
-          if (candidateRows.isNotEmpty &&
-              teacherIds.isNotEmpty &&
-              eventIds.isNotEmpty) {
-            final allowedTeacherEventPairs = <String>{};
-            try {
-              final teacherAssignmentRows = await _supabase
-                  .from('event_teacher_assignments')
-                  .select('event_id,teacher_id')
-                  .inFilter('event_id', eventIds.toList())
-                  .inFilter('teacher_id', teacherIds.toList())
-                  .eq('can_scan', true)
-                  .limit(500);
-
-              for (final raw
-                  in List<Map<String, dynamic>>.from(teacherAssignmentRows)) {
-                final eventId = raw['event_id']?.toString().trim() ?? '';
-                final teacherId = raw['teacher_id']?.toString().trim() ?? '';
-                if (eventId.isEmpty || teacherId.isEmpty) continue;
-                allowedTeacherEventPairs.add('$eventId|$teacherId');
-              }
-            } catch (_) {
-              // Fail closed for security: don't show scanner assignment
-              // notifications when assignment verification is unavailable.
-            }
-
-            for (final row in candidateRows) {
-              final eventId = row['event_id']?.toString().trim() ?? '';
-              final assignedBy =
-                  row['assigned_by_teacher_id']?.toString().trim() ?? '';
-              if (eventId.isEmpty || assignedBy.isEmpty) continue;
-              if (!allowedTeacherEventPairs.contains('$eventId|$assignedBy')) {
-                continue;
-              }
-
-              final assignedAtRaw =
-                  row['updated_at'] ?? row['assigned_at'] ?? row['created_at'];
-              final assignedAt = _tryParseLocalDate(assignedAtRaw) ?? now;
-              final revisionSource = (row['updated_at'] ??
-                      row['assigned_at'] ??
-                      row['created_at'] ??
-                      row['id'] ??
-                      '$eventId-$assignedBy')
-                  .toString();
-              final revisionHash = revisionSource.hashCode.abs();
-
-              final event = _extractRelatedMap(row['events']);
-              final eventTitle =
-                  event['title']?.toString().trim().isNotEmpty == true
-                      ? event['title'].toString().trim()
-                      : 'Event';
-
-              notifications.add(
-                AppNotification(
-                  id: 'scan_assign_${eventId}_$revisionHash',
-                  title: 'Scanner Assignment',
-                  message:
-                      'You were assigned by your teacher to help take attendance for "$eventTitle". Open the QR Scanner when instructed.',
-                  timestamp: assignedAt,
-                  type: NotificationType.info,
-                  eventId: eventId,
-                ),
-              );
-            }
-          }
-        } catch (_) {
-          // Keep notifications working if assistant assignment lookup fails.
-        }
+        // Scanner-assignment bell items used to SELECT event_assistants every
+        // 90s (including a created_at column that does not exist → 42703 spam).
+        // Assignments are delivered by FCM / mobile_push_dispatch instead.
+        debugPrint('[NOTIF] assistants_poll_disabled_v4');
 
         notifications.addAll(
           await _loadCertificateNotifications(currentUserId),
@@ -1605,26 +1495,45 @@ class NotificationService {
     DateTime lastReadDate = DateTime(2000);
     List<String> readIds = [];
     try {
-      final watermarkResponse = await _supabase
-          .from('user_notification_watermarks')
-          .select('last_read_at')
-          .eq('user_id', currentUserId)
-          .maybeSingle();
+      if (MobileBackendService.isConfigured) {
+        final wm = await MobileBackendService().secureRead(
+          table: 'user_notification_watermarks',
+          select: 'last_read_at',
+          filters: {'user_id': currentUserId},
+          limit: 1,
+        );
+        final wmRows = (wm['ok'] == true && wm['rows'] is List)
+            ? List<Map<String, dynamic>>.from(
+                (wm['rows'] as List)
+                    .map((e) => Map<String, dynamic>.from(e as Map)),
+              )
+            : <Map<String, dynamic>>[];
+        if (wmRows.isNotEmpty) {
+          final raw = wmRows.first['last_read_at']?.toString() ?? '';
+          final parsed = DateTime.tryParse(raw);
+          if (parsed != null) lastReadDate = parsed.toLocal();
+        }
 
-      if (watermarkResponse != null) {
-        lastReadDate = DateTime.parse(
-          watermarkResponse['last_read_at'] as String,
-        ).toLocal();
+        final reads = await MobileBackendService().secureRead(
+          table: 'user_notification_reads',
+          select: 'notification_id',
+          filters: {'user_id': currentUserId},
+          limit: 500,
+        );
+        final readRows = (reads['ok'] == true && reads['rows'] is List)
+            ? List<Map<String, dynamic>>.from(
+                (reads['rows'] as List)
+                    .map((e) => Map<String, dynamic>.from(e as Map)),
+              )
+            : <Map<String, dynamic>>[];
+        readIds = readRows
+            .map((row) => row['notification_id']?.toString() ?? '')
+            .where((id) => id.isNotEmpty)
+            .toList();
+      } else {
+        // Locked tables — no anon fallback after 048.
+        readIds = [];
       }
-
-      final readsResponse = await _supabase
-          .from('user_notification_reads')
-          .select('notification_id')
-          .eq('user_id', currentUserId);
-
-      readIds = (readsResponse as List)
-          .map((row) => row['notification_id'] as String)
-          .toList();
     } catch (e) {
       debugPrint('Error fetching Supabase read statuses: $e');
     }
@@ -1672,22 +1581,30 @@ class NotificationService {
       if (userData == null) return;
       final userId = userData['id'];
 
-      // 1. Update timestamp watermark on Supabase
-      await _supabase.from('user_notification_watermarks').upsert({
-        'user_id': userId,
-        'last_read_at': DateTime.now().toUtc().toIso8601String()
-      });
-
-      // 2. If specific IDs are provided, add them to the explicit read list on Supabase
-      if (ids != null && ids.isNotEmpty) {
-        final List<Map<String, dynamic>> records = ids.map((id) => {
-          'user_id': userId,
-          'notification_id': id,
-        }).toList();
-        
-        await _supabase.from('user_notification_reads').upsert(records, onConflict: 'user_id, notification_id');
+      if (MobileBackendService.isConfigured) {
+        await MobileBackendService().secureWrite('notification_read', {
+          'table': 'user_notification_watermarks',
+          'payload': {
+            'user_id': userId,
+            'last_read_at': DateTime.now().toUtc().toIso8601String(),
+          },
+        });
+        if (ids != null && ids.isNotEmpty) {
+          for (final id in ids) {
+            await MobileBackendService().secureWrite('notification_read', {
+              'table': 'user_notification_reads',
+              'payload': {
+                'user_id': userId,
+                'notification_id': id,
+              },
+            });
+          }
+        }
+      } else {
+        // Notification tables are locked from anon — skip when BFF unavailable.
+        return;
       }
-      
+
       await refresh(force: true);
     } catch (e) {
       debugPrint("Error in markAllAsRead: $e");
@@ -1710,10 +1627,18 @@ class NotificationService {
       if (userData == null) return;
       final userId = userData['id'];
 
-      await _supabase.from('user_notification_reads').upsert({
-        'user_id': userId,
-        'notification_id': id,
-      }, onConflict: 'user_id, notification_id');
+      if (MobileBackendService.isConfigured) {
+        await MobileBackendService().secureWrite('notification_read', {
+          'table': 'user_notification_reads',
+          'payload': {
+            'user_id': userId,
+            'notification_id': id,
+          },
+        });
+      } else {
+        // Notification tables are locked from anon — skip when BFF unavailable.
+        return;
+      }
 
       await refresh(force: true);
     } catch (e) {

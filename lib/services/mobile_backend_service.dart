@@ -1,6 +1,8 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 
 import '../config/env.dart';
@@ -8,9 +10,15 @@ import '../config/env.dart';
 class MobileBackendService {
   static const Duration _defaultTimeout = Duration(seconds: 15);
   static const Duration _registrationTimeout = Duration(seconds: 45);
-  // Keep short — details button must not wait on a hung PHP host.
-  static const Duration _requirementsTimeout = Duration(seconds: 5);
+  static const Duration _requirementsTimeout = Duration(seconds: 12);
   static const Duration _emailTimeout = Duration(seconds: 45);
+  static const String _sessionStorageKey = 'mobile_session_token';
+
+  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
+
+  static String? _memorySessionToken;
 
   static bool get isConfigured {
     final uri = _baseUri;
@@ -32,19 +40,58 @@ class MobileBackendService {
     return uri;
   }
 
-  static Map<String, String> _headers() {
+  static Future<String?> getSessionToken() async {
+    if (_memorySessionToken != null && _memorySessionToken!.isNotEmpty) {
+      return _memorySessionToken;
+    }
+    try {
+      final token = await _secureStorage.read(key: _sessionStorageKey);
+      _memorySessionToken = (token ?? '').trim();
+      if (_memorySessionToken!.isEmpty) return null;
+      return _memorySessionToken;
+    } catch (_) {
+      return _memorySessionToken;
+    }
+  }
+
+  static Future<void> setSessionToken(String? token) async {
+    final cleaned = (token ?? '').trim();
+    _memorySessionToken = cleaned.isEmpty ? null : cleaned;
+    try {
+      if (cleaned.isEmpty) {
+        await _secureStorage.delete(key: _sessionStorageKey);
+      } else {
+        await _secureStorage.write(key: _sessionStorageKey, value: cleaned);
+      }
+    } catch (e) {
+      debugPrint('MobileBackendService.setSessionToken: $e');
+    }
+  }
+
+  static Future<void> clearSessionToken() => setSessionToken(null);
+
+  static Future<Map<String, String>> _headers({bool withSession = true}) async {
     final headers = <String, String>{'Content-Type': 'application/json'};
     final key = Env.mobilePushApiKey.trim();
     if (key.isNotEmpty && !key.contains('YOUR_SHARED_KEY')) {
       headers['X-Mobile-Api-Key'] = key;
+    }
+    if (withSession) {
+      final session = await getSessionToken();
+      if (session != null && session.isNotEmpty) {
+        headers['Authorization'] = 'Bearer $session';
+        headers['X-Mobile-Session'] = session;
+      }
     }
     return headers;
   }
 
   static Map<String, dynamic>? _tryDecodeJsonResponse(String body) {
     final trimmed = body.trim();
+    // Empty body is not valid JSON — callers must treat null as a transport/server fault.
+    // (Previously returned {} which surfaced as the useless "Request failed (HTTP 500)".)
     if (trimmed.isEmpty) {
-      return {};
+      return null;
     }
 
     final lower = trimmed.toLowerCase();
@@ -79,6 +126,7 @@ class MobileBackendService {
     String path,
     Map<String, dynamic> body, {
     Duration? timeout,
+    bool withSession = true,
   }) async {
     if (!isConfigured) {
       return {
@@ -94,7 +142,11 @@ class MobileBackendService {
 
     try {
       final response = await http
-          .post(uri, headers: _headers(), body: jsonEncode(body))
+          .post(
+            uri,
+            headers: await _headers(withSession: withSession),
+            body: jsonEncode(body),
+          )
           .timeout(timeout ?? _defaultTimeout);
 
       final parsed = _tryDecodeJsonResponse(response.body);
@@ -107,24 +159,41 @@ class MobileBackendService {
           };
         }
 
+        if (response.body.trim().isEmpty && response.statusCode >= 500) {
+          return {
+            'ok': false,
+            'error':
+                'Server crashed (HTTP ${response.statusCode}, empty body). Redeploy missing PHP includes (curl_ssl.php / mobile_session.php) on Hostinger.',
+          };
+        }
+
         return {
           'ok': false,
-          'error': 'Invalid server response.',
+          'error': response.statusCode >= 500
+              ? 'Server error (HTTP ${response.statusCode}).'
+              : 'Invalid server response.',
         };
       }
 
       final data = parsed;
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
+        final err = data['error']?.toString().trim();
+        final msg = data['message']?.toString().trim();
         return {
+          ...data,
           'ok': false,
-          'error': data['error']?.toString() ??
-              'Request failed (HTTP ${response.statusCode}).',
+          'error': (err != null && err.isNotEmpty)
+              ? err
+              : ((msg != null && msg.isNotEmpty)
+                  ? msg
+                  : 'Request failed (HTTP ${response.statusCode}).'),
         };
       }
 
       if (data['ok'] != true) {
         return {
+          ...data,
           'ok': false,
           'error': data['error']?.toString() ?? 'Request failed.',
         };
@@ -176,6 +245,354 @@ class MobileBackendService {
     return message;
   }
 
+  static Map<String, dynamic> _stripPassword(Map<String, dynamic> user) {
+    final copy = Map<String, dynamic>.from(user);
+    copy.remove('password');
+    copy.remove('password_hash');
+    return copy;
+  }
+
+  Future<Map<String, dynamic>> login({
+    required String email,
+    required String password,
+    required String expectedRole,
+  }) async {
+    final result = await post(
+      '/api/mobile_login.php',
+      {
+        'email': email.trim().toLowerCase(),
+        'password': password,
+        'role': expectedRole.trim().toLowerCase(),
+        'platform': Platform.isAndroid
+            ? 'android'
+            : (Platform.isIOS ? 'ios' : Platform.operatingSystem),
+      },
+      withSession: false,
+      timeout: const Duration(seconds: 20),
+    );
+    if (result['ok'] == true) {
+      final token = result['session_token']?.toString() ?? '';
+      if (token.isNotEmpty) {
+        await setSessionToken(token);
+      }
+      final userRaw = result['user'];
+      if (userRaw is Map) {
+        result['user'] = _stripPassword(Map<String, dynamic>.from(userRaw));
+      }
+    }
+    return result;
+  }
+
+  Future<Map<String, dynamic>> logout() async {
+    final result = await post('/api/mobile_logout.php', {});
+    await clearSessionToken();
+    return result;
+  }
+
+  Future<Map<String, dynamic>> sessionCheck() {
+    return post('/api/mobile_session_check.php', {});
+  }
+
+  Future<Map<String, dynamic>> registerUser(Map<String, dynamic> payload) {
+    return post(
+      '/api/mobile_register_user.php',
+      payload,
+      withSession: false,
+      timeout: const Duration(seconds: 30),
+    );
+  }
+
+  Future<Map<String, dynamic>> verifyPasswordResetCode({
+    required String email,
+    required String code,
+  }) {
+    return post(
+      '/api/mobile_password_reset_verify.php',
+      {
+        'email': email.trim().toLowerCase(),
+        'code': code.trim(),
+      },
+      withSession: false,
+    );
+  }
+
+  Future<Map<String, dynamic>> updatePasswordWithResetToken({
+    required String email,
+    required String resetToken,
+    required String newPassword,
+  }) {
+    return post(
+      '/api/mobile_password_reset_update.php',
+      {
+        'email': email.trim().toLowerCase(),
+        'reset_token': resetToken,
+        'new_password': newPassword,
+      },
+      withSession: false,
+    );
+  }
+
+  Future<Map<String, dynamic>> verifyEmailCode({
+    required String code,
+    String? userId,
+  }) {
+    final body = <String, dynamic>{'code': code.trim()};
+    final id = (userId ?? '').trim();
+    if (id.isNotEmpty) body['user_id'] = id;
+    return post('/api/mobile_email_verification_verify.php', body);
+  }
+
+  Future<Map<String, dynamic>> trustDevice({
+    String? deviceKey,
+    String? platform,
+    String? label,
+  }) {
+    return post('/api/mobile_trust_device.php', {
+      if (deviceKey != null && deviceKey.isNotEmpty) 'device_key': deviceKey,
+      if (platform != null && platform.isNotEmpty) 'platform': platform,
+      if (label != null && label.isNotEmpty) 'label': label,
+    });
+  }
+
+  Future<Map<String, dynamic>> checkDeviceTrust({String? deviceKey}) {
+    return post('/api/mobile_device_trust_check.php', {
+      if (deviceKey != null && deviceKey.isNotEmpty) 'device_key': deviceKey,
+    });
+  }
+
+  Future<Map<String, dynamic>> updateProfile(Map<String, dynamic> fields) {
+    return post('/api/mobile_profile_update.php', fields);
+  }
+
+  /// Signed URL via PHP BFF (service role). Required after avatars bucket lockdown.
+  Future<Map<String, dynamic>> createSignedStorageUrl({
+    required String bucket,
+    required String path,
+    int expiresIn = 3600,
+  }) {
+    return post('/api/mobile_signed_url.php', {
+      'bucket': bucket.trim(),
+      'path': path.trim(),
+      'expires_in': expiresIn.clamp(60, 86400),
+    });
+  }
+
+  Future<Map<String, dynamic>> secureWrite(
+    String action,
+    Map<String, dynamic> payload,
+  ) {
+    return post('/api/mobile_secure_write.php', {
+      'action': action,
+      ...payload,
+    });
+  }
+
+  Future<Map<String, dynamic>> scanTicket({
+    required String ticketPayload,
+    bool dryRun = false,
+    String? scannedAtIso,
+    String? expectedEventId,
+  }) {
+    return post('/api/mobile_scan_ticket.php', {
+      'ticket_payload': ticketPayload,
+      'dry_run': dryRun,
+      if (scannedAtIso != null && scannedAtIso.trim().isNotEmpty)
+        'scanned_at': scannedAtIso.trim(),
+      if (expectedEventId != null && expectedEventId.trim().isNotEmpty)
+        'expected_event_id': expectedEventId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> selfCheckInViaEventQr({
+    required String eventQrPayload,
+  }) {
+    return post('/api/mobile_event_self_checkin.php', {
+      'event_qr_payload': eventQrPayload.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> setEventEarlyOut({
+    required String eventId,
+    String? sessionId,
+    required bool enabled,
+  }) {
+    return post('/api/mobile_event_early_out.php', {
+      'event_id': eventId.trim(),
+      'action': 'set',
+      'enabled': enabled,
+      if (sessionId != null && sessionId.trim().isNotEmpty)
+        'session_id': sessionId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> getEventEarlyOutStatus({
+    required String eventId,
+    String? sessionId,
+  }) {
+    return post('/api/mobile_event_early_out.php', {
+      'event_id': eventId.trim(),
+      'action': 'status',
+      if (sessionId != null && sessionId.trim().isNotEmpty)
+        'session_id': sessionId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> changePassword({
+    required String currentPassword,
+    required String newPassword,
+  }) {
+    return post('/api/mobile_change_password.php', {
+      'current_password': currentPassword,
+      'new_password': newPassword,
+    });
+  }
+
+  Future<Map<String, dynamic>> createEventSecure(Map<String, dynamic> payload) {
+    return post('/api/mobile_secure_write.php', {
+      'action': 'event_create',
+      'payload': payload,
+    });
+  }
+
+  Future<Map<String, dynamic>> assignAssistantSecure({
+    required String eventId,
+    required String studentId,
+    required bool allowScan,
+  }) {
+    return post('/api/mobile_secure_write.php', {
+      'action': 'assistant_assign',
+      'event_id': eventId,
+      'student_id': studentId,
+      'allow_scan': allowScan,
+    });
+  }
+
+  Future<Map<String, dynamic>> updateAssistantAccessSecure({
+    required String eventId,
+    String? assistantId,
+    String? studentId,
+    required bool allowScan,
+  }) {
+    return post('/api/mobile_secure_write.php', {
+      'action': 'assistant_update_access',
+      'event_id': eventId,
+      'allow_scan': allowScan,
+      if (assistantId != null && assistantId.isNotEmpty)
+        'assistant_id': assistantId,
+      if (studentId != null && studentId.isNotEmpty) 'student_id': studentId,
+    });
+  }
+
+  Future<Map<String, dynamic>> submitProposalReviewSecure({
+    required String eventId,
+  }) {
+    return post('/api/mobile_secure_write.php', {
+      'action': 'proposal_submit_review',
+      'event_id': eventId,
+    });
+  }
+
+  Future<Map<String, dynamic>> uploadProposalDocumentFile({
+    required String eventId,
+    required String requirementId,
+    required List<int> bytes,
+    required String fileName,
+  }) async {
+    if (!isConfigured) {
+      return {
+        'ok': false,
+        'error':
+            'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
+      };
+    }
+
+    final base = _baseUri!;
+    final uri =
+        base.replace(path: '/api/mobile_proposal_document_upload.php');
+    final request = http.MultipartRequest('POST', uri);
+
+    final key = Env.mobilePushApiKey.trim();
+    if (key.isNotEmpty && !key.contains('YOUR_SHARED_KEY')) {
+      request.headers['X-Mobile-Api-Key'] = key;
+    }
+    final session = await getSessionToken();
+    if (session != null && session.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $session';
+      request.headers['X-Mobile-Session'] = session;
+    }
+
+    request.fields['event_id'] = eventId.trim();
+    request.fields['requirement_id'] = requirementId.trim();
+    request.files.add(
+      http.MultipartFile.fromBytes(
+        'proposal_file',
+        bytes,
+        filename: fileName,
+      ),
+    );
+
+    try {
+      final streamed =
+          await request.send().timeout(const Duration(seconds: 45));
+      final response = await http.Response.fromStream(streamed);
+      final parsed = _tryDecodeJsonResponse(response.body);
+      if (parsed == null) {
+        return {'ok': false, 'error': 'Invalid server response.'};
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return {
+          'ok': false,
+          'error': parsed['error']?.toString() ??
+              'Upload failed (HTTP ${response.statusCode}).',
+        };
+      }
+      if (parsed['ok'] != true) {
+        return {
+          'ok': false,
+          'error': parsed['error']?.toString() ?? 'Upload failed.',
+        };
+      }
+      return parsed;
+    } catch (e) {
+      return {
+        'ok': false,
+        'error': normalizeTransportError(e.toString()),
+      };
+    }
+  }
+
+  Future<Map<String, dynamic>> getMyTicketsSecure() {
+    return post('/api/mobile_my_tickets.php', {}, timeout: _registrationTimeout);
+  }
+
+  Future<Map<String, dynamic>> getEventRosterSecure({
+    required String eventId,
+    required String type,
+  }) {
+    return post(
+      '/api/mobile_event_roster.php',
+      {
+        'event_id': eventId.trim(),
+        'type': type.trim(),
+      },
+      timeout: _registrationTimeout,
+    );
+  }
+
+  Future<Map<String, dynamic>> secureRead({
+    required String table,
+    String select = '*',
+    Map<String, dynamic>? filters,
+    int limit = 100,
+  }) {
+    return post('/api/mobile_secure_read.php', {
+      'table': table,
+      'select': select,
+      'filters': filters ?? {},
+      'limit': limit,
+    });
+  }
+
   Future<Map<String, dynamic>> sendEmailVerificationCode({
     required String userId,
     required String email,
@@ -200,6 +617,7 @@ class MobileBackendService {
       {
         'email': email.trim().toLowerCase(),
       },
+      withSession: false,
       timeout: _emailTimeout,
     );
   }
@@ -282,9 +700,10 @@ class MobileBackendService {
     required String eventId,
     required String requirementId,
     required String userId,
-    required List<int> bytes,
     required String fileName,
     required String mimeType,
+    List<int>? bytes,
+    String? filePath,
   }) async {
     if (!isConfigured) {
       return {
@@ -294,28 +713,53 @@ class MobileBackendService {
       };
     }
 
+    final path = (filePath ?? '').trim();
+    final hasPath = path.isNotEmpty;
+    final hasBytes = bytes != null && bytes.isNotEmpty;
+    if (!hasPath && !hasBytes) {
+      return {'ok': false, 'error': 'No file selected.'};
+    }
+
     final base = _baseUri!;
-    final uri = base.replace(path: '/api/mobile_student_requirement_document_upload.php');
+    final uri =
+        base.replace(path: '/api/mobile_student_requirement_document_upload.php');
     final request = http.MultipartRequest('POST', uri);
 
     final key = Env.mobilePushApiKey.trim();
     if (key.isNotEmpty && !key.contains('YOUR_SHARED_KEY')) {
       request.headers['X-Mobile-Api-Key'] = key;
     }
+    final session = await getSessionToken();
+    if (session != null && session.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $session';
+      request.headers['X-Mobile-Session'] = session;
+    }
 
     request.fields['event_id'] = eventId.trim();
     request.fields['requirement_id'] = requirementId.trim();
     request.fields['user_id'] = userId.trim();
-    request.files.add(
-      http.MultipartFile.fromBytes(
-        'student_file',
-        bytes,
-        filename: fileName,
-      ),
-    );
+
+    // Prefer streaming from disk — avoids loading full PDFs into RAM on low-end phones.
+    if (hasPath) {
+      request.files.add(
+        await http.MultipartFile.fromPath(
+          'student_file',
+          path,
+          filename: fileName,
+        ),
+      );
+    } else {
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'student_file',
+          bytes!,
+          filename: fileName,
+        ),
+      );
+    }
 
     try {
-      final streamed = await request.send().timeout(const Duration(seconds: 45));
+      final streamed = await request.send().timeout(const Duration(seconds: 90));
       final response = await http.Response.fromStream(streamed);
       final parsed = _tryDecodeJsonResponse(response.body);
       if (parsed == null) {

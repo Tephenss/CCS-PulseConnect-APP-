@@ -56,6 +56,7 @@ class OfflineBackupService {
         key.startsWith('app_cache_') ||
         key.startsWith('avatar_cache_') ||
         key.startsWith('email_verification_') ||
+        key.startsWith('email_verify_cooldown_until_') ||
         key.startsWith('notification_') ||
         key.startsWith('push_') ||
         key.startsWith('scanner_') ||

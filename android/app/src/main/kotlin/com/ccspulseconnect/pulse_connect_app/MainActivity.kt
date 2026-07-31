@@ -1,8 +1,10 @@
 package com.ccspulseconnect.pulse_connect_app
 
 import android.app.Activity
+import android.content.ComponentCallbacks2
 import android.content.ContentUris
 import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
@@ -16,6 +18,7 @@ import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.Executors
 
 class MainActivity : FlutterActivity() {
     companion object {
@@ -24,10 +27,13 @@ class MainActivity : FlutterActivity() {
         private const val AUTO_BACKUP_FOLDER = "PulseConnect"
         private const val REQUEST_PICK_DOCUMENT = 0x5043 // 'PC'
         private const val DEFAULT_MAX_BYTES = 15L * 1024L * 1024L
+        private const val DOC_PICKER_PREFS = "pulseconnect_doc_picker"
+        private const val PENDING_MAX_AGE_MS = 10L * 60L * 1000L
     }
 
     private var pendingDocumentResult: MethodChannel.Result? = null
     private var pendingMaxBytes: Long = DEFAULT_MAX_BYTES
+    private val documentCopyExecutor = Executors.newSingleThreadExecutor()
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -49,12 +55,27 @@ class MainActivity : FlutterActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "pickDocument" -> pickDocument(call, result)
+                "takePendingDocument" -> {
+                    result.success(consumePersistedDocument())
+                }
+                "clearPendingDocument" -> {
+                    clearPersistedDocument()
+                    result.success(true)
+                }
                 else -> result.notImplemented()
             }
         }
     }
 
     private fun pickDocument(call: MethodCall, result: MethodChannel.Result) {
+        // If the activity was killed while the system picker was open, a file may
+        // already be waiting in prefs — return it instead of opening again.
+        val existing = consumePersistedDocument()
+        if (existing != null) {
+            result.success(existing)
+            return
+        }
+
         if (pendingDocumentResult != null) {
             result.error("busy", "A file picker is already open.", null)
             return
@@ -65,8 +86,18 @@ class MainActivity : FlutterActivity() {
             else -> DEFAULT_MAX_BYTES
         }
         pendingDocumentResult = result
+        markPickerInProgress(true)
 
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+        // Free GPU/UI pressure before leaving the activity — Oppo low-RAM +
+        // battery saver often kills Flutter while the Documents UI is open.
+        try {
+            onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_RUNNING_MODERATE)
+        } catch (_: Exception) {
+        }
+
+        // ACTION_GET_CONTENT is lighter/more stable on ColorOS than
+        // ACTION_OPEN_DOCUMENT + createChooser (which was black-screening).
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
             putExtra(
@@ -87,8 +118,35 @@ class MainActivity : FlutterActivity() {
         try {
             startActivityForResult(intent, REQUEST_PICK_DOCUMENT)
         } catch (e: Exception) {
-            pendingDocumentResult = null
-            result.error("picker_failed", e.message ?: "Unable to open file picker.", null)
+            // Fallback to SAF OPEN_DOCUMENT if GET_CONTENT is blocked.
+            try {
+                val openDoc = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                    putExtra(
+                        Intent.EXTRA_MIME_TYPES,
+                        arrayOf(
+                            "application/pdf",
+                            "application/msword",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "image/jpeg",
+                            "image/png",
+                            "image/webp",
+                            "image/*",
+                        ),
+                    )
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                startActivityForResult(openDoc, REQUEST_PICK_DOCUMENT)
+            } catch (e2: Exception) {
+                pendingDocumentResult = null
+                markPickerInProgress(false)
+                result.error(
+                    "picker_failed",
+                    e2.message ?: e.message ?: "Unable to open file picker.",
+                    null,
+                )
+            }
         }
     }
 
@@ -100,62 +158,154 @@ class MainActivity : FlutterActivity() {
 
         val reply = pendingDocumentResult
         pendingDocumentResult = null
-        if (reply == null) {
-            super.onActivityResult(requestCode, resultCode, data)
-            return
-        }
+        markPickerInProgress(false)
 
         if (resultCode != Activity.RESULT_OK || data?.data == null) {
-            reply.success(null)
+            reply?.success(null)
             return
         }
 
-        try {
-            val uri = data.data!!
-            val displayName = queryDisplayName(uri) ?: "document"
-            val safeName = sanitizeFileName(displayName)
-            val cacheDir = File(cacheDir, "requirement_uploads").apply { mkdirs() }
-            val dest = File(cacheDir, "${System.currentTimeMillis()}_$safeName")
+        val uri = data.data!!
+        val maxBytes = pendingMaxBytes
 
-            contentResolver.openInputStream(uri)?.use { input ->
-                dest.outputStream().use { output ->
-                    val buffer = ByteArray(64 * 1024)
-                    var total = 0L
-                    while (true) {
-                        val read = input.read(buffer)
-                        if (read <= 0) break
-                        total += read
-                        if (total > pendingMaxBytes) {
-                            dest.delete()
-                            reply.error(
-                                "too_large",
-                                "File is too large. Max 15 MB.",
-                                null,
-                            )
-                            return
+        // Copy off the UI thread — large PDFs on low-RAM phones otherwise freeze /
+        // black-screen the activity before Flutter can resume.
+        documentCopyExecutor.execute {
+            try {
+                val payload = copyUriToCache(uri, maxBytes)
+                persistDocument(payload)
+                runOnUiThread {
+                    // Prefer live MethodChannel reply; if the engine died, Dart will
+                    // call takePendingDocument on resume.
+                    if (reply != null) {
+                        try {
+                            reply.success(payload)
+                            clearPersistedDocument()
+                        } catch (_: Exception) {
+                            // Keep persisted payload for takePendingDocument.
                         }
-                        output.write(buffer, 0, read)
                     }
-                    output.flush()
                 }
-            } ?: throw IOException("Unable to open selected file.")
-
-            reply.success(
-                hashMapOf(
-                    "path" to dest.absolutePath,
-                    "name" to safeName,
-                    "size" to dest.length(),
-                ),
-            )
-        } catch (e: Exception) {
-            reply.error("copy_failed", e.message ?: "Unable to read selected file.", null)
+            } catch (e: Exception) {
+                runOnUiThread {
+                    if (reply != null) {
+                        reply.error(
+                            if (e.message?.contains("too large", ignoreCase = true) == true) {
+                                "too_large"
+                            } else {
+                                "copy_failed"
+                            },
+                            e.message ?: "Unable to read selected file.",
+                            null,
+                        )
+                    }
+                }
+            }
         }
+    }
+
+    private fun copyUriToCache(uri: Uri, maxBytes: Long): HashMap<String, Any> {
+        val displayName = queryDisplayName(uri) ?: "document"
+        val safeName = sanitizeFileName(displayName)
+        val cacheDir = File(cacheDir, "requirement_uploads").apply { mkdirs() }
+        // Keep only a few recent picks to avoid filling cache on low storage.
+        trimCacheDir(cacheDir, keepNewest = 3)
+        val dest = File(cacheDir, "${System.currentTimeMillis()}_$safeName")
+
+        contentResolver.openInputStream(uri)?.use { input ->
+            dest.outputStream().use { output ->
+                val buffer = ByteArray(32 * 1024)
+                var total = 0L
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read <= 0) break
+                    total += read
+                    if (total > maxBytes) {
+                        dest.delete()
+                        throw IOException("File is too large. Max 15 MB.")
+                    }
+                    output.write(buffer, 0, read)
+                }
+                output.flush()
+            }
+        } ?: throw IOException("Unable to open selected file.")
+
+        if (!dest.exists() || dest.length() <= 0L) {
+            dest.delete()
+            throw IOException("Picked file is empty.")
+        }
+
+        return hashMapOf(
+            "path" to dest.absolutePath,
+            "name" to safeName,
+            "size" to dest.length(),
+        )
+    }
+
+    private fun trimCacheDir(dir: File, keepNewest: Int) {
+        val files = dir.listFiles()?.sortedByDescending { it.lastModified() } ?: return
+        for (i in keepNewest until files.size) {
+            files[i].delete()
+        }
+    }
+
+    private fun persistDocument(payload: Map<String, Any>) {
+        val prefs = getSharedPreferences(DOC_PICKER_PREFS, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString("path", payload["path"]?.toString() ?: "")
+            .putString("name", payload["name"]?.toString() ?: "")
+            .putLong("size", (payload["size"] as? Number)?.toLong() ?: 0L)
+            .putLong("ts", System.currentTimeMillis())
+            .putBoolean("in_progress", false)
+            .apply()
+    }
+
+    private fun consumePersistedDocument(): HashMap<String, Any>? {
+        val prefs = getSharedPreferences(DOC_PICKER_PREFS, Context.MODE_PRIVATE)
+        val path = prefs.getString("path", null)?.trim().orEmpty()
+        val ts = prefs.getLong("ts", 0L)
+        if (path.isEmpty()) return null
+        if (ts > 0L && System.currentTimeMillis() - ts > PENDING_MAX_AGE_MS) {
+            clearPersistedDocument()
+            File(path).delete()
+            return null
+        }
+        val file = File(path)
+        if (!file.exists() || file.length() <= 0L) {
+            clearPersistedDocument()
+            return null
+        }
+        val name = prefs.getString("name", null)?.trim().orEmpty()
+        val size = prefs.getLong("size", file.length())
+        clearPersistedDocument()
+        return hashMapOf(
+            "path" to path,
+            "name" to (if (name.isNotEmpty()) name else file.name),
+            "size" to size,
+        )
+    }
+
+    private fun clearPersistedDocument() {
+        getSharedPreferences(DOC_PICKER_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove("path")
+            .remove("name")
+            .remove("size")
+            .remove("ts")
+            .apply()
+    }
+
+    private fun markPickerInProgress(inProgress: Boolean) {
+        getSharedPreferences(DOC_PICKER_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean("in_progress", inProgress)
+            .apply()
     }
 
     private fun queryDisplayName(uri: Uri): String? {
         var cursor: Cursor? = null
         return try {
-            cursor = contentResolver.query(uri, null, null, null, null)
+            cursor = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
             if (cursor != null && cursor.moveToFirst()) {
                 val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (index >= 0) cursor.getString(index) else null

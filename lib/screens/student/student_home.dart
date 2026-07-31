@@ -13,6 +13,7 @@ import 'student_scan.dart';
 import '../welcome_screen.dart';
 import '../../services/notification_service.dart';
 import '../../services/event_live_service.dart';
+import '../../utils/app_page_routes.dart';
 import '../../services/offline_backup_service.dart';
 import '../../services/offline_sync_service.dart';
 import '../../widgets/notifications_modal.dart';
@@ -20,6 +21,7 @@ import '../../widgets/animated_greeting_text.dart';
 import '../../widgets/card_swap_widget.dart';
 import '../../widgets/shiny_text.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/pulseconnect_splash_screen.dart';
 import '../../widgets/safe_circle_avatar.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/course_theme_utils.dart';
@@ -31,7 +33,8 @@ class StudentHome extends StatefulWidget {
   State<StudentHome> createState() => _StudentHomeState();
 }
 
-class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
+class _StudentHomeState extends State<StudentHome>
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   final _authService = AuthService();
   final Connectivity _connectivity = Connectivity();
   final _eventService = EventService();
@@ -42,6 +45,10 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   List<Map<String, dynamic>> _upcomingEvents = [];
   List<Map<String, dynamic>> _calendarEvents = [];
   int _currentIndex = 0;
+  StudentScanMode? _activeScanMode;
+  bool _scanMenuOpen = false;
+  late final AnimationController _scanMenuController;
+  late final Animation<double> _scanMenuAnimation;
   bool _isLoading = true;
   int _unreadCount = 0;
   bool _isOpeningNotifications = false;
@@ -91,11 +98,78 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
       unawaited(_refreshHomeLive(reason));
     });
     _homeLiveFallbackTimer = Timer.periodic(
-      const Duration(seconds: 40),
+      const Duration(seconds: 30),
       (_) => unawaited(_refreshHomeLive('fallback')),
     );
     _loadData();
     _subscribeToNotifications();
+    _scanMenuController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 380),
+    );
+    _scanMenuAnimation = CurvedAnimation(
+      parent: _scanMenuController,
+      curve: Curves.elasticOut,
+      reverseCurve: Curves.easeInBack,
+    );
+  }
+
+  void _toggleScanMenu() {
+    final opening = !_scanMenuOpen;
+    setState(() => _scanMenuOpen = opening);
+    if (opening) {
+      _scanMenuController.forward();
+    } else {
+      _scanMenuController.reverse();
+    }
+  }
+
+  void _closeScanMenu({bool animated = true}) {
+    if (!_scanMenuOpen) return;
+    setState(() => _scanMenuOpen = false);
+    if (animated) {
+      _scanMenuController.reverse();
+    } else {
+      _scanMenuController.value = 0;
+    }
+  }
+
+  void _onQrFabTap() {
+    if (_currentIndex == 2 && _activeScanMode != null) {
+      _switchScanMode();
+      return;
+    }
+    if (_scanMenuOpen) {
+      _closeScanMenu();
+      return;
+    }
+    _toggleScanMenu();
+  }
+
+  void _switchScanMode() {
+    if (_activeScanMode == null) return;
+    setState(() {
+      _activeScanMode = _activeScanMode == StudentScanMode.assist
+          ? StudentScanMode.takeAttendance
+          : StudentScanMode.assist;
+    });
+  }
+
+  void _openScanWithMode(StudentScanMode mode) {
+    _closeScanMenu();
+    setState(() {
+      _activeScanMode = mode;
+      _currentIndex = 2;
+    });
+  }
+
+  void _closeScanner() {
+    setState(() {
+      _currentIndex = 0;
+      _activeScanMode = null;
+      _scanMenuOpen = false;
+    });
+    _scanMenuController.value = 0;
   }
 
   Future<void> _refreshHomeLive(String reason) async {
@@ -133,14 +207,15 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
       yearLevel: yearLevel,
       courseCode: courseCode,
       specialization: specialization,
-      // Timer/offline pulses respect cache; live signals force fresh only online.
-      forceFresh: !offline && !offlinePulse && reason != 'fallback',
+      // Always force on live/fallback so publish shows without leaving the page.
+      // Catalog-only warm cache was hiding newly published events.
+      forceFresh: !offline && !offlinePulse,
     );
     final calendarEvents = await _eventService.getCalendarEvents(
       yearLevel: yearLevel,
       courseCode: courseCode,
       specialization: specialization,
-      forceFresh: !offline && !offlinePulse && reason != 'fallback',
+      forceFresh: !offline && !offlinePulse,
     );
 
     if (!mounted) return;
@@ -460,6 +535,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
     _scannerAccessChannel?.unsubscribe();
     _headerPageController.dispose();
     _absenceReasonController.dispose();
+    _scanMenuController.dispose();
     super.dispose();
   }
 
@@ -684,8 +760,12 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                     _buildHomeContent(),
                     const StudentEvents(),
                     // Keep scan out of the keep-alive stack until opened.
-                    _currentIndex == 2
-                        ? const StudentScanScreen()
+                    _currentIndex == 2 && _activeScanMode != null
+                        ? StudentScanScreen(
+                            key: ValueKey(_activeScanMode),
+                            initialMode: _activeScanMode!,
+                            onClose: _closeScanner,
+                          )
                         : const SizedBox.shrink(),
                     const StudentTickets(),
                     StudentProfile(user: _user, onUpdate: _loadData),
@@ -696,6 +776,14 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
       canPop: false,
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) return;
+        if (_scanMenuOpen) {
+          _closeScanMenu();
+          return;
+        }
+        if (_currentIndex == 2) {
+          _closeScanner();
+          return;
+        }
         if (_currentIndex != 0) {
           setState(() => _currentIndex = 0);
         }
@@ -708,8 +796,31 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
           clipBehavior: Clip.hardEdge,
           children: [
             _isLoading
-                ? const Center(child: PulseConnectLoader())
+                ? const PulseConnectSplashScreen(
+                    statusMessage: 'Loading student portal & events...',
+                  )
                 : tabBody,
+
+            if (_scanMenuOpen)
+              Positioned.fill(
+                child: GestureDetector(
+                  onTap: _closeScanMenu,
+                  behavior: HitTestBehavior.opaque,
+                  child: FadeTransition(
+                    opacity: _scanMenuAnimation,
+                    child: Container(
+                      color: Colors.black.withValues(alpha: 0.32),
+                    ),
+                  ),
+                ),
+              ),
+
+            if (!_isLoading && !needsSection && !needsAbsenceReason && _currentIndex != 2)
+              Positioned(
+                bottom: 94,
+                right: 20,
+                child: _buildScanFloatingMenu(),
+              ),
 
             // New Floating Navigation Bar (Matches user design)
             if (!_isLoading && !needsSection && !needsAbsenceReason)
@@ -751,23 +862,58 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
                     const SizedBox(width: 12),
                     // Separate QR Button
                     GestureDetector(
-                      onTap: () => setState(() => _currentIndex = 2),
-                      child: Container(
-                        width: 58,
-                        height: 58,
-                        decoration: BoxDecoration(
-                          color: _studentChrome(context),
-                          shape: BoxShape.circle,
-                          boxShadow: [
-                            BoxShadow(
-                              color: _studentChrome(context).withValues(alpha: 0.4),
-                              blurRadius: 20,
-                              spreadRadius: 1,
-                              offset: const Offset(0, 8),
+                      onTap: _onQrFabTap,
+                      child: AnimatedBuilder(
+                        animation: _scanMenuController,
+                        builder: (context, child) {
+                          final t = _scanMenuController.value.clamp(0.0, 1.0);
+                          return AnimatedContainer(
+                            duration: const Duration(milliseconds: 280),
+                            width: 58,
+                            height: 58,
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  _studentChrome(context),
+                                  _studentPrimary(context),
+                                ],
+                              ),
+                              shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: _studentChrome(context)
+                                      .withValues(alpha: 0.5),
+                                  blurRadius: 20 + (6 * t),
+                                  spreadRadius: 1 + (2 * t),
+                                  offset: const Offset(0, 8),
+                                ),
+                              ],
                             ),
-                          ],
+                            child: child,
+                          );
+                        },
+                        child: AnimatedRotation(
+                          turns: _scanMenuOpen ? 0.125 : 0,
+                          duration: const Duration(milliseconds: 300),
+                          curve: Curves.easeInOutBack,
+                          child: AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 220),
+                            transitionBuilder: (child, anim) => ScaleTransition(
+                              scale: anim,
+                              child: FadeTransition(opacity: anim, child: child),
+                            ),
+                            child: Icon(
+                              _scanMenuOpen
+                                  ? Icons.close_rounded
+                                  : Icons.qr_code_scanner_rounded,
+                              key: ValueKey(_scanMenuOpen),
+                              color: Colors.white,
+                              size: 26,
+                            ),
+                          ),
                         ),
-                        child: const Icon(Icons.qr_code_scanner_rounded, color: Colors.white, size: 28),
                       ),
                     ),
                   ],
@@ -1228,7 +1374,15 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   Widget _buildNavItem(IconData icon, String label, int index) {
     final isActive = _currentIndex == index;
     return GestureDetector(
-      onTap: () => setState(() => _currentIndex = index),
+      onTap: () {
+        _closeScanMenu();
+        final switchedToTickets = index == 3 && _currentIndex != 3;
+        setState(() => _currentIndex = index);
+        // IndexedStack keeps Tickets alive — force a fresh pull when opened.
+        if (switchedToTickets) {
+          EventLiveService.instance.pulseTicketsUi();
+        }
+      },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 300),
         curve: Curves.easeInOut,
@@ -1268,6 +1422,173 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
   }
 
   // Removed _buildScanItem as it's replaced by the detached FAB in the Stack
+
+  Widget _buildScanFloatingMenu() {
+    return AnimatedBuilder(
+      animation: _scanMenuController,
+      builder: (context, child) {
+        if (_scanMenuController.value == 0 && !_scanMenuOpen) {
+          return const SizedBox.shrink();
+        }
+        // Clamp for display purposes (elasticOut can exceed 1.0)
+        final raw = _scanMenuController.value.clamp(0.0, 1.0);
+        return Opacity(
+          opacity: raw,
+          child: child,
+        );
+      },
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          _buildScanMenuOption(
+            icon: Icons.groups_rounded,
+            title: 'Assist Attendance',
+            subtitle: 'Help mark peers present',
+            iconColor: _studentChrome(context),
+            iconBg: _studentSoft(context).withValues(alpha: 0.18),
+            mode: StudentScanMode.assist,
+            staggerDelay: 0.18,
+          ),
+          const SizedBox(height: 10),
+          _buildScanMenuOption(
+            icon: Icons.qr_code_scanner_rounded,
+            title: 'Take Attendance',
+            subtitle: 'Scan your QR code now',
+            iconColor: _studentChrome(context),
+            iconBg: _studentSoft(context).withValues(alpha: 0.18),
+            mode: StudentScanMode.takeAttendance,
+            staggerDelay: 0.0,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildScanMenuOption({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Color iconColor,
+    required Color iconBg,
+    required StudentScanMode mode,
+    required double staggerDelay,
+  }) {
+    return AnimatedBuilder(
+      animation: _scanMenuController,
+      builder: (context, child) {
+        final raw = _scanMenuController.value;
+        final interval = Interval(staggerDelay, 1.0, curve: Curves.easeOutBack);
+        final t = interval.transform(raw.clamp(0.0, 1.0));
+        return Opacity(
+          opacity: t.clamp(0.0, 1.0),
+          child: Transform.translate(
+            offset: Offset(32 * (1 - t), 0),
+            child: Transform.scale(
+              scale: 0.82 + (0.18 * t),
+              alignment: Alignment.centerRight,
+              child: child,
+            ),
+          ),
+        );
+      },
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () => _openScanWithMode(mode),
+          borderRadius: BorderRadius.circular(20),
+          splashColor: iconColor.withValues(alpha: 0.12),
+          highlightColor: iconColor.withValues(alpha: 0.06),
+          child: Container(
+            width: 240,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: iconColor.withValues(alpha: 0.18),
+                width: 1.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: iconColor.withValues(alpha: 0.18),
+                  blurRadius: 28,
+                  spreadRadius: 0,
+                  offset: const Offset(0, 8),
+                ),
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.06),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 42,
+                  height: 42,
+                  decoration: BoxDecoration(
+                    color: iconBg,
+                    borderRadius: BorderRadius.circular(13),
+                    boxShadow: [
+                      BoxShadow(
+                        color: iconColor.withValues(alpha: 0.20),
+                        blurRadius: 8,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  child: Icon(icon, color: iconColor, size: 22),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 13.5,
+                          color: Color(0xFF111827),
+                          height: 1.2,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w500,
+                          fontSize: 11,
+                          color: _studentChrome(context).withValues(alpha: 0.55),
+                          height: 1.2,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  width: 26,
+                  height: 26,
+                  decoration: BoxDecoration(
+                    color: iconColor.withValues(alpha: 0.10),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.arrow_forward_ios_rounded,
+                    color: iconColor,
+                    size: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _buildHomeContent() {
     final firstName = _user?['first_name'] as String? ?? 'Student';
@@ -1878,7 +2199,7 @@ class _StudentHomeState extends State<StudentHome> with WidgetsBindingObserver {
         onTap: () {
           Navigator.push(
             context,
-            MaterialPageRoute(
+            AppPageRoute(
               builder: (_) => StudentEventDetails(
                 eventId: event['id'].toString(),
                 initialEvent: event,

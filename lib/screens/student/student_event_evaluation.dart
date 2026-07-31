@@ -142,8 +142,18 @@ class _StudentEventEvaluationScreenState
     setState(() => _isLoading = false);
 
     if (result['ok'] == true) {
+      final cert = result['certificate'];
+      final issued = cert is Map && (cert['issued'] is num)
+          ? (cert['issued'] as num).toInt()
+          : int.tryParse(cert is Map ? '${cert['issued']}' : '') ?? 0;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Evaluation submitted successfully.')),
+        SnackBar(
+          content: Text(
+            issued > 0
+                ? 'Evaluation submitted. Your certificate is ready.'
+                : 'Evaluation submitted successfully.',
+          ),
+        ),
       );
       Navigator.pop(context, true);
       return;
