@@ -22,7 +22,7 @@ class TeacherEventsTab extends StatefulWidget {
 }
 
 class _TeacherEventsTabState extends State<TeacherEventsTab>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final _appCacheService = AppCacheService();
   final _eventService = EventService();
   final _authService = AuthService();
@@ -32,34 +32,62 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
   bool _isLoading = true;
   bool _usingCachedEvents = false;
   StreamSubscription<String>? _eventLiveSubscription;
-  Timer? _fallbackRefreshTimer;
   bool _isRefreshingEvents = false;
+
+  bool _isTeacherEventsLiveReason(String reason) {
+    final offlinePulse = reason.startsWith('offline:');
+    final core = offlinePulse ? reason.substring('offline:'.length) : reason;
+    return core == 'events' ||
+        core.startsWith('events') ||
+        core == 'teacher_assignments' ||
+        core.startsWith('teacher_assignments') ||
+        core.startsWith('push');
+  }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _tabController = TabController(length: 3, vsync: this);
-    _eventLiveSubscription = EventLiveService.instance.changes.listen((_) {
-      if (!mounted || _isRefreshingEvents) return;
-      unawaited(_loadEvents(forceFresh: true));
+    _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
+      if (!mounted) return;
+      if (!_isTeacherEventsLiveReason(reason)) return;
+      final offlinePulse = reason.startsWith('offline:');
+      // Live delete/archive/publish → forceFresh; offline soft-signal keeps cache.
+      unawaited(_loadEvents(forceFresh: !offlinePulse));
     });
-    _fallbackRefreshTimer = Timer.periodic(
-      const Duration(seconds: 60),
-      (_) => unawaited(_loadEvents(forceFresh: false)),
-    );
-    _loadEvents();
+    // Cache-first init, then online catch-up so deletes don't stick after reopen.
+    unawaited(_bootstrapEvents());
+  }
+
+  Future<void> _bootstrapEvents() async {
+    await _loadEvents();
+    if (!mounted) return;
+    final connectivity = await _connectivity.checkConnectivity();
+    final offline = connectivity.isEmpty ||
+        connectivity.every((result) => result == ConnectivityResult.none);
+    if (!offline) {
+      await _loadEvents(forceFresh: true);
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _eventLiveSubscription?.cancel();
-    _fallbackRefreshTimer?.cancel();
     _tabController.dispose();
     super.dispose();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_loadEvents(forceFresh: true));
+    }
+  }
+
   Future<void> _loadEvents({bool forceFresh = false}) async {
-    if (_isRefreshingEvents) return;
+    if (_isRefreshingEvents && !forceFresh) return;
     _isRefreshingEvents = true;
     final hadCachedEvents = _events.isNotEmpty;
     if (!hadCachedEvents && mounted) {
@@ -91,6 +119,8 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
             teacherId,
             forceFresh: forceFresh,
           );
+          // Soft load only: empty network may be a blip — keep warm disk ≤24h.
+          // Force refresh (pull) must clear deleted/archived events, including empty.
           if (fetched.isEmpty && !forceFresh) {
             final cached = await _appCacheService.loadJsonList(cacheKey);
             final lastUpdated = await _appCacheService.lastUpdatedAt(cacheKey);
@@ -108,9 +138,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
             }
           } else {
             events = fetched;
-            if (events.isNotEmpty) {
-              await _appCacheService.saveJsonList(cacheKey, events);
-            }
+            await _appCacheService.saveJsonList(cacheKey, events);
           }
         }
       }
@@ -155,7 +183,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
                       ),
                     );
                     if (refresh == true) {
-                      _loadEvents();
+                      _loadEvents(forceFresh: true);
                     }
                   },
                   child: Container(
@@ -291,7 +319,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
     });
 
     return RefreshIndicator(
-      onRefresh: _loadEvents,
+      onRefresh: () => _loadEvents(forceFresh: true),
       color: TeacherThemeUtils.primary,
       child: filteredEvents.isEmpty
           ? ListView(
@@ -448,7 +476,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
           ),
         );
         if (refresh == true) {
-          _loadEvents();
+          _loadEvents(forceFresh: true);
         }
       },
       child: Container(

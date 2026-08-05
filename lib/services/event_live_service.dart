@@ -57,10 +57,13 @@ class EventLiveService {
       // flaky connectivity made tickets/events flash empty offline.
       AppCacheService().cancelInFlightPrefix('fetch:');
       // Archive/delete/publish must drop list caches so empty fetches can clear UI.
+      // Await disk clear before broadcasting so listeners force-fetch cleanly.
       if (reason == 'events' ||
           reason.startsWith('events:') ||
-          reason.startsWith('push:')) {
-        EventService.invalidateEventListCache();
+          reason.startsWith('push:') ||
+          reason == 'teacher_assignments' ||
+          reason.startsWith('teacher_assignments')) {
+        await EventService.invalidateEventListCache();
         unawaited(PublicCatalogService.instance.invalidateLocal());
       }
       // New registrations/tickets must drop TTL cache or Tickets tab stays stale.
@@ -70,7 +73,10 @@ class EventLiveService {
           reason.startsWith('registrations:') ||
           reason.contains('registrations') ||
           reason.contains('tickets')) {
-        unawaited(EventService().invalidateMyTicketsCache());
+        await EventService().invalidateMyTicketsCache();
+      }
+      if (reason == 'certificates' || reason.startsWith('certificates')) {
+        await EventService.invalidateCertificatesCache();
       }
       // Requirement review status lives outside list cache — clear it on live pulses.
       if (reason.contains('student_requirements') ||
@@ -80,7 +86,17 @@ class EventLiveService {
         EventService().clearStudentRequirementsCache();
       }
       NotificationService().invalidateLiveCaches();
-      unawaited(NotificationService().refresh(force: true));
+      // Avoid forcing a full inbox fetch on every catalog pulse (attendance,
+      // assistants, etc.). Full refresh only for push / inbox-relevant reasons;
+      // the existing 90s soft poll covers locked notification tables.
+      final inboxRelevant = reason.startsWith('push:') ||
+          reason == 'registration_access' ||
+          reason.startsWith('registration_access') ||
+          reason.contains('student_requirements') ||
+          reason.contains('student_submissions');
+      if (inboxRelevant) {
+        unawaited(NotificationService().refresh(force: true));
+      }
       if (!_controller.isClosed) {
         _controller.add(reason);
       }

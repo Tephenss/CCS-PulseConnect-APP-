@@ -806,6 +806,14 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             _event = {
               ...?_event,
               ...event,
+              if (sessions.isNotEmpty) ...{
+                'event_mode': 'seminar_based',
+                'uses_sessions': true,
+                'event_structure': sessions.length > 1
+                    ? 'two_seminars'
+                    : 'one_seminar',
+                'session_count': sessions.length,
+              },
             };
           }
           _eventSessions = sessions;

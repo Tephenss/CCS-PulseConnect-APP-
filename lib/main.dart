@@ -85,15 +85,11 @@ void main() async {
         ? 'CS'
         : 'IT';
 
-    // Daily OTP reset (12:00 AM Asia/Manila) OR known-untrusted IP:
-    // force logout so the user must re-login + verify before entering home.
-    // If public IP cannot be resolved yet, keep the session (avoid false logout).
-    // Note: mid-session enforce (resume/idle) is daily-only — see
-    // [_enforceDailyVerificationLogout] — so IP churn won't kick open screens.
-    if (await authService.requiresEmailVerification(
-      userData,
-      unknownTrustRequiresVerification: false,
-    )) {
+    // Daily OTP reset (12:00 AM Asia/Manila): force logout so the user must
+    // re-login + verify before entering home.
+    // Install trust miss is handled at the login gate (not here) so a brief
+    // API blip / first-boot does not wipe a still-valid session.
+    if (AuthService.requiresDailyEmailVerification(userData)) {
       await authService.logout();
       isLoggedIn = false;
       role = 'student';

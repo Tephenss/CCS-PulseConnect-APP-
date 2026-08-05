@@ -21,6 +21,7 @@ class _StudentEventEvaluationScreenState
     extends State<StudentEventEvaluationScreen> {
   final EventService _eventService = EventService();
   bool _isLoading = true;
+  bool _isSubmitting = false;
   Map<String, dynamic> _bundle = {};
   List<Map<String, dynamic>> _sections = [];
   final Map<String, dynamic> _answers = {};
@@ -131,7 +132,12 @@ class _StudentEventEvaluationScreenState
       return;
     }
 
-    setState(() => _isLoading = true);
+    // Prevent double-tap from claiming two FIFO codes for one student.
+    if (_isSubmitting) return;
+    setState(() {
+      _isSubmitting = true;
+      _isLoading = true;
+    });
     final result = await _eventService.submitEvaluation(
       eventId: widget.eventId,
       studentId: widget.studentId,
@@ -139,21 +145,42 @@ class _StudentEventEvaluationScreenState
     );
 
     if (!mounted) return;
-    setState(() => _isLoading = false);
+    setState(() {
+      _isLoading = false;
+      _isSubmitting = false;
+    });
 
     if (result['ok'] == true) {
       final cert = result['certificate'];
       final issued = cert is Map && (cert['issued'] is num)
           ? (cert['issued'] as num).toInt()
           : int.tryParse(cert is Map ? '${cert['issued']}' : '') ?? 0;
+      final skipped = cert is Map ? cert['skipped']?.toString() ?? '' : '';
+      // ignore: avoid_print
+      debugPrint('[eval] submit ok issued=$issued skipped=$skipped');
+      // Eval answers already saved — never surface cert pool as a hard failure.
+      final String message;
+      if (issued > 0 || skipped == 'already_issued') {
+        message =
+            'Evaluation submitted. Your certificate is ready — open My Certificates.';
+      } else if (skipped == 'checkout_required') {
+        message =
+            'Evaluation submitted. Time-out is still required before a certificate can be issued.';
+      } else if (skipped == 'eval_incomplete') {
+        message =
+            'Evaluation submitted. Finish all required questions to receive your certificate.';
+      } else if (skipped == 'no_pool_codes') {
+        message =
+            'Evaluation submitted. Certificate codes are not ready yet — ask your teacher to link/import codes and Send.';
+      } else if (skipped == 'insert_failed') {
+        message =
+            'Evaluation submitted. Certificate save failed — ask your teacher to resend from Event Details.';
+      } else {
+        message =
+            'Evaluation submitted successfully.';
+      }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            issued > 0
-                ? 'Evaluation submitted. Your certificate is ready.'
-                : 'Evaluation submitted successfully.',
-          ),
-        ),
+        SnackBar(content: Text(message)),
       );
       Navigator.pop(context, true);
       return;

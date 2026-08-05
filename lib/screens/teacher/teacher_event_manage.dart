@@ -1986,38 +1986,20 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     if (eventId.isEmpty) return;
 
     try {
-      if (!_isSeminarBasedEvent()) {
-        final res = await _mobileBackend.getEventEarlyOutStatus(eventId: eventId);
-        if (!mounted) return;
-        final eo = res['early_out'];
-        final map = eo is Map ? Map<String, dynamic>.from(eo) : <String, dynamic>{};
-        setState(() {
-          _earlyOutEnabled = map['enabled'] == true;
-          _earlyOutExpiresAt = map['expires_at']?.toString();
-          _earlyOutCanEnable = map.containsKey('can_enable')
-              ? map['can_enable'] == true
-              : null;
-          _earlyOutGraceEndsAt = map['grace_ends_at']?.toString();
-        });
-      } else {
-        final next = <String, Map<String, dynamic>>{};
-        for (final session in _eventSessions) {
-          final sid = (session['id']?.toString() ?? '').trim();
-          if (sid.isEmpty) continue;
-          final res = await _mobileBackend.getEventEarlyOutStatus(
-            eventId: eventId,
-            sessionId: sid,
-          );
-          final eo = res['early_out'];
-          next[sid] = eo is Map
-              ? Map<String, dynamic>.from(eo)
-              : <String, dynamic>{'enabled': false};
-        }
-        if (!mounted) return;
-        setState(() => _sessionEarlyOut
-          ..clear()
-          ..addAll(next));
-      }
+      // Seminar events: omit session_id — BFF auto-picks the active seminar.
+      final res = await _mobileBackend.getEventEarlyOutStatus(eventId: eventId);
+      if (!mounted) return;
+      final eo = res['early_out'];
+      final map = eo is Map ? Map<String, dynamic>.from(eo) : <String, dynamic>{};
+      setState(() {
+        _earlyOutEnabled = map['enabled'] == true;
+        _earlyOutExpiresAt = map['expires_at']?.toString();
+        _earlyOutCanEnable = map.containsKey('can_enable')
+            ? map['can_enable'] == true
+            : null;
+        _earlyOutGraceEndsAt = map['grace_ends_at']?.toString();
+        _sessionEarlyOut.clear();
+      });
     } catch (_) {
       if (!silent && mounted) {
         // Keep quiet on poll failures.
@@ -2026,43 +2008,22 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   }
 
   bool _isWithinEarlyOutSchedule({String? sessionId}) {
-    // Prefer server flag when status was fetched.
-    if (sessionId != null && sessionId.isNotEmpty) {
-      final status = _sessionEarlyOut[sessionId];
-      if (status != null && status.containsKey('can_enable')) {
-        return status['can_enable'] == true;
-      }
-    } else if (_earlyOutCanEnable != null) {
+    // Prefer server flag (auto-picked seminar for multi-seminar events).
+    if (_earlyOutCanEnable != null) {
       return _earlyOutCanEnable!;
     }
 
-    DateTime? start;
-    DateTime? end;
-    int graceMinutes = 30;
-    if (sessionId != null && sessionId.isNotEmpty) {
-      Map<String, dynamic>? session;
-      for (final s in _eventSessions) {
-        if ((s['id']?.toString() ?? '') == sessionId) {
-          session = s;
-          break;
-        }
-      }
-      start = parseStoredEventDateTime(session?['start_at']);
-      end = parseStoredEventDateTime(session?['end_at']);
-      graceMinutes = int.tryParse(
-            session?['scan_window_minutes']?.toString() ?? '',
-          ) ??
-          30;
-    } else {
-      start = parseStoredEventDateTime(_event['start_at']);
-      end = parseStoredEventDateTime(_event['end_at']);
-      graceMinutes = int.tryParse(_event['grace_time']?.toString() ?? '') ?? 30;
+    if (_isSeminarBasedEvent()) {
+      return false;
     }
+
+    final start = parseStoredEventDateTime(_event['start_at']);
+    final end = parseStoredEventDateTime(_event['end_at']);
+    var graceMinutes = int.tryParse(_event['grace_time']?.toString() ?? '') ?? 30;
     if (start == null || end == null) return false;
     graceMinutes = graceMinutes < 0 ? 0 : graceMinutes;
     final graceEnds = start.add(Duration(minutes: graceMinutes));
     final now = DateTime.now();
-    // Clickable only after grace ends, until event/seminar end.
     return !now.isBefore(graceEnds) && !now.isAfter(end);
   }
 
@@ -2080,7 +2041,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     final eventId = (_event['id']?.toString() ?? '').trim();
     if (eventId.isEmpty || _earlyOutBusy) return;
 
-    if (enabled && !_isWithinEarlyOutSchedule(sessionId: sessionId)) {
+    if (enabled && !_isWithinEarlyOutSchedule()) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -2094,9 +2055,9 @@ class _TeacherEventManageState extends State<TeacherEventManage>
 
     setState(() => _earlyOutBusy = true);
     try {
+      // Omit session_id — BFF auto-targets the active seminar when needed.
       final res = await _mobileBackend.setEventEarlyOut(
         eventId: eventId,
-        sessionId: sessionId,
         enabled: enabled,
       );
       if (!mounted) return;
@@ -2114,17 +2075,15 @@ class _TeacherEventManageState extends State<TeacherEventManage>
       }
       final eo = res['early_out'];
       final map = eo is Map ? Map<String, dynamic>.from(eo) : <String, dynamic>{};
+      _eventService.invalidateEventDetailCache(eventId);
       setState(() {
-        if (sessionId != null && sessionId.isNotEmpty) {
-          _sessionEarlyOut[sessionId] = map;
-        } else {
-          _earlyOutEnabled = map['enabled'] == true;
-          _earlyOutExpiresAt = map['expires_at']?.toString();
-          _earlyOutCanEnable = map.containsKey('can_enable')
-              ? map['can_enable'] == true
-              : null;
-          _earlyOutGraceEndsAt = map['grace_ends_at']?.toString();
-        }
+        _earlyOutEnabled = map['enabled'] == true;
+        _earlyOutExpiresAt = map['expires_at']?.toString();
+        _earlyOutCanEnable = map.containsKey('can_enable')
+            ? map['can_enable'] == true
+            : null;
+        _earlyOutGraceEndsAt = map['grace_ends_at']?.toString();
+        _sessionEarlyOut.clear();
       });
     } finally {
       if (mounted) setState(() => _earlyOutBusy = false);
@@ -2133,7 +2092,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
 
   String _earlyOutSubtitle(Map<String, dynamic>? status, {String? sessionId}) {
     final isOn = status != null && status['enabled'] == true;
-    if (!isOn && !_isWithinEarlyOutSchedule(sessionId: sessionId)) {
+    if (!isOn && !_isWithinEarlyOutSchedule()) {
       final graceRaw = (status?['grace_ends_at']?.toString() ??
               _earlyOutGraceEndsAt ??
               '')
@@ -2292,18 +2251,17 @@ class _TeacherEventManageState extends State<TeacherEventManage>
           target: _getTargetLabel(eventFor),
           graceTime: graceTime,
         ),
-        if (!isSeminarBased) ...[
-          const SizedBox(height: 12),
-          _buildEarlyOutToggleCard(
-            enabled: _earlyOutEnabled,
-            subtitle: _earlyOutSubtitle({
-              'enabled': _earlyOutEnabled,
-              'expires_at': _earlyOutExpiresAt,
-            }),
-            interactable: _earlyOutEnabled || _isWithinEarlyOutSchedule(),
-            onChanged: (v) => _setEarlyOut(enabled: v),
-          ),
-        ],
+        const SizedBox(height: 12),
+        _buildEarlyOutToggleCard(
+          enabled: _earlyOutEnabled,
+          subtitle: _earlyOutSubtitle({
+            'enabled': _earlyOutEnabled,
+            'expires_at': _earlyOutExpiresAt,
+            'grace_ends_at': _earlyOutGraceEndsAt,
+          }),
+          interactable: _earlyOutEnabled || _isWithinEarlyOutSchedule(),
+          onChanged: (v) => _setEarlyOut(enabled: v),
+        ),
         if (isSeminarBased) ...[
           const SizedBox(height: 12),
           const Text(
@@ -2432,27 +2390,6 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 Icons.schedule_rounded,
                 'Time',
                 formatTimeRange(start, end),
-              ),
-              const SizedBox(height: 12),
-              _buildEarlyOutToggleCard(
-                title: 'Early Out (this seminar)',
-                enabled: _sessionEarlyOut[session['id']?.toString() ?? '']
-                        ?['enabled'] ==
-                    true,
-                subtitle: _earlyOutSubtitle(
-                  _sessionEarlyOut[session['id']?.toString() ?? ''],
-                  sessionId: session['id']?.toString(),
-                ),
-                interactable: (_sessionEarlyOut[session['id']?.toString() ?? '']
-                            ?['enabled'] ==
-                        true) ||
-                    _isWithinEarlyOutSchedule(
-                      sessionId: session['id']?.toString(),
-                    ),
-                onChanged: (v) => _setEarlyOut(
-                  enabled: v,
-                  sessionId: session['id']?.toString(),
-                ),
               ),
             ],
           ),

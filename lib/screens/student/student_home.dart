@@ -25,6 +25,7 @@ import '../../widgets/pulseconnect_splash_screen.dart';
 import '../../widgets/safe_circle_avatar.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/course_theme_utils.dart';
+import '../../widgets/staggered_entrance.dart';
 
 class StudentHome extends StatefulWidget {
   const StudentHome({super.key});
@@ -58,10 +59,13 @@ class _StudentHomeState extends State<StudentHome>
   int _currentHeaderSlide = 0;
   StreamSubscription<int>? _unreadSubscription;
   StreamSubscription<String>? _eventLiveSubscription;
-  Timer? _homeLiveFallbackTimer;
   Timer? _absenceScopeRefreshTimer;
   RealtimeChannel? _scannerAccessChannel;
   Timer? _scannerAccessGuardTimer;
+  Timer? _deferredTabsTimer;
+  /// Delay Events/Tickets mount so home critical path is not a request storm.
+  bool _eventsTabMounted = false;
+  bool _ticketsTabMounted = false;
 
   // Section Selection Gate
   List<Map<String, dynamic>> _sections = [];
@@ -97,10 +101,6 @@ class _StudentHomeState extends State<StudentHome>
       if (!mounted) return;
       unawaited(_refreshHomeLive(reason));
     });
-    _homeLiveFallbackTimer = Timer.periodic(
-      const Duration(seconds: 30),
-      (_) => unawaited(_refreshHomeLive('fallback')),
-    );
     _loadData();
     _subscribeToNotifications();
     _scanMenuController = AnimationController(
@@ -172,6 +172,19 @@ class _StudentHomeState extends State<StudentHome>
     _scanMenuController.value = 0;
   }
 
+  bool _isHomeCatalogLiveReason(String reason) {
+    final offlinePulse = reason.startsWith('offline:');
+    final core = offlinePulse ? reason.substring('offline:'.length) : reason;
+    return core == 'events' ||
+        core.startsWith('events') ||
+        core == 'registrations' ||
+        core.startsWith('registrations') ||
+        core == 'sessions' ||
+        core.startsWith('sessions') ||
+        core.startsWith('push') ||
+        core == 'resume';
+  }
+
   Future<void> _refreshHomeLive(String reason) async {
     if (!mounted || _user == null) return;
     final userId = _user?['id']?.toString() ?? '';
@@ -181,8 +194,22 @@ class _StudentHomeState extends State<StudentHome>
       unawaited(_refreshUnreadCount());
     }
 
-    final offline = await _hasNoConnectivity();
     final offlinePulse = reason.startsWith('offline:');
+    final core = offlinePulse ? reason.substring('offline:'.length) : reason;
+    if (core == 'registrations' ||
+        core.startsWith('registrations') ||
+        core == 'registration_access' ||
+        core.startsWith('registration_access') ||
+        core == 'tickets' ||
+        core.startsWith('tickets') ||
+        core.contains('registrations') ||
+        core.contains('tickets')) {
+      unawaited(_refreshAbsenceScopesSilently());
+    }
+
+    if (!_isHomeCatalogLiveReason(reason)) return;
+
+    final offline = await _hasNoConnectivity();
 
     String? yearLevel;
     String? courseCode;
@@ -207,16 +234,10 @@ class _StudentHomeState extends State<StudentHome>
       yearLevel: yearLevel,
       courseCode: courseCode,
       specialization: specialization,
-      // Always force on live/fallback so publish shows without leaving the page.
-      // Catalog-only warm cache was hiding newly published events.
+      // Live/push/resume force network when online; offline pulses stay cache-only.
       forceFresh: !offline && !offlinePulse,
     );
-    final calendarEvents = await _eventService.getCalendarEvents(
-      yearLevel: yearLevel,
-      courseCode: courseCode,
-      specialization: specialization,
-      forceFresh: !offline && !offlinePulse,
-    );
+    final calendarEvents = List<Map<String, dynamic>>.from(activeEvents);
 
     if (!mounted) return;
     // Only keep prior cards while offline — online empty means deleted/archived.
@@ -229,14 +250,6 @@ class _StudentHomeState extends State<StudentHome>
         _calendarEvents = calendarEvents;
       }
     });
-
-    if (reason == 'registrations' ||
-        reason == 'registration_access' ||
-        reason == 'tickets' ||
-        reason.contains('registrations') ||
-        reason.contains('tickets')) {
-      unawaited(_refreshAbsenceScopesSilently());
-    }
   }
 
   void _startAbsenceScopeRefreshTicker() {
@@ -310,6 +323,7 @@ class _StudentHomeState extends State<StudentHome>
       final result = await showNotificationsModal(context);
       if (!mounted) return;
       if (result is int) {
+        _ensureTabMounted(result);
         setState(() => _currentIndex = result);
       }
       unawaited(_refreshUnreadCount());
@@ -390,7 +404,7 @@ class _StudentHomeState extends State<StudentHome>
     final effectiveForceFresh = forceFresh && !offline;
 
     unawaited(_primeOfflineReadiness(user));
-    
+
     // Initialize Realtime once user is known
     if (user != null) {
       if (userId.isNotEmpty) {
@@ -399,6 +413,14 @@ class _StudentHomeState extends State<StudentHome>
       }
     }
     _restartScannerAccessGuard(userId);
+
+    // Soft paint: if we already have cards (e.g. resume), drop splash immediately.
+    if (hadCachedEvents && mounted && _isLoading) {
+      setState(() {
+        _user = user;
+        _isLoading = false;
+      });
+    }
 
     String? yearLevel;
     String? courseCode;
@@ -421,69 +443,158 @@ class _StudentHomeState extends State<StudentHome>
     yearLevel ??= await _authService.getStudentYearLevel();
     courseCode ??= await _authService.getStudentCourseCode();
 
-    final results = await Future.wait([
-      _eventService.getActiveEvents(
-        yearLevel: yearLevel,
-        courseCode: courseCode,
-        specialization: specialization,
-        forceFresh: effectiveForceFresh,
-      ),
-      _eventService.getCalendarEvents(
-        yearLevel: yearLevel,
-        courseCode: courseCode,
-        specialization: specialization,
-        forceFresh: effectiveForceFresh,
-      ),
-      _notifService.getUnreadCount(forceRefresh: effectiveForceFresh),
-      _authService.getSections(),
-      userId.isNotEmpty
-          ? _eventService.getStudentPendingAbsenceScopes(studentId: userId)
-          : Future.value(<Map<String, dynamic>>[]),
-    ]);
-
-    final activeEvents = List<Map<String, dynamic>>.from(results[0] as List);
-    final calendarEvents = List<Map<String, dynamic>>.from(results[1] as List);
+    // Critical path: one events fetch. Calendar on home is derived from it
+    // so we do not pay a second near-duplicate PostgREST round-trip.
+    final activeEvents = await _eventService.getActiveEvents(
+      yearLevel: yearLevel,
+      courseCode: courseCode,
+      specialization: specialization,
+      forceFresh: effectiveForceFresh,
+    );
     final events = activeEvents.take(5).toList();
-    final unread = results[2] as int;
-    final sections = List<Map<String, dynamic>>.from(results[3] as List);
-    final pendingAbsenceScopes =
-        List<Map<String, dynamic>>.from(results[4] as List);
-    final filteredSections = _filterSectionsForDetectedCourse(sections, user);
-    String? selectedAbsenceScopeKey = _selectedAbsenceScopeKey;
-    if (pendingAbsenceScopes.isEmpty) {
-      selectedAbsenceScopeKey = null;
-    } else {
-      final hasExisting = selectedAbsenceScopeKey != null &&
-          pendingAbsenceScopes.any(
-            (scope) =>
-                (scope['scope_key']?.toString() ?? '') == selectedAbsenceScopeKey,
-          );
-      selectedAbsenceScopeKey = hasExisting
-          ? selectedAbsenceScopeKey
-          : (pendingAbsenceScopes.first['scope_key']?.toString());
-    }
+    final calendarEvents = List<Map<String, dynamic>>.from(activeEvents);
 
     if (mounted) {
       setState(() {
         _user = user;
-        if (!(events.isEmpty && hadCachedEvents)) {
+        if (!(events.isEmpty && hadCachedEvents && offline && !effectiveForceFresh)) {
           _upcomingEvents = events;
         }
-        if (!(calendarEvents.isEmpty && _calendarEvents.isNotEmpty && offline)) {
+        if (!(calendarEvents.isEmpty &&
+            _calendarEvents.isNotEmpty &&
+            offline &&
+            !effectiveForceFresh)) {
           _calendarEvents = calendarEvents;
         }
+        _isLoading = false;
+      });
+      _scheduleDeferredTabMount();
+    }
+
+    // Soft open painted from cache — reconcile deletes from Supabase once online.
+    if (!forceFresh && !offline && mounted) {
+      unawaited(_reconcileHomeEventsAfterCache(
+        userId: userId,
+        yearLevel: yearLevel,
+        courseCode: courseCode,
+        specialization: specialization,
+      ));
+    }
+
+    // Non-critical: unread / sections / absence — after first paint.
+    unawaited(
+      _loadHomeSecondary(
+        user: user,
+        userId: userId,
+        forceFreshUnread: forceFresh,
+      ),
+    );
+  }
+
+  Future<void> _reconcileHomeEventsAfterCache({
+    required String userId,
+    String? yearLevel,
+    String? courseCode,
+    String? specialization,
+  }) async {
+    try {
+      final activeEvents = await _eventService.getActiveEvents(
+        yearLevel: yearLevel,
+        courseCode: courseCode,
+        specialization: specialization,
+        forceFresh: true,
+      );
+      if (!mounted) return;
+      final offline = await _hasNoConnectivity();
+      if (offline) return;
+      final events = activeEvents.take(5).toList();
+      final calendarEvents = List<Map<String, dynamic>>.from(activeEvents);
+      setState(() {
+        _upcomingEvents = events;
+        _calendarEvents = calendarEvents;
+      });
+    } catch (_) {
+      // Keep cached home cards if reconcile fails.
+    }
+  }
+
+  /// Soft secondary home work — must not block splash / first cards.
+  Future<void> _loadHomeSecondary({
+    required Map<String, dynamic>? user,
+    required String userId,
+    bool forceFreshUnread = false,
+  }) async {
+    try {
+      final unread = await _notifService.getUnreadCount(
+        forceRefresh: forceFreshUnread,
+      );
+
+      List<Map<String, dynamic>> filteredSections = _sections;
+      final needsSection = user != null && user['section_id'] == null;
+      if (needsSection) {
+        final sections = await _authService.getSections();
+        filteredSections = _filterSectionsForDetectedCourse(sections, user);
+      }
+
+      final pendingAbsenceScopes = userId.isNotEmpty
+          ? await _eventService.getStudentPendingAbsenceScopes(
+              studentId: userId,
+            )
+          : <Map<String, dynamic>>[];
+
+      String? selectedAbsenceScopeKey = _selectedAbsenceScopeKey;
+      if (pendingAbsenceScopes.isEmpty) {
+        selectedAbsenceScopeKey = null;
+      } else {
+        final hasExisting = selectedAbsenceScopeKey != null &&
+            pendingAbsenceScopes.any(
+              (scope) =>
+                  (scope['scope_key']?.toString() ?? '') ==
+                  selectedAbsenceScopeKey,
+            );
+        selectedAbsenceScopeKey = hasExisting
+            ? selectedAbsenceScopeKey
+            : (pendingAbsenceScopes.first['scope_key']?.toString());
+      }
+
+      if (!mounted) return;
+      setState(() {
         _unreadCount = unread;
-        _sections = filteredSections;
-        if (_selectedSectionId != null &&
-            filteredSections.every(
-              (section) => section['id']?.toString() != _selectedSectionId,
-            )) {
-          _selectedSectionId = null;
+        if (needsSection) {
+          _sections = filteredSections;
+          if (_selectedSectionId != null &&
+              filteredSections.every(
+                (section) => section['id']?.toString() != _selectedSectionId,
+              )) {
+            _selectedSectionId = null;
+          }
         }
         _pendingAbsenceScopes = pendingAbsenceScopes;
         _selectedAbsenceScopeKey = selectedAbsenceScopeKey;
-        _isLoading = false;
       });
+    } catch (_) {
+      // Keep home usable even if secondary loads fail.
+    }
+  }
+
+  void _scheduleDeferredTabMount() {
+    if (_eventsTabMounted && _ticketsTabMounted) return;
+    _deferredTabsTimer?.cancel();
+    _deferredTabsTimer = Timer(const Duration(milliseconds: 600), () {
+      if (!mounted) return;
+      if (_eventsTabMounted && _ticketsTabMounted) return;
+      setState(() {
+        _eventsTabMounted = true;
+        _ticketsTabMounted = true;
+      });
+    });
+  }
+
+  void _ensureTabMounted(int index) {
+    if (index == 1 && !_eventsTabMounted) {
+      setState(() => _eventsTabMounted = true);
+    } else if (index == 3 && !_ticketsTabMounted) {
+      setState(() => _ticketsTabMounted = true);
     }
   }
 
@@ -529,9 +640,9 @@ class _StudentHomeState extends State<StudentHome>
     WidgetsBinding.instance.removeObserver(this);
     _unreadSubscription?.cancel();
     _eventLiveSubscription?.cancel();
-    _homeLiveFallbackTimer?.cancel();
     _absenceScopeRefreshTimer?.cancel();
     _scannerAccessGuardTimer?.cancel();
+    _deferredTabsTimer?.cancel();
     _scannerAccessChannel?.unsubscribe();
     _headerPageController.dispose();
     _absenceReasonController.dispose();
@@ -758,7 +869,9 @@ class _StudentHomeState extends State<StudentHome>
                   sizing: StackFit.expand,
                   children: [
                     _buildHomeContent(),
-                    const StudentEvents(),
+                    _eventsTabMounted
+                        ? const StudentEvents()
+                        : const SizedBox.shrink(),
                     // Keep scan out of the keep-alive stack until opened.
                     _currentIndex == 2 && _activeScanMode != null
                         ? StudentScanScreen(
@@ -767,7 +880,9 @@ class _StudentHomeState extends State<StudentHome>
                             onClose: _closeScanner,
                           )
                         : const SizedBox.shrink(),
-                    const StudentTickets(),
+                    _ticketsTabMounted
+                        ? const StudentTickets()
+                        : const SizedBox.shrink(),
                     StudentProfile(user: _user, onUpdate: _loadData),
                   ],
                 ));
@@ -1377,6 +1492,7 @@ class _StudentHomeState extends State<StudentHome>
       onTap: () {
         _closeScanMenu();
         final switchedToTickets = index == 3 && _currentIndex != 3;
+        _ensureTabMounted(index);
         setState(() => _currentIndex = index);
         // IndexedStack keeps Tickets alive — force a fresh pull when opened.
         if (switchedToTickets) {
@@ -1620,109 +1736,117 @@ class _StudentHomeState extends State<StudentHome>
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     // Top row
-                    Row(
-                      children: [
-                        // Profile Avatar
-                        GestureDetector(
-                          onTap: () {
-                            setState(() => _currentIndex = 4);
-                          },
-                          child: SafeCircleAvatar(
-                            size: 50,
-                            imagePathOrUrl: _user?['photo_url']?.toString(),
-                            fallbackText: firstName.isNotEmpty
-                                ? firstName[0].toUpperCase()
-                                : 'S',
-                            backgroundColor: _studentPrimary(context),
-                            textColor: Colors.white,
-                            borderColor: const Color(0xFFD4A843),
-                            borderWidth: 2,
-                            textStyle: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w800,
-                              fontSize: 20,
+                    StaggeredEntrance(
+                      index: 0,
+                      slideOffset: 16.0,
+                      child: Row(
+                        children: [
+                          // Profile Avatar
+                          GestureDetector(
+                            onTap: () {
+                              setState(() => _currentIndex = 4);
+                            },
+                            child: SafeCircleAvatar(
+                              size: 50,
+                              imagePathOrUrl: _user?['photo_url']?.toString(),
+                              fallbackText: firstName.isNotEmpty
+                                  ? firstName[0].toUpperCase()
+                                  : 'S',
+                              backgroundColor: _studentPrimary(context),
+                              textColor: Colors.white,
+                              borderColor: const Color(0xFFD4A843),
+                              borderWidth: 2,
+                              textStyle: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 20,
+                              ),
                             ),
                           ),
-                        ),
-                        const SizedBox(width: 14),
-                        // Expanded Column for full-width name support
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                _getGreeting(),
-                                style: TextStyle(
-                                  color: Colors.white.withValues(alpha: 0.7),
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  letterSpacing: 0.5,
+                          const SizedBox(width: 14),
+                          // Expanded Column for full-width name support
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  _getGreeting(),
+                                  style: TextStyle(
+                                    color: Colors.white.withValues(alpha: 0.7),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: 0.5,
+                                  ),
                                 ),
-                              ),
-                              AnimatedGreetingText(
-                                text: firstName,
-                                style: const TextStyle(
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.w800,
+                                AnimatedGreetingText(
+                                  text: firstName,
+                                  style: const TextStyle(
+                                    fontSize: 22,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                  baseColor: Colors.white,
+                                  scanColor: _studentSoft(context),
                                 ),
-                                baseColor: Colors.white,
-                                scanColor: _studentSoft(context),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
-                        // Notification Bell Only - Logout is in Profile
-                        Container(
-                          margin: const EdgeInsets.only(left: 12),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.1),
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: Stack(
-                            children: [
-                              IconButton(
-                                icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
-                                onPressed: _isOpeningNotifications ? null : _openNotificationsModal,
-                              ),
-                              if (_unreadCount > 0)
-                                Positioned(
-                                  top: 8,
-                                  right: 10,
-                                  child: IgnorePointer(
-                                    child: Container(
-                                      padding: const EdgeInsets.all(4),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFEF4444),
-                                        shape: BoxShape.circle,
-                                        border: Border.all(
-                                          color: _studentChrome(context),
-                                          width: 1.5,
+                          // Notification Bell Only - Logout is in Profile
+                          Container(
+                            margin: const EdgeInsets.only(left: 12),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: Stack(
+                              children: [
+                                IconButton(
+                                  icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
+                                  onPressed: _isOpeningNotifications ? null : _openNotificationsModal,
+                                ),
+                                if (_unreadCount > 0)
+                                  Positioned(
+                                    top: 8,
+                                    right: 10,
+                                    child: IgnorePointer(
+                                      child: Container(
+                                        padding: const EdgeInsets.all(4),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFFEF4444),
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: _studentChrome(context),
+                                            width: 1.5,
+                                          ),
                                         ),
-                                      ),
-                                      constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
-                                      child: Center(
-                                        child: Text(
-                                          _unreadCount > 9 ? '9+' : _unreadCount.toString(),
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.w800,
+                                        constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
+                                        child: Center(
+                                          child: Text(
+                                            _unreadCount > 9 ? '9+' : _unreadCount.toString(),
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.w800,
+                                            ),
                                           ),
                                         ),
                                       ),
                                     ),
                                   ),
-                                ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
 
                     const SizedBox(height: 28),
 
                     // Header Slider (Laptop Animation / Mini Calendar)
-                    _buildHeaderSlider(),
+                    StaggeredEntrance(
+                      index: 1,
+                      slideOffset: 24.0,
+                      child: _buildHeaderSlider(),
+                    ),
                   ],
                 ),
               ),
@@ -1732,31 +1856,38 @@ class _StudentHomeState extends State<StudentHome>
 
         // Upcoming Events Section
         SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(24, 16, 24, 16), // Reduced top padding 
-            child: Row(
-              children: [
-                const Text(
-                  'Upcoming Events',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFF1F2937),
-                  ),
-                ),
-                const Spacer(),
-                GestureDetector(
-                  onTap: () => setState(() => _currentIndex = 1),
-                  child: Text(
-                    'See All',
+          child: StaggeredEntrance(
+            index: 2,
+            slideOffset: 20.0,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 16, 24, 16),
+              child: Row(
+                children: [
+                  const Text(
+                    'Upcoming Events',
                     style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: _studentChrome(context),
+                      fontSize: 18,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF1F2937),
                     ),
                   ),
-                ),
-              ],
+                  const Spacer(),
+                  GestureDetector(
+                    onTap: () {
+                      _ensureTabMounted(1);
+                      setState(() => _currentIndex = 1);
+                    },
+                    child: Text(
+                      'See All',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: _studentChrome(context),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -1764,28 +1895,31 @@ class _StudentHomeState extends State<StudentHome>
         // Events List
         _upcomingEvents.isEmpty
             ? SliverToBoxAdapter(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 24),
-                  child: Container(
-                    padding: const EdgeInsets.all(40),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: Colors.grey.shade200),
-                    ),
-                    child: Column(
-                      children: [
-                        Icon(Icons.event_busy_rounded,
-                            size: 48, color: Colors.grey.shade300),
-                        const SizedBox(height: 12),
-                        Text(
-                          'No upcoming events',
-                          style: TextStyle(
-                            fontWeight: FontWeight.w700,
-                            color: Colors.grey.shade500,
+                child: StaggeredEntrance(
+                  index: 3,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: Container(
+                      padding: const EdgeInsets.all(40),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: Colors.grey.shade200),
+                      ),
+                      child: Column(
+                        children: [
+                          Icon(Icons.event_busy_rounded,
+                              size: 48, color: Colors.grey.shade300),
+                          const SizedBox(height: 12),
+                          Text(
+                            'No upcoming events',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              color: Colors.grey.shade500,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -1794,7 +1928,11 @@ class _StudentHomeState extends State<StudentHome>
                 delegate: SliverChildBuilderDelegate(
                   (context, index) {
                     final event = _upcomingEvents[index];
-                    return _buildEventCard(event);
+                    return StaggeredEntrance(
+                      index: 3 + index,
+                      slideOffset: 24.0,
+                      child: _buildEventCard(event),
+                    );
                   },
                   childCount: _upcomingEvents.length,
                 ),
@@ -2152,6 +2290,7 @@ class _StudentHomeState extends State<StudentHome>
                                     ),
                                     onTap: () {
                                       Navigator.pop(context);
+                                      _ensureTabMounted(1);
                                       setState(() => _currentIndex = 1);
                                     },
                                   )).toList(),

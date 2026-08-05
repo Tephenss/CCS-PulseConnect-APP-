@@ -203,4 +203,32 @@ class AppCacheService {
     await prefs.remove(_dataKey(key));
     await prefs.remove(_updatedAtKey(key));
   }
+
+  /// Clear all list caches whose key starts with [prefix] (memory + disk prefs).
+  Future<void> clearJsonListByPrefix(String prefix) async {
+    final p = prefix.trim();
+    if (p.isEmpty) return;
+
+    invalidateMemoryPrefix(p);
+    cancelInFlightPrefix(p);
+    cancelInFlightPrefix('fetch:$p');
+
+    final prefs = await SharedPreferences.getInstance();
+    const root = 'app_cache_';
+    const updatedSuffix = '_updated_at';
+    final toRemove = <String>[];
+    for (final k in prefs.getKeys()) {
+      if (!k.startsWith(root)) continue;
+      var body = k.substring(root.length);
+      if (body.endsWith(updatedSuffix)) {
+        body = body.substring(0, body.length - updatedSuffix.length);
+      }
+      if (body.startsWith(p)) {
+        toRemove.add(k);
+      }
+    }
+    for (final key in toRemove) {
+      await prefs.remove(key);
+    }
+  }
 }

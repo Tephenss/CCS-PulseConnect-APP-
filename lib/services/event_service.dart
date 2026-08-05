@@ -32,6 +32,7 @@ class EventService {
   static const Duration _teacherEventsTtl = Duration(seconds: 45);
   static const Duration _expiredEvalTtl = Duration(seconds: 120);
   static const Duration _ticketsTtl = Duration(seconds: 45);
+  static const Duration _myCertificatesTtl = Duration(seconds: 90);
   static const Duration _eventByIdTtl = Duration(seconds: 60);
   static const Duration _eventSessionsTtl = Duration(seconds: 60);
   static const Duration _eventRegistrationSettingsTtl = Duration(seconds: 30);
@@ -44,10 +45,10 @@ class EventService {
 
   static const Duration _studentRequirementsCacheTtl = Duration(minutes: 2);
 
-  static void invalidateEventListCache({String? prefix}) {
+  static Future<void> invalidateEventListCache({String? prefix}) async {
+    final cache = AppCacheService();
     if (prefix == null || prefix.trim().isEmpty) {
       _listCache.clear();
-      final cache = AppCacheService();
       cache.invalidateMemoryPrefix('active:');
       cache.invalidateMemoryPrefix('teacher_accessible:');
       cache.invalidateMemoryPrefix('expired_eval:');
@@ -57,11 +58,24 @@ class EventService {
       cache.invalidateMemoryPrefix('event_sessions:');
       cache.invalidateMemoryPrefix('event_reg_settings:');
       cache.cancelInFlightPrefix('fetch:');
+      // Await disk clears so live UI refresh cannot rehydrate stale prefs.
+      await Future.wait([
+        cache.clearJsonListByPrefix('active:'),
+        cache.clearJsonListByPrefix('teacher_accessible:'),
+        cache.clearJsonListByPrefix('expired_eval:'),
+        cache.clearJsonListByPrefix('tickets:'),
+        // Do not clear certs: here — event list pulses must not force a cold
+        // Certificates page load. Certs invalidate on certificates realtime.
+        cache.clearJsonListByPrefix('teacher_accessible_events_'),
+        cache.clearJsonListByPrefix('teacher_home_upcoming_events_'),
+      ]);
       return;
     }
-    _listCache.removeWhere((key, _) => key.startsWith(prefix));
-    AppCacheService().invalidateMemoryPrefix(prefix);
-    AppCacheService().cancelInFlightPrefix('fetch:$prefix');
+    final p = prefix.trim();
+    _listCache.removeWhere((key, _) => key.startsWith(p));
+    cache.invalidateMemoryPrefix(p);
+    cache.cancelInFlightPrefix('fetch:$p');
+    await cache.clearJsonListByPrefix(p);
   }
 
   /// Link-level offline check. On errors, assume offline so we keep caches.
@@ -124,6 +138,30 @@ class EventService {
     }
     _appCache.invalidateMemoryPrefix('tickets:');
     _appCache.cancelInFlightPrefix('fetch:tickets:');
+  }
+
+  /// Clears certificates list cache (issued/updated certs realtime).
+  static Future<void> invalidateCertificatesCache([String? userId]) async {
+    final cache = AppCacheService();
+    var uid = (userId ?? '').trim();
+    if (uid.isEmpty) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        uid = (prefs.getString('user_id') ?? '').trim();
+      } catch (_) {}
+    }
+    if (uid.isNotEmpty) {
+      final cacheKey = 'certs:v2:$uid';
+      _listCache.remove(cacheKey);
+      cache.invalidateMemory(cacheKey);
+      cache.cancelInFlightPrefix('fetch:$cacheKey');
+      await cache.clearJsonList(cacheKey);
+      return;
+    }
+    _listCache.removeWhere((key, _) => key.startsWith('certs:'));
+    cache.invalidateMemoryPrefix('certs:');
+    cache.cancelInFlightPrefix('fetch:certs:');
+    await cache.clearJsonListByPrefix('certs:');
   }
 
   List<Map<String, dynamic>>? _readListCache(
@@ -415,6 +453,9 @@ class EventService {
       return true;
     }
 
+    final sessionCount = int.tryParse(event['session_count']?.toString() ?? '') ?? 0;
+    if (sessionCount > 0) return true;
+
     final eventMode = (event['event_mode']?.toString() ?? '')
         .toLowerCase()
         .trim();
@@ -596,7 +637,50 @@ class EventService {
   }
 
   Future<String> _resolveParticipantNameForUser(String userId) async {
-    // users table locked from anon — names come from scan/roster BFF.
+    final targetId = userId.trim();
+    if (targetId.isEmpty) return '';
+
+    // users table is locked from anon — use cached session profile first.
+    try {
+      final auth = AuthService();
+      final current = await auth.getCurrentUser();
+      final currentId = (current?['id']?.toString() ?? '').trim();
+      if (current != null && (currentId.isEmpty || currentId == targetId)) {
+        final composed = _composeDisplayName(current);
+        if (composed.isNotEmpty) return composed;
+        final display = (current['display_name']?.toString() ?? '').trim();
+        if (display.isNotEmpty) return display;
+        final full = (current['full_name']?.toString() ?? '').trim();
+        if (full.isNotEmpty) return full;
+      }
+    } catch (_) {
+      // Fall through.
+    }
+
+    // SharedPreferences backup (same cache AuthService writes).
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('user_data');
+      if (raw != null && raw.trim().isNotEmpty) {
+        final parsed = jsonDecode(raw);
+        if (parsed is Map) {
+          final map = Map<String, dynamic>.from(parsed);
+          final cachedId = (map['id']?.toString() ?? prefs.getString('user_id') ?? '')
+              .trim();
+          if (cachedId.isEmpty || cachedId == targetId) {
+            final composed = _composeDisplayName(map);
+            if (composed.isNotEmpty) return composed;
+            final display = (map['display_name']?.toString() ?? '').trim();
+            if (display.isNotEmpty) return display;
+            final full = (map['full_name']?.toString() ?? '').trim();
+            if (full.isNotEmpty) return full;
+          }
+        }
+      }
+    } catch (_) {
+      // Ignore.
+    }
+
     return '';
   }
 
@@ -617,7 +701,7 @@ class EventService {
       final rows = await _supabase
           .from('event_teacher_assignments')
           .select(
-            'event_id, can_scan, can_manage_assistants, events(id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time,early_out_enabled_at)',
+            'event_id, can_scan, can_manage_assistants, events(id,title,status,start_at,end_at,location,event_mode,event_structure,grace_time,early_out_enabled_at)',
           )
           .eq('teacher_id', teacherId)
           .limit(200);
@@ -627,7 +711,7 @@ class EventService {
         final rows = await _supabase
             .from('event_teacher_assignments')
             .select(
-              'event_id, can_scan, events(id,title,status,start_at,end_at,location,uses_sessions,event_structure,grace_time,early_out_enabled_at)',
+              'event_id, can_scan, events(id,title,status,start_at,end_at,location,event_structure,grace_time,early_out_enabled_at)',
             )
             .eq('teacher_id', teacherId)
             .eq('can_scan', true)
@@ -637,7 +721,7 @@ class EventService {
         final rows = await _supabase
             .from('event_teacher_assignments')
             .select(
-              'event_id, can_scan, events(id,title,status,start_at,end_at,location,uses_sessions,grace_time)',
+              'event_id, can_scan, events(id,title,status,start_at,end_at,location,grace_time)',
             )
             .eq('teacher_id', teacherId)
             .eq('can_scan', true)
@@ -669,7 +753,7 @@ class EventService {
     final sessionResponse = await _supabase
         .from('event_session_certificates')
         .select(
-          'id, session_id, student_id, template_id, session_template_id, certificate_code, issued_at',
+          'id, session_id, event_id, student_id, template_id, session_template_id, certificate_code, issued_at, event_title, session_title',
         )
         .eq('student_id', userId)
         .order('issued_at', ascending: false);
@@ -683,6 +767,10 @@ class EventService {
 
     final sessionMap = <String, Map<String, dynamic>>{};
     final eventIds = <String>{};
+    for (final row in rawSessionCerts) {
+      final snapEventId = (row['event_id']?.toString() ?? '').trim();
+      if (snapEventId.isNotEmpty) eventIds.add(snapEventId);
+    }
     if (sessionIds.isNotEmpty) {
       dynamic sessionRows;
       try {
@@ -724,18 +812,39 @@ class EventService {
 
     return rawSessionCerts.map((row) {
       final sessionId = row['session_id']?.toString() ?? '';
-      final session = sessionMap[sessionId] ?? <String, dynamic>{};
-      final eventId = session['event_id']?.toString() ?? '';
-      final event = eventMap[eventId] ?? <String, dynamic>{};
-      final sessionName = _sessionDisplayName(session);
-      final eventTitle = event['title']?.toString() ?? 'Event';
+      final session = Map<String, dynamic>.from(
+        sessionMap[sessionId] ?? <String, dynamic>{},
+      );
+      final sessionEventId = (session['event_id']?.toString() ?? '').trim();
+      final rowEventId = (row['event_id']?.toString() ?? '').trim();
+      final eventId =
+          sessionEventId.isNotEmpty ? sessionEventId : rowEventId;
+      final event = Map<String, dynamic>.from(
+        eventMap[eventId] ?? <String, dynamic>{},
+      );
+      final liveSessionName = _sessionDisplayName(session);
+      final snapSessionName = (row['session_title']?.toString() ?? '').trim();
+      final sessionName = liveSessionName.isNotEmpty &&
+              liveSessionName.toLowerCase() != 'seminar'
+          ? liveSessionName
+          : (snapSessionName.isNotEmpty ? snapSessionName : liveSessionName);
+      final liveEventTitle = (event['title']?.toString() ?? '').trim();
+      final snapEventTitle = (row['event_title']?.toString() ?? '').trim();
+      final eventTitle = liveEventTitle.isNotEmpty
+          ? liveEventTitle
+          : (snapEventTitle.isNotEmpty ? snapEventTitle : 'Event');
+      if ((event['title']?.toString() ?? '').trim().isEmpty) {
+        event['title'] = eventTitle;
+      }
       return {
         ...row,
         'event_id': eventId,
         'events': event,
         'session': session,
         'certificate_scope': 'session',
-        'display_title': '$eventTitle - $sessionName',
+        'display_title': sessionName.isNotEmpty
+            ? '$eventTitle - $sessionName'
+            : eventTitle,
       };
     }).toList();
   }
@@ -783,6 +892,7 @@ class EventService {
     'end_at',
     'scan_window_minutes',
     'sort_order',
+    'early_out_enabled_at',
   ];
 
   static const List<String> _eventSessionBaseColumns = [
@@ -881,7 +991,7 @@ class EventService {
       final rows = await _supabase
           .from('events')
           .select(
-            'id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time',
+            'id,title,status,start_at,end_at,location,event_mode,event_structure,grace_time',
           )
           .eq('id', trimmedId)
           .limit(1);
@@ -893,7 +1003,7 @@ class EventService {
         final rows = await _supabase
             .from('events')
             .select(
-              'id,title,status,start_at,end_at,location,uses_sessions,grace_time',
+              'id,title,status,start_at,end_at,location,grace_time',
             )
             .eq('id', trimmedId)
             .limit(1);
@@ -1512,6 +1622,8 @@ class EventService {
         'scan_window_minutes': _sessionWindowMinutes(row),
         'sort_order': sortOrder < 0 ? index : sortOrder,
         'session_no': sessionNo <= 0 ? (index + 1) : sessionNo,
+        // Required for Early Out → time-out scanner open on seminar events.
+        'early_out_enabled_at': row['early_out_enabled_at'],
       });
     }
 
@@ -2026,6 +2138,7 @@ class EventService {
           'closes_at': expiresAt.toIso8601String(),
           'window_minutes': 60,
           'scan_mode': 'check_out',
+          'early_out': true,
           'message': 'Early time-out is open. Scan tickets to time out.',
         };
       }
@@ -2080,7 +2193,8 @@ class EventService {
       };
     }
 
-    final sessions = await _fetchSessionsForEvent(eventId);
+    final sessionsRaw = await _fetchSessionsForEvent(eventId);
+    final sessions = _sessionsWithEarlyOutMerged(sessionsRaw, event);
     final shouldUseSessions = _eventUsesSessions(event) || sessions.isNotEmpty;
 
     if (shouldUseSessions) {
@@ -2127,6 +2241,27 @@ class EventService {
         }
       }
 
+      // Early Out / end+1h time-out on ANY seminar must open the scanner
+      // (do not only look at the latest closed seminar).
+      final anyCheckOutOpen = _findOpenSessionCheckOut(
+        eventSummary: eventSummary,
+        sessions: closed.map((c) => Map<String, dynamic>.from(c['session'] as Map)).toList(),
+        nowUtc: nowUtc,
+      );
+      // Also allow Early Out while that seminar's check-in row is still classified
+      // oddly — scan all sessions that have an early_out stamp.
+      final eoSessions = sessions
+          .where((s) => (s['early_out_enabled_at']?.toString() ?? '').trim().isNotEmpty)
+          .toList();
+      final eoCheckOutOpen = eoSessions.isEmpty
+          ? null
+          : _findOpenSessionCheckOut(
+              eventSummary: eventSummary,
+              sessions: eoSessions,
+              nowUtc: nowUtc,
+            );
+      final preferCheckOut = eoCheckOutOpen ?? anyCheckOutOpen;
+
       if (open.length > 1) {
         return {
           'status': 'conflict',
@@ -2139,6 +2274,12 @@ class EventService {
           'message':
               'Multiple seminars are open right now. Ask admin to fix overlap.',
         };
+      }
+
+      // Prefer Early Out checkout when active — even if another seminar's
+      // time-in window overlaps (should be rare with normal schedules).
+      if (preferCheckOut != null && preferCheckOut['early_out'] == true) {
+        return preferCheckOut;
       }
 
       if (open.length == 1) {
@@ -2156,23 +2297,29 @@ class EventService {
             'start_at': session['start_at']?.toString() ?? '',
             'end_at': session['end_at']?.toString() ?? '',
             'scan_window_minutes': item['window_minutes'],
+            'early_out_enabled_at': session['early_out_enabled_at'],
           },
           'opens_at': item['opens_at'],
           'closes_at': item['closes_at'],
           'window_minutes': item['window_minutes'],
+          'scan_mode': 'check_in',
           'message': 'Seminar scanning is open.',
         };
+      }
+
+      if (preferCheckOut != null) {
+        return preferCheckOut;
       }
 
       // Gap between seminars: do NOT sync absences on every context poll.
       // That RPC was revoked for anon and was flooding API Gateway + ERROR %.
       if (waiting.isNotEmpty) {
         final lastSync = _absenceSyncAttemptedAtUtc[eventId];
-        final nowUtc = DateTime.now().toUtc();
+        final nowForSync = DateTime.now().toUtc();
         final shouldSync = lastSync == null ||
-            nowUtc.difference(lastSync) >= _absenceSyncCooldown;
+            nowForSync.difference(lastSync) >= _absenceSyncCooldown;
         if (shouldSync && MobileBackendService.isConfigured) {
-          _absenceSyncAttemptedAtUtc[eventId] = nowUtc;
+          _absenceSyncAttemptedAtUtc[eventId] = nowForSync;
           try {
             await _mobileBackend.secureWrite('sync_closed_session_absences', {
               'event_id': eventId,
@@ -2189,17 +2336,7 @@ class EventService {
         );
         final item = waiting.first;
         final session = Map<String, dynamic>.from(item['session']);
-        final checkOutDuringGap = _resolveCheckOutScanOpen(
-          eventSummary: eventSummary,
-          endRaw: event['end_at'],
-          earlyOutEnabledAt: event['early_out_enabled_at'],
-          nowUtc: nowUtc,
-          source: 'session',
-          session: null,
-        );
-        if (checkOutDuringGap != null) {
-          return checkOutDuringGap;
-        }
+
         return {
           'status': 'waiting',
           'source': 'session',
@@ -2255,18 +2392,6 @@ class EventService {
               'scan_window_minutes': last['window_minutes'],
               'early_out_enabled_at': session['early_out_enabled_at'],
             };
-      final checkOutOpen = _resolveCheckOutScanOpen(
-        eventSummary: eventSummary,
-        endRaw: session['end_at'] ?? event['end_at'],
-        earlyOutEnabledAt:
-            session['early_out_enabled_at'] ?? event['early_out_enabled_at'],
-        nowUtc: nowUtc,
-        source: 'session',
-        session: sessionSummary,
-      );
-      if (checkOutOpen != null) {
-        return checkOutOpen;
-      }
       return {
         'status': 'closed',
         'source': 'session',
@@ -2275,7 +2400,9 @@ class EventService {
         'opens_at': last?['opens_at'],
         'closes_at': last?['closes_at'],
         'window_minutes': last?['window_minutes'] ?? 30,
-        'message': 'Seminar scan window has closed.',
+        'scan_mode': 'check_out',
+        'message':
+            'Too early to time out. Early Out is not enabled — time-out opens at the scheduled end.',
       };
     }
 
@@ -2639,11 +2766,15 @@ class EventService {
   }) async {
     try {
       final now = DateTime.now().toUtc().toIso8601String();
+      final offline = await isLikelyOffline();
       List<dynamic> response = [];
 
-      // Live/publish refreshes must hit Supabase — Firestore catalog can lag
-      // behind admin publish and was returning a warm-but-stale event list.
-      if (!forceFresh) {
+      // Online: Supabase is source of truth so deletes/archives clear lists.
+      // Firestore catalog can lag and was re-writing deleted "test" events
+      // back onto disk after a correct pull-to-refresh.
+      if (!offline) {
+        response = await _selectPublishedActiveEvents(now);
+      } else if (!forceFresh) {
         try {
           final catalog =
               await PublicCatalogService.instance.loadIfRevisionChanged(
@@ -2671,9 +2802,10 @@ class EventService {
         }
       }
 
-      if (response.isEmpty) {
+      if (response.isEmpty && !offline) {
         response = await _selectPublishedActiveEvents(now);
       }
+
       final list = List<Map<String, dynamic>>.from(response);
       final filtered = _filterByTargetParticipant(
         list,
@@ -2682,9 +2814,7 @@ class EventService {
         specialization: specialization,
       );
 
-      // Sudden disconnect can look "online" but return empty / partial data.
       // Never wipe a warm offline cache with an empty refresh while offline.
-      final offline = await isLikelyOffline();
       var toStore = filtered;
       if (filtered.isEmpty && offline) {
         toStore = await _preferExistingCacheIfEmpty(cacheKey, filtered);
@@ -4238,8 +4368,118 @@ class EventService {
     }
   }
 
-  // Get user's certificates
-  Future<List<Map<String, dynamic>>> getMyCertificates(String userId) async {
+  // Get user's certificates (cached; list payload omits heavy canvas_state).
+  Future<List<Map<String, dynamic>>> getMyCertificates(
+    String userId, {
+    bool forceFresh = false,
+  }) async {
+    final uid = userId.trim();
+    if (uid.isEmpty) return [];
+    final cacheKey = 'certs:v2:$uid';
+
+    if (!forceFresh) {
+      final cached = _readListCache(cacheKey, _myCertificatesTtl);
+      if (cached != null) {
+        return cached;
+      }
+
+      final stale = _readListCache(
+        cacheKey,
+        _myCertificatesTtl,
+        allowStale: true,
+        staleTtl: const Duration(hours: 24),
+      );
+      if (stale != null && stale.isNotEmpty) {
+        unawaited(_fetchMyCertificates(uid, cacheKey));
+        return stale;
+      }
+
+      final diskCached = await _appCache.loadJsonList(cacheKey);
+      if (diskCached.isNotEmpty) {
+        _writeListCache(cacheKey, diskCached);
+        unawaited(_fetchMyCertificates(uid, cacheKey));
+        return diskCached;
+      }
+    }
+
+    return _appCache.fetchOnce(
+      'fetch:$cacheKey',
+      () => _fetchMyCertificates(uid, cacheKey, forceFresh: forceFresh),
+      forceFresh: forceFresh,
+    );
+  }
+
+  List<Map<String, dynamic>> _stripHeavyCertFields(
+    List<Map<String, dynamic>> rows,
+  ) {
+    return rows.map((row) {
+      final copy = Map<String, dynamic>.from(row);
+      copy.remove('template_canvas_state');
+      copy.remove('template_source_row');
+      copy.remove('canvas_state');
+      return copy;
+    }).toList();
+  }
+
+  /// Lazy-load Fabric canvas for certificate preview/download only.
+  Future<Map<String, dynamic>?> fetchCertificateCanvasState({
+    String? templateId,
+    String? sessionTemplateId,
+  }) async {
+    final sessionId = (sessionTemplateId ?? '').trim();
+    final eventTplId = (templateId ?? '').trim();
+    try {
+      if (sessionId.isNotEmpty) {
+        final rows = await _supabase
+            .from('event_session_certificate_templates')
+            .select('canvas_state')
+            .eq('id', sessionId)
+            .limit(1);
+        if (rows.isNotEmpty) {
+          final raw = rows.first['canvas_state'];
+          if (raw is Map<String, dynamic>) return raw;
+          if (raw is Map) {
+            return raw.map((k, v) => MapEntry(k.toString(), v));
+          }
+          if (raw is String && raw.trim().isNotEmpty) {
+            final decoded = jsonDecode(raw);
+            if (decoded is Map<String, dynamic>) return decoded;
+            if (decoded is Map) {
+              return decoded.map((k, v) => MapEntry(k.toString(), v));
+            }
+          }
+        }
+      }
+      if (eventTplId.isNotEmpty) {
+        final rows = await _supabase
+            .from('certificate_templates')
+            .select('canvas_state')
+            .eq('id', eventTplId)
+            .limit(1);
+        if (rows.isNotEmpty) {
+          final raw = rows.first['canvas_state'];
+          if (raw is Map<String, dynamic>) return raw;
+          if (raw is Map) {
+            return raw.map((k, v) => MapEntry(k.toString(), v));
+          }
+          if (raw is String && raw.trim().isNotEmpty) {
+            final decoded = jsonDecode(raw);
+            if (decoded is Map<String, dynamic>) return decoded;
+            if (decoded is Map) {
+              return decoded.map((k, v) => MapEntry(k.toString(), v));
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchMyCertificates(
+    String userId,
+    String cacheKey, {
+    bool forceFresh = false,
+  }) async {
     try {
       final participantName = await _resolveParticipantNameForUser(userId);
 
@@ -4247,12 +4487,11 @@ class EventService {
         final row = _asStringMap(raw);
         return {
           'thumbnail_url': row['thumbnail_url']?.toString(),
-          'template_canvas_state': row['canvas_state'],
+          // canvas_state is fetched on preview only — keeps list/cache light.
           'template_title': row['title']?.toString(),
           'template_body_text': row['body_text']?.toString(),
           'template_footer_text': row['footer_text']?.toString(),
           'template_id': row['id']?.toString(),
-          'template_source_row': row,
         };
       }
 
@@ -4266,7 +4505,11 @@ class EventService {
         try {
           final rows = await _supabase
               .from(table)
-              .select('*')
+              .select(
+                keyColumn == 'id'
+                    ? 'id,title,thumbnail_url,body_text,footer_text'
+                    : 'id,title,thumbnail_url,body_text,footer_text,$keyColumn',
+              )
               .inFilter(keyColumn, values)
               .order('created_at', ascending: false);
           for (final raw in List<Map<String, dynamic>>.from(rows)) {
@@ -4281,13 +4524,46 @@ class EventService {
         return map;
       }
 
-      final simpleResponse = await _supabase
+      // Fetch event + session certs in parallel (failures stay independent).
+      final simpleFuture = _supabase
           .from('certificates')
-          .select('*, events(title, start_at)')
+          .select(
+            'id,event_id,student_id,template_id,certificate_code,issued_at,event_title,'
+            'events(title, start_at)',
+          )
           .eq('student_id', userId)
           .order('issued_at', ascending: false);
 
-      final rawSimpleCerts = List<Map<String, dynamic>>.from(simpleResponse);
+      final sessionFuture = _supabase
+          .from('event_session_certificates')
+          .select(
+            'id, session_id, event_id, student_id, template_id, session_template_id, certificate_code, issued_at, event_title, session_title, '
+            'event_sessions(id, event_id, title, topic, start_at, events(id, title, start_at))',
+          )
+          .eq('student_id', userId)
+          .order('issued_at', ascending: false);
+
+      late final List<Map<String, dynamic>> rawSimpleCerts;
+      late final List<Map<String, dynamic>> rawSessionCerts;
+      final settled = await Future.wait([
+        () async {
+          try {
+            return List<Map<String, dynamic>>.from(await simpleFuture);
+          } catch (_) {
+            return <Map<String, dynamic>>[];
+          }
+        }(),
+        () async {
+          try {
+            return List<Map<String, dynamic>>.from(await sessionFuture);
+          } catch (_) {
+            return <Map<String, dynamic>>[];
+          }
+        }(),
+      ]);
+      rawSimpleCerts = settled[0];
+      rawSessionCerts = settled[1];
+
       final simpleTemplateIds = rawSimpleCerts
           .map((row) => row['template_id']?.toString() ?? '')
           .where((id) => id.isNotEmpty)
@@ -4314,6 +4590,13 @@ class EventService {
         final eventMap = row['events'] is Map
             ? Map<String, dynamic>.from(row['events'] as Map)
             : <String, dynamic>{};
+        final liveTitle = (eventMap['title']?.toString() ?? '').trim();
+        final snapTitle = (row['event_title']?.toString() ?? '').trim();
+        final resolvedTitle =
+            liveTitle.isNotEmpty ? liveTitle : (snapTitle.isNotEmpty ? snapTitle : 'Event');
+        if (eventMap['title'] == null || (eventMap['title']?.toString() ?? '').trim().isEmpty) {
+          eventMap['title'] = resolvedTitle;
+        }
         final selectedTemplate =
             simpleTemplateById[row['template_id']?.toString() ?? ''] ??
             simpleTemplateByEvent[row['event_id']?.toString() ?? ''] ??
@@ -4323,158 +4606,126 @@ class EventService {
           ...selectedTemplate,
           'certificate_scope': 'event',
           'participant_name': participantName,
-          'display_title': eventMap['title']?.toString() ?? 'Event',
+          'display_title': resolvedTitle,
           'events': eventMap,
         };
       }).toList();
 
       List<Map<String, dynamic>> sessionCerts = [];
-      try {
-        final sessionResponse = await _supabase
-            .from('event_session_certificates')
-            .select(
-              'id, session_id, student_id, template_id, session_template_id, certificate_code, issued_at, '
-              'event_sessions(id, event_id, title, topic, start_at, events(id, title, start_at))',
-            )
-            .eq('student_id', userId)
-            .order('issued_at', ascending: false);
-
-        final rawSessionCerts = List<Map<String, dynamic>>.from(
-          sessionResponse,
-        );
-        final sessionTemplateIds = rawSessionCerts
-            .map((row) => row['session_template_id']?.toString() ?? '')
-            .where((id) => id.isNotEmpty)
-            .toSet()
-            .toList();
-        final eventTemplateIds = rawSessionCerts
-            .map((row) => row['template_id']?.toString() ?? '')
-            .where((id) => id.isNotEmpty)
-            .toSet()
-            .toList();
-        final sessionIds = rawSessionCerts
-            .map((row) => row['session_id']?.toString() ?? '')
-            .where((id) => id.isNotEmpty)
-            .toSet()
-            .toList();
-        final eventIds = rawSessionCerts
-            .map((row) => _asStringMap(row['event_sessions']))
-            .map((session) => session['event_id']?.toString() ?? '')
-            .where((id) => id.isNotEmpty)
-            .toSet()
-            .toList();
-
-        final sessionTemplateById = await loadTemplateMap(
-          table: 'event_session_certificate_templates',
-          keyColumn: 'id',
-          values: sessionTemplateIds,
-        );
-        final sessionTemplateBySession = await loadTemplateMap(
-          table: 'event_session_certificate_templates',
-          keyColumn: 'session_id',
-          values: sessionIds,
-        );
-        final eventTemplateById = await loadTemplateMap(
-          table: 'certificate_templates',
-          keyColumn: 'id',
-          values: eventTemplateIds,
-        );
-        final eventTemplateByEvent = await loadTemplateMap(
-          table: 'certificate_templates',
-          keyColumn: 'event_id',
-          values: eventIds,
-        );
-
-        sessionCerts = rawSessionCerts.map((row) {
-          final session = _asStringMap(row['event_sessions']);
-          final sessionId =
-              session['id']?.toString() ?? row['session_id']?.toString() ?? '';
-          final eventId = session['event_id']?.toString() ?? '';
-          final event = _asStringMap(session['events']);
-          final sessionName = _sessionDisplayName(session);
-          final eventTitle = event['title']?.toString() ?? 'Event';
-
-          final selectedTemplate =
-              sessionTemplateById[row['session_template_id']?.toString() ??
-                  ''] ??
-              eventTemplateById[row['template_id']?.toString() ?? ''] ??
-              sessionTemplateBySession[sessionId] ??
-              eventTemplateByEvent[eventId] ??
-              <String, dynamic>{};
-
-          return {
-            ...row,
-            ...selectedTemplate,
-            'session_id': sessionId,
-            'event_id': eventId,
-            'events': event,
-            'session': session,
-            'certificate_scope': 'session',
-            'participant_name': participantName,
-            'display_title': '$eventTitle - $sessionName',
-          };
-        }).toList();
-      } catch (_) {
+      if (rawSessionCerts.isNotEmpty) {
         try {
-          sessionCerts = await _getSessionCertificatesFallback(userId);
-          final sessionTemplateIds = sessionCerts
+          final sessionTemplateIds = rawSessionCerts
               .map((row) => row['session_template_id']?.toString() ?? '')
               .where((id) => id.isNotEmpty)
               .toSet()
               .toList();
-          final eventTemplateIds = sessionCerts
+          final eventTemplateIds = rawSessionCerts
               .map((row) => row['template_id']?.toString() ?? '')
               .where((id) => id.isNotEmpty)
               .toSet()
               .toList();
-          final sessionIds = sessionCerts
+          final sessionIds = rawSessionCerts
               .map((row) => row['session_id']?.toString() ?? '')
               .where((id) => id.isNotEmpty)
               .toSet()
               .toList();
-          final eventIds = sessionCerts
-              .map((row) => row['event_id']?.toString() ?? '')
+          final eventIds = rawSessionCerts
+              .map((row) => _asStringMap(row['event_sessions']))
+              .map((session) => session['event_id']?.toString() ?? '')
               .where((id) => id.isNotEmpty)
               .toSet()
               .toList();
 
-          final sessionTemplateById = await loadTemplateMap(
-            table: 'event_session_certificate_templates',
-            keyColumn: 'id',
-            values: sessionTemplateIds,
-          );
-          final sessionTemplateBySession = await loadTemplateMap(
-            table: 'event_session_certificate_templates',
-            keyColumn: 'session_id',
-            values: sessionIds,
-          );
-          final eventTemplateById = await loadTemplateMap(
-            table: 'certificate_templates',
-            keyColumn: 'id',
-            values: eventTemplateIds,
-          );
-          final eventTemplateByEvent = await loadTemplateMap(
-            table: 'certificate_templates',
-            keyColumn: 'event_id',
-            values: eventIds,
-          );
+          final templateMaps = await Future.wait([
+            loadTemplateMap(
+              table: 'event_session_certificate_templates',
+              keyColumn: 'id',
+              values: sessionTemplateIds,
+            ),
+            loadTemplateMap(
+              table: 'event_session_certificate_templates',
+              keyColumn: 'session_id',
+              values: sessionIds,
+            ),
+            loadTemplateMap(
+              table: 'certificate_templates',
+              keyColumn: 'id',
+              values: eventTemplateIds,
+            ),
+            loadTemplateMap(
+              table: 'certificate_templates',
+              keyColumn: 'event_id',
+              values: eventIds,
+            ),
+          ]);
+          final sessionTemplateById = templateMaps[0];
+          final sessionTemplateBySession = templateMaps[1];
+          final eventTemplateById = templateMaps[2];
+          final eventTemplateByEvent = templateMaps[3];
 
-          sessionCerts = sessionCerts.map((row) {
+          sessionCerts = rawSessionCerts.map((row) {
+            final session = _asStringMap(row['event_sessions']);
+            final sessionId =
+                session['id']?.toString() ?? row['session_id']?.toString() ?? '';
+            final sessionEventId = (session['event_id']?.toString() ?? '').trim();
+            final rowEventId = (row['event_id']?.toString() ?? '').trim();
+            final eventId =
+                sessionEventId.isNotEmpty ? sessionEventId : rowEventId;
+            final event = _asStringMap(session['events']);
+            final liveSessionName = _sessionDisplayName(session);
+            final snapSessionName = (row['session_title']?.toString() ?? '').trim();
+            final sessionName = liveSessionName.isNotEmpty &&
+                    liveSessionName.toLowerCase() != 'seminar'
+                ? liveSessionName
+                : (snapSessionName.isNotEmpty ? snapSessionName : liveSessionName);
+            final liveEventTitle = (event['title']?.toString() ?? '').trim();
+            final snapEventTitle = (row['event_title']?.toString() ?? '').trim();
+            final eventTitle = liveEventTitle.isNotEmpty
+                ? liveEventTitle
+                : (snapEventTitle.isNotEmpty ? snapEventTitle : 'Event');
+            if ((event['title']?.toString() ?? '').trim().isEmpty) {
+              event['title'] = eventTitle;
+            }
+            if (session.isNotEmpty &&
+                (session['title']?.toString() ?? '').trim().isEmpty &&
+                sessionName.isNotEmpty) {
+              session['title'] = sessionName;
+            }
+
             final selectedTemplate =
                 sessionTemplateById[row['session_template_id']?.toString() ??
                     ''] ??
                 eventTemplateById[row['template_id']?.toString() ?? ''] ??
-                sessionTemplateBySession[row['session_id']?.toString() ?? ''] ??
-                eventTemplateByEvent[row['event_id']?.toString() ?? ''] ??
+                sessionTemplateBySession[sessionId] ??
+                eventTemplateByEvent[eventId] ??
                 <String, dynamic>{};
+
             return {
               ...row,
               ...selectedTemplate,
+              'session_id': sessionId,
+              'event_id': eventId,
+              'events': event,
+              'session': session,
+              'certificate_scope': 'session',
               'participant_name': participantName,
+              'display_title': sessionName.isNotEmpty
+                  ? '$eventTitle - $sessionName'
+                  : eventTitle,
             };
           }).toList();
         } catch (_) {
-          sessionCerts = [];
+          try {
+            sessionCerts = await _getSessionCertificatesFallback(userId);
+            sessionCerts = sessionCerts.map((row) {
+              return {
+                ...row,
+                'participant_name': participantName,
+              };
+            }).toList();
+          } catch (_) {
+            sessionCerts = [];
+          }
         }
       }
 
@@ -4497,8 +4748,34 @@ class EventService {
         if (bIssued == null) return -1;
         return bIssued.compareTo(aIssued);
       });
-      return all;
+
+      final slim = _stripHeavyCertFields(all);
+      final offline = await isLikelyOffline();
+      var toStore = slim;
+      if (slim.isEmpty && offline) {
+        toStore = await _preferExistingCacheIfEmpty(cacheKey, slim);
+      }
+      _writeListCache(cacheKey, toStore);
+      unawaited(
+        _appCache.saveJsonList(
+          cacheKey,
+          toStore,
+          preserveNonEmptyOnEmpty: offline,
+        ),
+      );
+      return toStore;
     } catch (e) {
+      if (!forceFresh) {
+        final stale = _readListCache(
+          cacheKey,
+          _myCertificatesTtl,
+          allowStale: true,
+          staleTtl: const Duration(hours: 24),
+        );
+        if (stale != null) return stale;
+        final disk = await _appCache.loadJsonList(cacheKey);
+        if (disk.isNotEmpty) return disk;
+      }
       return [];
     }
   }
@@ -4734,6 +5011,7 @@ class EventService {
   }
 
   /// Prefer BFF early_out flag — fresher than anon event embeds after web toggle.
+  /// For seminar events, also stamps the active seminar's early_out onto that session.
   Future<List<Map<String, dynamic>>> _enrichEventsWithEarlyOut(
     List<Map<String, dynamic>> events,
   ) async {
@@ -4749,6 +5027,7 @@ class EventService {
     if (ids.isEmpty) return events;
 
     final byId = <String, dynamic>{};
+    final sessionByEvent = <String, String>{};
     await Future.wait(ids.map((id) async {
       try {
         final res = await _mobileBackend.getEventEarlyOutStatus(eventId: id);
@@ -4757,6 +5036,10 @@ class EventService {
         if (earlyOut is! Map) return;
         final enabled = earlyOut['enabled'] == true;
         byId[id] = enabled ? earlyOut['enabled_at'] : null;
+        final sid = res['session_id']?.toString().trim() ?? '';
+        if (sid.isNotEmpty) {
+          sessionByEvent[id] = sid;
+        }
       } catch (_) {}
     }));
 
@@ -4764,8 +5047,70 @@ class EventService {
     return events.map((event) {
       final id = event['id']?.toString() ?? '';
       if (id.isEmpty || !byId.containsKey(id)) return event;
-      return {...event, 'early_out_enabled_at': byId[id]};
+      return {
+        ...event,
+        'early_out_enabled_at': byId[id],
+        if (sessionByEvent[id] != null) '_early_out_session_id': sessionByEvent[id],
+      };
     }).toList();
+  }
+
+  List<Map<String, dynamic>> _sessionsWithEarlyOutMerged(
+    List<Map<String, dynamic>> sessions,
+    Map<String, dynamic> event,
+  ) {
+    final eoSessionId = event['_early_out_session_id']?.toString().trim() ?? '';
+    final eoAt = event['early_out_enabled_at'];
+    if (eoSessionId.isEmpty) {
+      return sessions;
+    }
+    return sessions.map((session) {
+      final sid = session['id']?.toString() ?? '';
+      if (sid != eoSessionId) return session;
+      // BFF is source of truth right after toggle (anon session row can lag).
+      return {...session, 'early_out_enabled_at': eoAt};
+    }).toList();
+  }
+
+  Map<String, dynamic>? _findOpenSessionCheckOut({
+    required Map<String, dynamic> eventSummary,
+    required List<Map<String, dynamic>> sessions,
+    required DateTime nowUtc,
+  }) {
+    Map<String, dynamic>? best;
+    DateTime? bestEnabled;
+    for (final session in sessions) {
+      final sessionSummary = {
+        'id': session['id']?.toString() ?? '',
+        'title': session['title']?.toString() ?? '',
+        'topic': session['topic']?.toString() ?? '',
+        'display_name': _sessionDisplayName(session),
+        'start_at': session['start_at']?.toString() ?? '',
+        'end_at': session['end_at']?.toString() ?? '',
+        'scan_window_minutes': _sessionWindowMinutes(session),
+        'early_out_enabled_at': session['early_out_enabled_at'],
+      };
+      final open = _resolveCheckOutScanOpen(
+        eventSummary: eventSummary,
+        endRaw: session['end_at'],
+        earlyOutEnabledAt: session['early_out_enabled_at'],
+        nowUtc: nowUtc,
+        source: 'session',
+        session: sessionSummary,
+      );
+      if (open == null) continue;
+      final enabledAt = _toUtcDate(session['early_out_enabled_at']);
+      // Prefer an active Early Out window over a normal end+1h window.
+      if (enabledAt != null) {
+        if (bestEnabled == null || enabledAt.isAfter(bestEnabled)) {
+          bestEnabled = enabledAt;
+          best = open;
+        }
+        continue;
+      }
+      best ??= open;
+    }
+    return best;
   }
 
   Map<String, dynamic> _finalizeTeacherScanContext({
@@ -5037,7 +5382,7 @@ class EventService {
           eventRows = await _supabase
               .from('events')
               .select(
-                'id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time',
+                'id,title,status,start_at,end_at,location,event_mode,event_structure,grace_time',
               )
               .inFilter('id', eventIds.toList())
               .inFilter('status', ['published', 'approved'])
@@ -5047,7 +5392,7 @@ class EventService {
             eventRows = await _supabase
                 .from('events')
                 .select(
-                  'id,title,status,start_at,end_at,location,uses_sessions,grace_time',
+                  'id,title,status,start_at,end_at,location,grace_time',
                 )
                 .inFilter('id', eventIds.toList())
                 .inFilter('status', ['published', 'approved'])
@@ -5179,12 +5524,12 @@ class EventService {
       work['event_structure'] = isSeminarBased
           ? (sessions.length > 1 ? 'two_seminars' : 'one_seminar')
           : 'simple';
-      work['uses_sessions'] = isSeminarBased;
+      // Never INSERT uses_sessions — column absent on prod (42703 storm).
+      work.remove('uses_sessions');
 
       final optionalColumns = [
         'event_mode',
         'event_structure',
-        'uses_sessions',
         'event_span',
       ];
 
@@ -5812,7 +6157,7 @@ class EventService {
       final rows = await _supabase
           .from('events')
           .select(
-            'id,title,status,start_at,end_at,location,uses_sessions,event_mode,event_structure,grace_time',
+            'id,title,status,start_at,end_at,location,event_mode,event_structure,grace_time',
           )
           .eq('id', id)
           .eq('status', 'published')
@@ -5825,7 +6170,7 @@ class EventService {
         final rows = await _supabase
             .from('events')
             .select(
-              'id,title,status,start_at,end_at,location,uses_sessions,grace_time',
+              'id,title,status,start_at,end_at,location,grace_time',
             )
             .eq('id', id)
             .eq('status', 'published')
@@ -7463,13 +7808,30 @@ class EventService {
         }
 
         // Separate BFF step: issue cert only after answers are persisted + eval complete.
-        final certRes = await _mobileBackend.secureWrite('certificate_auto_issue', {
-          'event_id': eventId,
-        });
-        final cert = certRes['certificate'];
+        // Eval save already succeeded — never fail the whole submit on cert claim.
+        // One attempt only (no soft-heal retries — those recreated deleted DB rows).
+        Map<String, dynamic>? cert;
+        try {
+          final certRes = await _mobileBackend.secureWrite('certificate_auto_issue', {
+            'event_id': eventId,
+          });
+          final raw = certRes['certificate'];
+          final map = raw is Map
+              ? Map<String, dynamic>.from(raw)
+              : (certRes['ok'] == true
+                  ? <String, dynamic>{'ok': true, 'issued': 0, 'skipped': ''}
+                  : null);
+          cert = map;
+          // ignore: avoid_print
+          debugPrint('[cert] claim issued=${map?['issued']} skipped=${map?['skipped']}');
+        } catch (e) {
+          // ignore: avoid_print
+          debugPrint('[cert] claim error: $e');
+          cert = {'ok': true, 'issued': 0, 'skipped': ''};
+        }
         return {
           'ok': true,
-          if (cert is Map) 'certificate': Map<String, dynamic>.from(cert),
+          if (cert != null) 'certificate': cert,
         };
       }
 
@@ -7562,6 +7924,26 @@ class EventService {
     return _hasCheckInRecord(row) && _hasCheckOutRecord(row);
   }
 
+  /// Latest-ending seminar id for multi-seminar events (null = simple / 1 seminar).
+  String? _finalSeminarIdForEvaluation(List<Map<String, dynamic>> sessions) {
+    if (sessions.length <= 1) return null;
+    String? finalId;
+    DateTime? finalEnd;
+    for (final session in sessions) {
+      final sid = session['id']?.toString().trim() ?? '';
+      if (sid.isEmpty) continue;
+      final end =
+          DateTime.tryParse(session['end_at']?.toString() ?? '')?.toLocal() ??
+          DateTime.tryParse(session['start_at']?.toString() ?? '')?.toLocal();
+      if (end == null) continue;
+      if (finalEnd == null || end.isAfter(finalEnd)) {
+        finalEnd = end;
+        finalId = sid;
+      }
+    }
+    return finalId;
+  }
+
   bool _isNonEmptyAnswer(dynamic value) {
     return (value?.toString().trim().isNotEmpty ?? false);
   }
@@ -7652,11 +8034,12 @@ class EventService {
       try {
         final rows = await _supabase
             .from('attendance')
-            .select('session_id, status, check_in_at')
+            .select('session_id, status, check_in_at, check_out_at')
             .eq('ticket_id', ticketId)
             .not('session_id', 'is', null);
         for (final row in List<Map<String, dynamic>>.from(rows)) {
-          if (!_hasCheckInRecord(row)) continue;
+          // Eval requires time-out, not time-in alone.
+          if (!_hasCompletedAttendanceForEval(row)) continue;
           final sessionId = row['session_id']?.toString() ?? '';
           if (sessionId.isNotEmpty) {
             attended.add(sessionId);
@@ -7772,6 +8155,33 @@ class EventService {
           'sections': const <Map<String, dynamic>>[],
           'message':
               'Time-out required before evaluation. Scan the event QR to check out first.',
+        };
+      }
+
+      // 2+ seminars: wait for final seminar (latest end_at) time-out — not Seminar 1.
+      final finalSeminarId = _finalSeminarIdForEvaluation(sessions);
+      if (finalSeminarId != null &&
+          !attendedSessionIds.contains(finalSeminarId)) {
+        Map<String, dynamic>? finalSession;
+        for (final s in sessions) {
+          if ((s['id']?.toString() ?? '') == finalSeminarId) {
+            finalSession = s;
+            break;
+          }
+        }
+        final finalLabel = finalSession != null
+            ? _sessionDisplayName(finalSession)
+            : 'the final seminar';
+        return {
+          'ok': true,
+          'event': {...event, 'sessions': sessions},
+          'uses_sessions': true,
+          'is_eligible': false,
+          'has_questions': false,
+          'is_complete': false,
+          'sections': const <Map<String, dynamic>>[],
+          'message':
+              'Evaluation opens after you time out of $finalLabel.',
         };
       }
 
@@ -7929,7 +8339,7 @@ class EventService {
           .select(_eventListColumns)
           .inFilter('status', ['published', 'expired', 'finished', 'archived'])
           .order('end_at', ascending: false)
-          .limit(40);
+          .limit(15);
       // Evaluation visibility should follow registration + attendance eligibility,
       // not the list-level year filter, because students may already be registered
       // for older events whose targeting format changed over time.
@@ -8137,7 +8547,36 @@ class EventService {
       return [];
     }
 
-    for (final reg in registrationRows) {
+    // Cap scanned regs for home gate — typical students have few active regs.
+    final scopedRegs = registrationRows.length > 40
+        ? registrationRows.take(40).toList()
+        : registrationRows;
+
+    // One batched ticket lookup instead of per-registration selects.
+    final registrationIds = scopedRegs
+        .map((r) => r['id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toList();
+    final ticketByRegistrationId = <String, String>{};
+    if (registrationIds.isNotEmpty) {
+      try {
+        final ticketRows = await _supabase
+            .from('tickets')
+            .select('id,registration_id')
+            .inFilter('registration_id', registrationIds);
+        for (final raw in List<Map<String, dynamic>>.from(ticketRows)) {
+          final rid = raw['registration_id']?.toString() ?? '';
+          final tid = raw['id']?.toString() ?? '';
+          if (rid.isNotEmpty && tid.isNotEmpty) {
+            ticketByRegistrationId.putIfAbsent(rid, () => tid);
+          }
+        }
+      } catch (_) {
+        // Leave map empty — scopes still work without ticket_id fallbacks.
+      }
+    }
+
+    for (final reg in scopedRegs) {
       final registrationId = reg['id']?.toString() ?? '';
       final eventId = reg['event_id']?.toString() ?? '';
       if (registrationId.isEmpty || eventId.isEmpty) continue;
@@ -8150,19 +8589,7 @@ class EventService {
           ? event['title'].toString().trim()
           : 'Event';
       final eventLocation = event['location']?.toString() ?? '';
-      String ticketId = '';
-      try {
-        final ticketRows = await _supabase
-            .from('tickets')
-            .select('id')
-            .eq('registration_id', registrationId)
-            .limit(1);
-        if (ticketRows.isNotEmpty) {
-          ticketId = ticketRows.first['id']?.toString() ?? '';
-        }
-      } catch (_) {
-        // Leave ticketId empty when ticket lookup is unavailable.
-      }
+      final ticketId = ticketByRegistrationId[registrationId] ?? '';
 
       var sessions = <Map<String, dynamic>>[];
       if (_eventUsesSessions(event)) {

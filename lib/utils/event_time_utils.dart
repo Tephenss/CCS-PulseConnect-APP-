@@ -43,6 +43,9 @@ bool usesEventSessions(Map<String, dynamic> event) {
     return true;
   }
 
+  final sessionCount = int.tryParse(event['session_count']?.toString() ?? '') ?? 0;
+  if (sessionCount > 0) return true;
+
   final eventMode = (event['event_mode']?.toString() ?? '').toLowerCase().trim();
   if (eventMode == 'seminar_based') return true;
 

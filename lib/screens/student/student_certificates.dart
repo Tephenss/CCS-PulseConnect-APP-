@@ -1,16 +1,22 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import '../../config/env.dart';
+import '../../services/auth_service.dart';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
 import '../../utils/course_theme_utils.dart';
@@ -28,6 +34,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
   final TextEditingController _searchController = TextEditingController();
   List<Map<String, dynamic>> _certificates = [];
   bool _isLoading = true;
+  bool _isDownloading = false;
   String _searchQuery = '';
 
   Color _studentPrimary(BuildContext context) =>
@@ -35,9 +42,251 @@ class _StudentCertificatesState extends State<StudentCertificates>
   Color _studentDark(BuildContext context) =>
       CourseThemeUtils.studentDarkFromPrimary(_studentPrimary(context));
 
+  String _composeUserDisplayName(Map<String, dynamic> user) {
+    final firstName = (user['first_name']?.toString() ?? '').trim();
+    final middleName = (user['middle_name']?.toString() ?? '').trim();
+    final lastName = (user['last_name']?.toString() ?? '').trim();
+    final suffix = (user['suffix']?.toString() ?? '').trim();
+    final parts = <String>[
+      if (firstName.isNotEmpty) firstName,
+      if (middleName.isNotEmpty) middleName,
+      if (lastName.isNotEmpty) lastName,
+    ];
+    var full = parts.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (suffix.isNotEmpty) {
+      full = full.isEmpty ? suffix : '$full $suffix';
+    }
+    if (full.isNotEmpty) return full;
+    final display = (user['display_name']?.toString() ?? '').trim();
+    if (display.isNotEmpty) return display;
+    return (user['full_name']?.toString() ?? '').trim();
+  }
+
   String _participantName(Map<String, dynamic> cert) {
-    final raw = cert['participant_name']?.toString().trim() ?? '';
-    return raw.isNotEmpty ? raw : 'Student Name';
+    final raw = (cert['participant_name']?.toString() ?? '').trim();
+    if (raw.isNotEmpty &&
+        raw.toLowerCase() != 'student name' &&
+        !raw.contains('{{')) {
+      return raw;
+    }
+    final display = (cert['display_name']?.toString() ?? '').trim();
+    if (display.isNotEmpty && !display.contains('{{')) return display;
+    final full = (cert['full_name']?.toString() ?? '').trim();
+    if (full.isNotEmpty && !full.contains('{{')) return full;
+    return '';
+  }
+
+  Future<String> _resolveParticipantName(Map<String, dynamic> cert) async {
+    final fromCert = _participantName(cert);
+    if (fromCert.isNotEmpty) return fromCert;
+
+    try {
+      final user = await AuthService().getCurrentUser();
+      if (user != null) {
+        final composed = _composeUserDisplayName(user);
+        if (composed.isNotEmpty) return composed;
+      }
+    } catch (_) {}
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('user_data');
+      if (raw != null && raw.trim().isNotEmpty) {
+        final parsed = jsonDecode(raw);
+        if (parsed is Map) {
+          final composed =
+              _composeUserDisplayName(Map<String, dynamic>.from(parsed));
+          if (composed.isNotEmpty) return composed;
+        }
+      }
+    } catch (_) {}
+
+    return '';
+  }
+
+  String _sanitizeFilePart(String raw) {
+    return raw
+        .trim()
+        .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  String _safePdfFileName(
+    String participantName, {
+    String? seminarOrTopic,
+  }) {
+    var name = _sanitizeFilePart(participantName);
+    if (name.isEmpty || name.toLowerCase() == 'student name') {
+      name = 'Certificate';
+    }
+
+    final label = _sanitizeFilePart(seminarOrTopic ?? '');
+    if (label.isNotEmpty) {
+      name = '$name($label)';
+    }
+
+    if (name.length > 120) {
+      name = name.substring(0, 120).trim();
+    }
+    return '$name.pdf';
+  }
+
+  Future<Directory> _resolveDownloadsDirectory() async {
+    if (Platform.isAndroid) {
+      for (final path in const [
+        '/storage/emulated/0/Download',
+        '/storage/emulated/0/Downloads',
+      ]) {
+        final dir = Directory(path);
+        if (await dir.exists()) return dir;
+      }
+    }
+
+    try {
+      final downloads = await getDownloadsDirectory();
+      if (downloads != null) return downloads;
+    } catch (_) {}
+
+    if (Platform.isIOS) {
+      return getApplicationDocumentsDirectory();
+    }
+    return getTemporaryDirectory();
+  }
+
+  Future<Uint8List> _buildCertificatePdfBytes(Uint8List imageBytes) async {
+    final image = pw.MemoryImage(imageBytes);
+    final doc = pw.Document();
+    // Match common certificate canvas ratio (landscape).
+    const pageFormat = PdfPageFormat(1123, 794, marginAll: 0);
+    doc.addPage(
+      pw.Page(
+        pageFormat: pageFormat,
+        margin: pw.EdgeInsets.zero,
+        build: (context) {
+          return pw.SizedBox(
+            width: pageFormat.width,
+            height: pageFormat.height,
+            child: pw.Image(image, fit: pw.BoxFit.contain),
+          );
+        },
+      ),
+    );
+    return Uint8List.fromList(await doc.save());
+  }
+
+  Future<String?> _savePdfToDownloads({
+    required String fileName,
+    required Uint8List pdfBytes,
+  }) async {
+    if (Platform.isAndroid) {
+      try {
+        const channel = MethodChannel('pulseconnect/downloads');
+        final result = await channel.invokeMethod<dynamic>('saveFile', {
+          'fileName': fileName,
+          'mimeType': 'application/pdf',
+          'bytes': pdfBytes,
+        });
+        if (result is Map) {
+          final savedName = (result['fileName']?.toString() ?? fileName).trim();
+          if (savedName.isNotEmpty) return savedName;
+        }
+        return fileName;
+      } catch (_) {
+        // Fall through to path-based write.
+      }
+    }
+
+    try {
+      final downloadsDir = await _resolveDownloadsDirectory();
+      var target = File(p.join(downloadsDir.path, fileName));
+      if (await target.exists()) {
+        final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+        final base = fileName.replaceAll(RegExp(r'\.pdf$', caseSensitive: false), '');
+        target = File(p.join(downloadsDir.path, '${base}_$stamp.pdf'));
+      }
+      await target.writeAsBytes(pdfBytes, flush: true);
+      return p.basename(target.path);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _downloadCertificate(
+    Map<String, dynamic> cert, {
+    Uint8List? renderedImageBytes,
+    bool alreadyLocked = false,
+  }) async {
+    if (!alreadyLocked) {
+      if (_isDownloading) return;
+      _isDownloading = true;
+    }
+
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      Uint8List? imageBytes = renderedImageBytes;
+
+      if (imageBytes == null || imageBytes.isEmpty) {
+        final raw = cert['thumbnail_url']?.toString().trim() ?? '';
+        final decoded = _decodeThumbnailBytes(raw);
+        if (decoded != null) {
+          imageBytes = decoded;
+        } else if (raw.startsWith('http://') || raw.startsWith('https://')) {
+          final response = await http.get(Uri.parse(raw));
+          if (response.statusCode >= 200 && response.statusCode < 300) {
+            imageBytes = response.bodyBytes;
+          }
+        }
+      }
+
+      if (imageBytes == null || imageBytes.isEmpty) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('Certificate file is unavailable for download.'),
+          ),
+        );
+        return;
+      }
+
+      final participantName = await _resolveParticipantName(cert);
+      final titleParts = _resolveTitleParts(cert);
+      final fileName = _safePdfFileName(
+        participantName,
+        seminarOrTopic: titleParts.seminarLabel ?? titleParts.eventTitle,
+      );
+      final pdfBytes = await _buildCertificatePdfBytes(imageBytes);
+
+      final savedName = await _savePdfToDownloads(
+        fileName: fileName,
+        pdfBytes: pdfBytes,
+      );
+
+      if (savedName != null && savedName.isNotEmpty) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('Saved to Downloads as $savedName')),
+        );
+        return;
+      }
+
+      // Fallback: share sheet with the correct PDF filename.
+      final tempDir = await getTemporaryDirectory();
+      final tempFile = File(p.join(tempDir.path, fileName));
+      await tempFile.writeAsBytes(pdfBytes, flush: true);
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(tempFile.path, mimeType: 'application/pdf', name: fileName)],
+          text: 'Your CCS PulseConnect certificate',
+        ),
+      );
+    } catch (_) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Failed to download certificate.')),
+      );
+    } finally {
+      if (!alreadyLocked) {
+        _isDownloading = false;
+      }
+    }
   }
 
   Uint8List? _decodeThumbnailBytes(String? thumbnailUrl) {
@@ -125,50 +374,6 @@ class _StudentCertificatesState extends State<StudentCertificates>
     );
   }
 
-  Future<void> _downloadCertificate(Map<String, dynamic> cert) async {
-    final messenger = ScaffoldMessenger.of(context);
-    try {
-      final raw = cert['thumbnail_url']?.toString().trim() ?? '';
-      Uint8List? bytes;
-
-      final decoded = _decodeThumbnailBytes(raw);
-      if (decoded != null) {
-        bytes = decoded;
-      } else if (raw.startsWith('http://') || raw.startsWith('https://')) {
-        final response = await http.get(Uri.parse(raw));
-        if (response.statusCode >= 200 && response.statusCode < 300) {
-          bytes = response.bodyBytes;
-        }
-      }
-
-      if (bytes == null || bytes.isEmpty) {
-        messenger.showSnackBar(
-          const SnackBar(
-            content: Text('Certificate file is unavailable for download.'),
-          ),
-        );
-        return;
-      }
-
-      final dir = await getTemporaryDirectory();
-      final ts = DateTime.now().millisecondsSinceEpoch;
-      final fileName = 'certificate_$ts.png';
-      final file = File('${dir.path}/$fileName');
-      await file.writeAsBytes(bytes, flush: true);
-
-      await SharePlus.instance.share(
-        ShareParams(
-          files: [XFile(file.path, mimeType: 'image/png')],
-          text: 'Your CCS PulseConnect certificate',
-        ),
-      );
-    } catch (_) {
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Failed to download certificate.')),
-      );
-    }
-  }
-
   @override
   void initState() {
     super.initState();
@@ -186,24 +391,74 @@ class _StudentCertificatesState extends State<StudentCertificates>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      _loadCertificates();
+      // Soft catch-up — keep current list visible; no full-page loader.
+      unawaited(_loadCertificates(showLoader: false, forceFresh: true));
     }
   }
 
-  Future<void> _loadCertificates({bool showLoader = false}) async {
-    if (showLoader && mounted) {
-      setState(() {
-        _isLoading = true;
-      });
-    }
+  Future<void> _loadCertificates({
+    bool showLoader = false,
+    bool forceFresh = false,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id') ?? '';
-    final certs = await _eventService.getMyCertificates(userId);
-    if (mounted) {
-      setState(() {
-        _certificates = certs;
-        _isLoading = false;
+    if (userId.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _certificates = [];
+          _isLoading = false;
+        });
+      }
+      return;
+    }
+
+    final hasLocal = _certificates.isNotEmpty;
+    // Full-page spinner only when list is empty and explicitly requested.
+    // First open already starts with _isLoading=true; resume/pull keep cards.
+    if (!hasLocal && mounted && showLoader) {
+      setState(() => _isLoading = true);
+    }
+
+    try {
+      await _refreshCertificates(userId, forceFresh: forceFresh);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  Future<void> _refreshCertificates(
+    String userId, {
+    bool forceFresh = false,
+  }) async {
+    try {
+      final certs = await _eventService.getMyCertificates(
+        userId,
+        forceFresh: forceFresh,
+      );
+      final resolvedName = await _resolveParticipantName({
+        if (certs.isNotEmpty) ...certs.first,
       });
+      final enriched = certs.map((cert) {
+        final existing = _participantName(cert);
+        if (existing.isNotEmpty) return cert;
+        if (resolvedName.isEmpty) return cert;
+        return {
+          ...cert,
+          'participant_name': resolvedName,
+        };
+      }).toList();
+      if (mounted) {
+        setState(() {
+          _certificates = enriched;
+          _isLoading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -232,6 +487,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
 
     final session =
         cert['session'] is Map ? (cert['session'] as Map) : const <dynamic, dynamic>{};
+    final sessionTopic = (session['topic']?.toString() ?? '').trim();
     final sessionTitle = (session['title']?.toString() ?? '').trim();
 
     String eventTitle = rawTitle;
@@ -241,6 +497,8 @@ class _StudentCertificatesState extends State<StudentCertificates>
       final idx = rawTitle.indexOf(' - ');
       eventTitle = rawTitle.substring(0, idx).trim();
       seminarLabel = rawTitle.substring(idx + 3).trim();
+    } else if (sessionTopic.isNotEmpty) {
+      seminarLabel = sessionTopic;
     } else if (sessionTitle.isNotEmpty) {
       seminarLabel = sessionTitle;
     }
@@ -272,7 +530,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
       body: _isLoading
           ? const Center(child: PulseConnectLoader())
           : RefreshIndicator(
-              onRefresh: _loadCertificates,
+              onRefresh: () => _loadCertificates(forceFresh: true),
               color: _studentPrimary(context),
               child: _certificates.isEmpty
                   ? ListView(
@@ -428,8 +686,6 @@ class _StudentCertificatesState extends State<StudentCertificates>
     final titleParts = _resolveTitleParts(cert);
     final eventTitle = titleParts.eventTitle;
     final seminarLabel = titleParts.seminarLabel;
-    final participantName = _participantName(cert);
-    final canvasState = _parseCanvasState(cert['template_canvas_state']);
     final startAt = event['start_at'] as String?;
 
     DateTime? startDate;
@@ -463,17 +719,13 @@ class _StudentCertificatesState extends State<StudentCertificates>
                 borderRadius: const BorderRadius.vertical(
                   top: Radius.circular(15),
                 ),
-                child: canvasState != null
-                    ? AbsorbPointer(
-                        child: _CertificateCanvasPreview(
-                          cert: cert,
-                          title: eventTitle,
-                          participantName: participantName,
-                          canvasState: canvasState,
-                          showFrame: false,
-                        ),
-                      )
-                    : _buildCertificateThumbnail(cert),
+                // Real Fabric preview (same as tap) — replaces baked {{participant_name}} thumbs.
+                child: _CertificateListCanvasThumb(
+                  cert: cert,
+                  participantName: _participantName(cert),
+                  title: eventTitle,
+                  fallback: _buildCertificateThumbnail(cert),
+                ),
               ),
             ),
             Padding(
@@ -538,14 +790,30 @@ class _StudentCertificatesState extends State<StudentCertificates>
     final eventTitle = titleParts.eventTitle;
     final seminarLabel = titleParts.seminarLabel;
     final title = eventTitle;
-    final participantName = _participantName(cert);
-    final canvasState = _parseCanvasState(cert['template_canvas_state']);
+    final participantName = await _resolveParticipantName(cert);
+    var canvasState = _parseCanvasState(cert['template_canvas_state']);
+    if (canvasState == null) {
+      canvasState = await _eventService.fetchCertificateCanvasState(
+        templateId: cert['template_id']?.toString(),
+        sessionTemplateId: cert['session_template_id']?.toString(),
+      );
+      if (canvasState != null) {
+        cert = {
+          ...cert,
+          'template_canvas_state': canvasState,
+        };
+      }
+    }
+    final canvasKey = GlobalKey<_CertificateCanvasPreviewState>();
 
     if (!mounted) return;
 
+    var isSaving = false;
     showDialog(
       context: context,
-      builder: (ctx) => Dialog(
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return Dialog(
         backgroundColor: Colors.transparent,
         insetPadding: const EdgeInsets.all(20),
         child: Container(
@@ -579,7 +847,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
                     ),
                     IconButton(
                       icon: Icon(Icons.close_rounded, color: Colors.grey.shade500),
-                      onPressed: () => Navigator.pop(context),
+                      onPressed: isSaving ? null : () => Navigator.pop(context),
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(),
                     ),
@@ -601,6 +869,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
                     ? ClipRRect(
                         borderRadius: BorderRadius.circular(12),
                         child: _CertificateCanvasPreview(
+                          key: canvasKey,
                           cert: cert,
                           title: title,
                           participantName: participantName,
@@ -642,7 +911,9 @@ class _StudentCertificatesState extends State<StudentCertificates>
                               ),
                               const SizedBox(height: 10),
                               Text(
-                                participantName,
+                                participantName.isNotEmpty
+                                    ? participantName
+                                    : 'Participant',
                                 style: const TextStyle(
                                   fontFamily: 'serif',
                                   fontSize: 24,
@@ -678,15 +949,49 @@ class _StudentCertificatesState extends State<StudentCertificates>
                       ),
                     ),
                     child: ElevatedButton.icon(
-                      onPressed: () {
-                        _downloadCertificate(cert);
-                      },
-                      icon: const Icon(Icons.download_rounded),
-                      label: const Text('DOWNLOAD'),
+                      onPressed: isSaving
+                          ? null
+                          : () async {
+                              if (isSaving || _isDownloading) return;
+                              isSaving = true;
+                              _isDownloading = true;
+                              setDialogState(() {});
+                              try {
+                                Uint8List? rendered;
+                                final state = canvasKey.currentState;
+                                if (state != null) {
+                                  rendered = await state.exportPng();
+                                }
+                                if (!context.mounted) return;
+                                await _downloadCertificate(
+                                  cert,
+                                  renderedImageBytes: rendered,
+                                  alreadyLocked: true,
+                                );
+                              } finally {
+                                _isDownloading = false;
+                                if (ctx.mounted) {
+                                  setDialogState(() => isSaving = false);
+                                }
+                              }
+                            },
+                      icon: isSaving
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.download_rounded),
+                      label: Text(isSaving ? 'SAVING...' : 'DOWNLOAD'),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.transparent,
                         shadowColor: Colors.transparent,
+                        disabledBackgroundColor: Colors.transparent,
                         foregroundColor: Colors.white,
+                        disabledForegroundColor: Colors.white70,
                         minimumSize: const Size(220, 48),
                         padding: const EdgeInsets.symmetric(vertical: 14),
                         shape: RoundedRectangleBorder(
@@ -700,6 +1005,132 @@ class _StudentCertificatesState extends State<StudentCertificates>
             ],
           ),
         ),
+      );
+        },
+      ),
+    );
+  }
+}
+
+/// List-card certificate preview: loads canvas once and renders like modal preview.
+class _CertificateListCanvasThumb extends StatefulWidget {
+  const _CertificateListCanvasThumb({
+    required this.cert,
+    required this.participantName,
+    required this.title,
+    required this.fallback,
+  });
+
+  final Map<String, dynamic> cert;
+  final String participantName;
+  final String title;
+  final Widget fallback;
+
+  @override
+  State<_CertificateListCanvasThumb> createState() =>
+      _CertificateListCanvasThumbState();
+}
+
+class _CertificateListCanvasThumbState extends State<_CertificateListCanvasThumb> {
+  final _eventService = EventService();
+  Map<String, dynamic>? _canvasState;
+  bool _loading = true;
+  bool _failed = false;
+
+  Map<String, dynamic>? _parseCanvasState(dynamic raw) {
+    if (raw is Map<String, dynamic>) return raw;
+    if (raw is Map) {
+      return raw.map((k, v) => MapEntry(k.toString(), v));
+    }
+    if (raw is String) {
+      final trimmed = raw.trim();
+      if (trimmed.isEmpty) return null;
+      try {
+        final decoded = jsonDecode(trimmed);
+        if (decoded is Map<String, dynamic>) return decoded;
+        if (decoded is Map) {
+          return decoded.map((k, v) => MapEntry(k.toString(), v));
+        }
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadCanvas());
+  }
+
+  @override
+  void didUpdateWidget(covariant _CertificateListCanvasThumb oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final oldId = oldWidget.cert['id']?.toString() ?? '';
+    final nextId = widget.cert['id']?.toString() ?? '';
+    if (oldId != nextId) {
+      _canvasState = null;
+      _failed = false;
+      _loading = true;
+      unawaited(_loadCanvas());
+    }
+  }
+
+  Future<void> _loadCanvas() async {
+    var canvas = _parseCanvasState(widget.cert['template_canvas_state']);
+    if (canvas == null) {
+      try {
+        canvas = await _eventService.fetchCertificateCanvasState(
+          templateId: widget.cert['template_id']?.toString(),
+          sessionTemplateId: widget.cert['session_template_id']?.toString(),
+        );
+      } catch (_) {
+        canvas = null;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _canvasState = canvas;
+      _failed = canvas == null;
+      _loading = false;
+    });
+    if (canvas != null) {
+      widget.cert['template_canvas_state'] = canvas;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          widget.fallback,
+          const ColoredBox(
+            color: Color(0x66FFFFFF),
+            child: Center(
+              child: SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (_failed || _canvasState == null) {
+      return widget.fallback;
+    }
+
+    // IgnorePointer so the parent card GestureDetector still receives taps.
+    return IgnorePointer(
+      child: _CertificateCanvasPreview(
+        cert: widget.cert,
+        canvasState: _canvasState!,
+        title: widget.title,
+        participantName: widget.participantName,
+        showFrame: false,
       ),
     );
   }
@@ -713,6 +1144,7 @@ class _CertificateCanvasPreview extends StatefulWidget {
   final bool showFrame;
 
   const _CertificateCanvasPreview({
+    super.key,
     required this.cert,
     required this.canvasState,
     required this.title,
@@ -721,11 +1153,22 @@ class _CertificateCanvasPreview extends StatefulWidget {
   });
 
   @override
-  State<_CertificateCanvasPreview> createState() => _CertificateCanvasPreviewState();
+  State<_CertificateCanvasPreview> createState() =>
+      _CertificateCanvasPreviewState();
 }
 
 class _CertificateCanvasPreviewState extends State<_CertificateCanvasPreview> {
   late final WebViewController _controller;
+  bool _canvasReady = false;
+
+  String _assetBaseUrl() {
+    var base = Env.mobilePushApiBaseUrl.trim();
+    if (base.endsWith('/')) {
+      base = base.substring(0, base.length - 1);
+    }
+    if (base.isEmpty) base = 'https://ccspulseconnect.com';
+    return base;
+  }
 
   String _buildCanvasHtml() {
     final event = widget.cert['events'] is Map
@@ -736,7 +1179,8 @@ class _CertificateCanvasPreviewState extends State<_CertificateCanvasPreview> {
         : <String, dynamic>{};
 
     final eventTitle = event['title']?.toString() ?? widget.title;
-    final sessionTitle = session['title']?.toString() ?? '';
+    final sessionTitle =
+        session['title']?.toString() ?? session['topic']?.toString() ?? '';
     final certificateCode = widget.cert['certificate_code']?.toString() ?? '';
     final issuedAt = widget.cert['issued_at']?.toString() ?? '';
 
@@ -749,6 +1193,7 @@ class _CertificateCanvasPreviewState extends State<_CertificateCanvasPreview> {
       'certificate_code': certificateCode,
       'issued_at': issuedAt,
     });
+    final escapedAssetBase = jsonEncode(_assetBaseUrl());
 
     final showFrame = widget.showFrame ? '1' : '0';
 
@@ -794,44 +1239,102 @@ class _CertificateCanvasPreviewState extends State<_CertificateCanvasPreview> {
     <script>
       const STATE = $escapedState;
       const DATA = $escapedData;
+      const ASSET_BASE = $escapedAssetBase;
       const SHOW_FRAME = '$showFrame' === '1';
+      window.__certCanvas = null;
+      window.__certReady = false;
+      window.__certDefaultWidth = 1123;
+      window.__certDefaultHeight = 794;
+
+      function rewriteAssetUrl(url) {
+        if (typeof url !== 'string' || !url) return url;
+        return url
+          .replace(/^https?:\\/\\/localhost(?::\\d+)?/i, ASSET_BASE)
+          .replace(/^https?:\\/\\/127\\.0\\.0\\.1(?::\\d+)?/i, ASSET_BASE)
+          .replace(/^https?:\\/\\/10\\.0\\.2\\.2(?::\\d+)?/i, ASSET_BASE);
+      }
 
       function tokenReplace(text) {
         if (typeof text !== 'string') return text;
-        return text
-          .replace(/{{participant_name}}/g, DATA.participant_name || '')
-          .replace(/{{name}}/g, DATA.name || DATA.participant_name || '')
-          .replace(/{{event}}/g, DATA.event || '')
-          .replace(/{{session}}/g, DATA.session || '')
-          .replace(/{{certificate_code}}/g, DATA.certificate_code || '')
-          .replace(/{{issued_at}}/g, DATA.issued_at || '');
+        var name = String(DATA.participant_name || DATA.name || '').trim();
+        var out = text
+          .split('{{participant_name}}').join(name)
+          .split('{{name}}').join(name)
+          .split('{{event}}').join(String(DATA.event || ''))
+          .split('{{session}}').join(String(DATA.session || ''))
+          .split('{{certificate_code}}').join(String(DATA.certificate_code || ''))
+          .split('{{issued_at}}').join(String(DATA.issued_at || ''));
+        if (name) {
+          out = out.replace(/\\bStudent Name\\b/g, name);
+        }
+        return out;
       }
 
-      function walk(obj) {
-        if (!obj || typeof obj !== 'object') return;
-        if (typeof obj.text === 'string') {
-          obj.text = tokenReplace(obj.text);
+      function isCertificateCodeObject(obj) {
+        if (!obj || typeof obj.get !== 'function') return false;
+        var id = String(obj.get('id') || '').trim().toLowerCase();
+        var name = String(obj.get('name') || '').trim().toLowerCase();
+        return id === 'certificate_code' || name === 'certificate code';
+      }
+
+      function applyTokensToObject(obj) {
+        if (!obj) return;
+        var type = (typeof obj.get === 'function')
+          ? String(obj.get('type') || '')
+          : String(obj.type || '');
+        type = type.toLowerCase();
+
+        if (type === 'text' || type === 'i-text' || type === 'textbox') {
+          if (isCertificateCodeObject(obj)) {
+            obj.set('text', String(DATA.certificate_code || ''));
+          } else {
+            var current = (typeof obj.get === 'function')
+              ? obj.get('text')
+              : obj.text;
+            obj.set('text', tokenReplace(current));
+          }
         }
-        if (typeof obj.placeholder === 'string') {
-          obj.placeholder = tokenReplace(obj.placeholder);
+
+        if (type === 'image') {
+          var src = (typeof obj.getSrc === 'function')
+            ? obj.getSrc()
+            : ((typeof obj.get === 'function') ? obj.get('src') : obj.src);
+          var fixed = rewriteAssetUrl(src);
+          if (fixed && fixed !== src && typeof obj.setSrc === 'function') {
+            obj.setSrc(fixed, function () {}, { crossOrigin: 'anonymous' });
+          } else if (fixed && typeof obj.set === 'function') {
+            obj.set('src', fixed);
+          }
         }
-        if (Array.isArray(obj.objects)) {
-          obj.objects.forEach(walk);
+
+        if (type === 'group' && typeof obj.getObjects === 'function') {
+          obj.getObjects().forEach(applyTokensToObject);
         }
-        if (Array.isArray(obj._objects)) {
-          obj._objects.forEach(walk);
+      }
+
+      function rewriteStateUrls(node) {
+        if (!node || typeof node !== 'object') return;
+        if (typeof node.src === 'string') {
+          node.src = rewriteAssetUrl(node.src);
+        }
+        if (Array.isArray(node.objects)) {
+          node.objects.forEach(rewriteStateUrls);
         }
       }
 
       const parsed = (typeof STATE === 'string') ? JSON.parse(STATE) : STATE;
-      walk(parsed);
+      rewriteStateUrls(parsed);
 
       const defaultWidth = Number(parsed.width || 1123);
       const defaultHeight = Number(parsed.height || 794);
+      window.__certDefaultWidth = defaultWidth;
+      window.__certDefaultHeight = defaultHeight;
+
       const canvas = new fabric.Canvas('certCanvas', {
         selection: false,
         preserveObjectStacking: true,
       });
+      window.__certCanvas = canvas;
 
       canvas.setWidth(defaultWidth);
       canvas.setHeight(defaultHeight);
@@ -857,13 +1360,36 @@ class _CertificateCanvasPreviewState extends State<_CertificateCanvasPreview> {
       }
 
       canvas.loadFromJSON(parsed, function () {
-        canvas.forEachObject(function (obj) {
+        canvas.getObjects().forEach(function (obj) {
+          applyTokensToObject(obj);
           obj.selectable = false;
           obj.evented = false;
         });
         canvas.renderAll();
         fitCanvas();
+        window.__certReady = true;
+        if (window.CertBridge && CertBridge.postMessage) {
+          CertBridge.postMessage(JSON.stringify({ type: 'ready' }));
+        }
       });
+
+      window.__exportCertPng = function () {
+        try {
+          if (!window.__certCanvas) {
+            return JSON.stringify({ ok: false, error: 'missing_canvas' });
+          }
+          var zoom = canvas.getZoom() || 1;
+          var multiplier = zoom > 0 ? (1 / zoom) : 1;
+          var dataUrl = canvas.toDataURL({
+            format: 'png',
+            multiplier: multiplier,
+            enableRetinaScaling: false
+          });
+          return JSON.stringify({ ok: true, data: dataUrl });
+        } catch (e) {
+          return JSON.stringify({ ok: false, error: String(e) });
+        }
+      };
 
       window.addEventListener('resize', fitCanvas);
       setTimeout(fitCanvas, 50);
@@ -873,13 +1399,67 @@ class _CertificateCanvasPreviewState extends State<_CertificateCanvasPreview> {
 ''';
   }
 
+  void _handleBridgeMessage(JavaScriptMessage message) {
+    try {
+      final decoded = jsonDecode(message.message);
+      if (decoded is Map && decoded['type']?.toString() == 'ready') {
+        _canvasReady = true;
+      }
+    } catch (_) {}
+  }
+
+  Future<Uint8List?> exportPng() async {
+    for (var i = 0; i < 40 && !_canvasReady; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+
+    try {
+      final raw = await _controller.runJavaScriptReturningResult(
+        'window.__exportCertPng ? window.__exportCertPng() : JSON.stringify({ok:false,error:"missing_export"})',
+      );
+      final asString = raw is String ? raw : raw.toString();
+      // Android WebView may wrap the JS string result in extra quotes.
+      dynamic decoded;
+      try {
+        decoded = jsonDecode(asString);
+        if (decoded is String) {
+          decoded = jsonDecode(decoded);
+        }
+      } catch (_) {
+        return null;
+      }
+      if (decoded is! Map) return null;
+      if (decoded['ok'] != true) return null;
+      final dataUrl = decoded['data']?.toString() ?? '';
+      final comma = dataUrl.indexOf(',');
+      if (comma < 0 || comma >= dataUrl.length - 1) return null;
+      return base64Decode(dataUrl.substring(comma + 1));
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(const Color(0x00000000))
-      ..loadHtmlString(_buildCanvasHtml());
+      ..addJavaScriptChannel(
+        'CertBridge',
+        onMessageReceived: _handleBridgeMessage,
+      )
+      ..loadHtmlString(_buildCanvasHtml(), baseUrl: _assetBaseUrl());
+  }
+
+  @override
+  void didUpdateWidget(covariant _CertificateCanvasPreview oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.participantName != widget.participantName ||
+        oldWidget.canvasState != widget.canvasState) {
+      _canvasReady = false;
+      _controller.loadHtmlString(_buildCanvasHtml(), baseUrl: _assetBaseUrl());
+    }
   }
 
   @override

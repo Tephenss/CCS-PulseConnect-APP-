@@ -70,6 +70,16 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
   DateTime? _lastScanSoundAt;
   bool _scanSoundConfigured = false;
 
+  /// Explicit controller: QR-only + unrestricted detection (screen-of-screen
+  /// tickets need more frames than DetectionSpeed.normal's 250ms gate).
+  final MobileScannerController _scannerController = MobileScannerController(
+    detectionSpeed: DetectionSpeed.unrestricted,
+    facing: CameraFacing.back,
+    formats: const [BarcodeFormat.qrCode],
+    returnImage: false,
+    cameraResolution: const Size(1280, 720),
+  );
+
   Future<void> _configureScanSoundPlayer() async {
     if (_scanSoundConfigured) return;
     _scanSoundConfigured = true;
@@ -492,6 +502,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     _eventChannel?.unsubscribe();
     _scanSoundPlayer.dispose();
     _connectivitySubscription.cancel();
+    unawaited(_scannerController.dispose());
     super.dispose();
   }
 
@@ -915,6 +926,10 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
             _isScanning = false;
             _manualPause = false;
             _isProcessingScan = false;
+          } else if (!_manualPause && widget.isActive && !_isProcessingScan) {
+            // Keep accepts armed — otherwise UI can say "Ready" while
+            // _isScanning stayed false and onDetect is ignored.
+            _isScanning = true;
           }
         } else if (scannerEnabled && !_manualPause) {
           _isScanning = _cameraShouldRun(scannerEnabled: true);
@@ -1488,15 +1503,30 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     });
   }
 
+  String? _barcodePayload(Barcode barcode) {
+    final raw = barcode.rawValue?.trim();
+    if (raw != null && raw.isNotEmpty) return raw;
+
+    final display = barcode.displayValue?.trim();
+    if (display != null && display.isNotEmpty) return display;
+
+    final bytes = barcode.rawBytes;
+    if (bytes != null && bytes.isNotEmpty) {
+      try {
+        final decoded = String.fromCharCodes(bytes).trim();
+        if (decoded.isNotEmpty) return decoded;
+      } catch (_) {}
+    }
+    return null;
+  }
+
   void _handleDetect(BarcodeCapture capture) async {
     if (!_acceptingScans || _teacherId.isEmpty) return;
 
     final List<Barcode> barcodes = capture.barcodes;
     for (final barcode in barcodes) {
-      final rawValue = barcode.rawValue;
-      if (rawValue == null) continue;
-      final normalized = rawValue.trim();
-      if (normalized.isEmpty) continue;
+      final normalized = _barcodePayload(barcode);
+      if (normalized == null || normalized.isEmpty) continue;
 
       if (normalized.toUpperCase().startsWith('PULSE-EVENT-')) {
         setState(() {
@@ -1527,23 +1557,35 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         _hasScanResult = false;
       });
 
-      final res = _isOffline
-          ? await _offlineSyncService.enqueueOfflineCheckIn(
-              actorId: _teacherId,
-              isTeacher: true,
-              ticketPayload: normalized,
-              activeContextOverride: _activeOfflineValidationContext(),
-            )
-          : await _eventService.checkInParticipantAsTeacher(
-              normalized,
-              _teacherId,
-              expectedEventId: _activeScannerEventId(),
-            );
+      try {
+        final res = _isOffline
+            ? await _offlineSyncService.enqueueOfflineCheckIn(
+                actorId: _teacherId,
+                isTeacher: true,
+                ticketPayload: normalized,
+                activeContextOverride: _activeOfflineValidationContext(),
+              )
+            : await _eventService.checkInParticipantAsTeacher(
+                normalized,
+                _teacherId,
+                expectedEventId: _activeScannerEventId(),
+              );
 
-      await _applyInstantCheckInResult(
-        Map<String, dynamic>.from(res),
-        fromOfflineQueue: _isOffline,
-      );
+        await _applyInstantCheckInResult(
+          Map<String, dynamic>.from(res),
+          fromOfflineQueue: _isOffline,
+        );
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _scanStatus = 'Scan failed. Try again.';
+          _statusColor = Colors.red.shade700;
+          _hasScanResult = true;
+          _isProcessingScan = false;
+        });
+        _playFailedScanSound();
+        _scheduleScannerResume(delay: _resumeAfterFailure);
+      }
       return;
     }
   }
@@ -2005,13 +2047,13 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     final statusLabel = _lastVerifiedStatusLabel.trim().isEmpty
         ? 'Present'
         : _lastVerifiedStatusLabel.trim();
-    final verifiedLabel = _lastVerifiedAt != null
-        ? '$statusLabel ${_formatStartTime(_lastVerifiedAt!)}'
-        : statusLabel;
     final isWarning = statusLabel.toLowerCase().contains('already') ||
         statusLabel.toLowerCase().contains('queued');
     final isTimedOut = statusLabel.toLowerCase().contains('timed out') ||
         statusLabel.toLowerCase() == 'timed out';
+    final verifiedLabel = _lastVerifiedAt != null
+        ? '$statusLabel · ${_formatStartTime(_lastVerifiedAt!)}'
+        : statusLabel;
 
     final hasData = displayName.isNotEmpty;
     final overlayContent = !hasData
@@ -2138,6 +2180,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       children: [
         MobileScanner(
           key: const ValueKey('teacher_live_scanner'),
+          controller: _scannerController,
           fit: BoxFit.cover,
           onDetect: _handleDetect,
           errorBuilder: (context, error, child) {
@@ -2187,56 +2230,73 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
   }
 
   Widget _buildFramedScannerWindow() {
-    return AspectRatio(
-      // Trimmed frames keep full body visible without edge cutting.
-      aspectRatio: 0.74,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final width = constraints.maxWidth;
-          final height = constraints.maxHeight;
-          final cameraPadding = EdgeInsets.fromLTRB(
-            width * 0.13,
-            height * 0.148,
-            width * 0.13,
-            height * 0.162,
-          );
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        // Phone-sized frame — without this the AspectRatio stretches full
+        // content width and the camera looks ultra-wide (GitHub/local bug).
+        constraints: const BoxConstraints(maxWidth: 320),
+        child: AspectRatio(
+          // Match teacher_scanner_trimmed.png (406×546).
+          aspectRatio: 406 / 546,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final width = constraints.maxWidth;
+              final height = constraints.maxHeight;
+              // Transparent screen-hole insets measured from the PNG.
+              final cameraPadding = EdgeInsets.fromLTRB(
+                width * 0.145,
+                height * 0.194,
+                width * 0.145,
+                height * 0.165,
+              );
 
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              Positioned.fill(
-                child: Padding(
-                  padding: cameraPadding,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        Positioned.fill(child: _buildCameraSurface()),
-                        Positioned(
-                          top: 8,
-                          left: 8,
-                          right: 8,
-                          child: IgnorePointer(
-                            child: _buildLastVerifiedOverlay(),
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  Positioned.fill(
+                    child: Padding(
+                      padding: cameraPadding,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: ColoredBox(
+                          color: Colors.black,
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              Positioned.fill(
+                                child: Transform.scale(
+                                  scale: 1.02,
+                                  child: _buildCameraSurface(),
+                                ),
+                              ),
+                              Positioned(
+                                top: 8,
+                                left: 8,
+                                right: 8,
+                                child: IgnorePointer(
+                                  child: _buildLastVerifiedOverlay(),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
+                      ),
                     ),
                   ),
-                ),
-              ),
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: Image.asset(
-                    'assets/teacher_scanner_trimmed.png',
-                    fit: BoxFit.contain,
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: Image.asset(
+                        'assets/teacher_scanner_trimmed.png',
+                        fit: BoxFit.fill,
+                      ),
+                    ),
                   ),
-                ),
-              ),
-            ],
-          );
-        },
+                ],
+              );
+            },
+          ),
+        ),
       ),
     );
   }

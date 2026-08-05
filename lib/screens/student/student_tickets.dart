@@ -22,14 +22,14 @@ class StudentTickets extends StatefulWidget {
   State<StudentTickets> createState() => _StudentTicketsState();
 }
 
-class _StudentTicketsState extends State<StudentTickets> {
+class _StudentTicketsState extends State<StudentTickets>
+    with WidgetsBindingObserver {
   final _eventService = EventService();
   final Connectivity _connectivity = Connectivity();
   static const String _downloadedTicketKeyPrefix = 'downloaded_tickets_';
   List<Map<String, dynamic>> _tickets = [];
   bool _isLoading = true;
   StreamSubscription<String>? _eventLiveSubscription;
-  Timer? _fallbackRefreshTimer;
 
   Future<bool> _isOfflineNow() async {
     try {
@@ -41,32 +41,46 @@ class _StudentTicketsState extends State<StudentTickets> {
     }
   }
 
+  bool _isTicketsLiveReason(String reason) {
+    final offlinePulse = reason.startsWith('offline:');
+    final core = offlinePulse ? reason.substring('offline:'.length) : reason;
+    return core == 'tickets' ||
+        core.startsWith('tickets') ||
+        core == 'registrations' ||
+        core.startsWith('registrations') ||
+        core == 'events' ||
+        core.startsWith('events') ||
+        core == 'sessions' ||
+        core.startsWith('sessions') ||
+        core.startsWith('push');
+  }
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
       if (!mounted) return;
+      if (!_isTicketsLiveReason(reason)) return;
       final offlinePulse = reason.startsWith('offline:');
-      if (offlinePulse ||
-          reason == 'tickets' ||
-          reason == 'registrations' ||
-          reason == 'events' ||
-          reason == 'sessions') {
-        unawaited(_loadTickets(forceFresh: !offlinePulse));
-      }
+      unawaited(_loadTickets(forceFresh: !offlinePulse));
     });
-    _fallbackRefreshTimer = Timer.periodic(
-      const Duration(seconds: 60),
-      (_) => unawaited(_loadTickets(forceFresh: true)),
-    );
-    _loadTickets(forceFresh: true);
+    // Cache-first init; network only if cache empty/stale.
+    _loadTickets();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _eventLiveSubscription?.cancel();
-    _fallbackRefreshTimer?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_loadTickets(forceFresh: true));
+    }
   }
 
   Future<void> _loadTickets({bool forceFresh = false}) async {
@@ -120,8 +134,9 @@ class _StudentTicketsState extends State<StudentTickets> {
     final offlineTickets = _readOfflineTickets(prefs, userId);
     final mergedTickets = _mergeTickets(activeOnlineTickets, offlineTickets);
 
-    // Never blank the screen on a sudden disconnect / failed / empty refresh.
-    if (mergedTickets.isEmpty && hadCachedTickets) {
+    // Keep prior list only when offline or the fetch failed — never when online
+    // successfully returns/filters to empty (deleted/ended tickets must clear).
+    if (mergedTickets.isEmpty && hadCachedTickets && (offline || fetchFailed)) {
       if (mounted) {
         setState(() => _isLoading = false);
       }
@@ -341,7 +356,7 @@ class _StudentTicketsState extends State<StudentTickets> {
           : _tickets.isEmpty
           ? _buildEmptyState()
           : RefreshIndicator(
-              onRefresh: _loadTickets,
+              onRefresh: () => _loadTickets(forceFresh: true),
               color: chromeColor,
               child: ListView.builder(
                 padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
@@ -718,7 +733,7 @@ class _StudentTicketsState extends State<StudentTickets> {
               builder: (_) => StudentTicketView(ticket: ticket),
             ),
           );
-          _loadTickets();
+          _loadTickets(forceFresh: true);
         },
         child: AnimatedTicketCard(
           floatDuration: const Duration(milliseconds: 2400),

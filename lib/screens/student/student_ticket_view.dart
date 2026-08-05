@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../utils/event_time_utils.dart';
 import '../../services/event_service.dart';
 import '../../utils/course_theme_utils.dart';
@@ -16,46 +18,212 @@ class StudentTicketView extends StatefulWidget {
   State<StudentTicketView> createState() => _StudentTicketViewState();
 }
 
-class _StudentTicketViewState extends State<StudentTicketView> {
+class _StudentTicketViewState extends State<StudentTicketView>
+    with WidgetsBindingObserver {
   static const String _downloadedTicketKeyPrefix = 'downloaded_tickets_';
   final EventService _eventService = EventService();
   bool _isDownloading = false;
   bool _isAlreadyDownloaded = false;
   bool _isLoadingSeminarAttendance = false;
   List<Map<String, dynamic>> _seminarAttendance = [];
+  /// Live simple-event attendance (refreshed while this screen is open).
+  Map<String, dynamic>? _liveAttendance;
+  Timer? _attendancePollTimer;
+  RealtimeChannel? _attendanceChannel;
+  bool _attendanceRefreshInFlight = false;
+  DateTime? _lastAttendanceRefreshAt;
 
   Color _studentPrimary(BuildContext context) =>
       Theme.of(context).colorScheme.primary;
 
+  String get _ticketId {
+    final ticketData = widget.ticket['tickets'];
+    if (ticketData is List && ticketData.isNotEmpty) {
+      return (ticketData[0]['id'] ?? '').toString().trim();
+    }
+    if (ticketData is Map) {
+      return (ticketData['id'] ?? '').toString().trim();
+    }
+    return '';
+  }
+
+  String get _registrationId =>
+      (widget.ticket['id'] ?? '').toString().trim();
+
+  String get _eventId {
+    final event = widget.ticket['events'];
+    if (event is Map) {
+      final id = (event['id'] ?? '').toString().trim();
+      if (id.isNotEmpty) return id;
+    }
+    return (widget.ticket['event_id'] ?? '').toString().trim();
+  }
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _liveAttendance = _attendanceFromTicket(widget.ticket);
     _loadDownloadedState();
     _loadSeminarAttendance();
+    unawaited(_refreshAttendanceLive(force: true));
+    _bindAttendanceRealtime();
+    _attendancePollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      unawaited(_refreshAttendanceLive());
+    });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _attendancePollTimer?.cancel();
+    _attendanceChannel?.unsubscribe();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshAttendanceLive(force: true));
+    }
+  }
+
+  Map<String, dynamic>? _attendanceFromTicket(Map<String, dynamic> ticket) {
+    final ticketData = ticket['tickets'];
+    dynamic att;
+    if (ticketData is List && ticketData.isNotEmpty) {
+      att = ticketData[0]['attendance'];
+    } else if (ticketData is Map) {
+      att = ticketData['attendance'];
+    }
+    if (att is List && att.isNotEmpty && att[0] is Map) {
+      return Map<String, dynamic>.from(att[0] as Map);
+    }
+    if (att is Map) {
+      return Map<String, dynamic>.from(att);
+    }
+    return null;
+  }
+
+  void _patchTicketAttendance(Map<String, dynamic> attendance) {
+    final ticketData = widget.ticket['tickets'];
+    if (ticketData is List && ticketData.isNotEmpty && ticketData[0] is Map) {
+      final row = Map<String, dynamic>.from(ticketData[0] as Map);
+      row['attendance'] = [attendance];
+      ticketData[0] = row;
+    } else if (ticketData is Map) {
+      ticketData['attendance'] = [attendance];
+    }
+  }
+
+  Future<void> _refreshAttendanceLive({bool force = false}) async {
+    if (!mounted || _attendanceRefreshInFlight) return;
+    final now = DateTime.now();
+    if (!force &&
+        _lastAttendanceRefreshAt != null &&
+        now.difference(_lastAttendanceRefreshAt!) < const Duration(seconds: 2)) {
+      return;
+    }
+    _attendanceRefreshInFlight = true;
+    _lastAttendanceRefreshAt = now;
+    try {
+      final ticketId = _ticketId;
+      final eventId = _eventId;
+      final registrationId = _registrationId;
+
+      Map<String, dynamic>? nextAttendance = _liveAttendance;
+      if (ticketId.isNotEmpty) {
+        final fresh = await _eventService.getTicketAttendance(ticketId);
+        if (fresh != null) {
+          nextAttendance = Map<String, dynamic>.from(fresh);
+          _patchTicketAttendance(nextAttendance);
+        }
+      }
+
+      List<Map<String, dynamic>>? seminarRows;
+      if (eventId.isNotEmpty && registrationId.isNotEmpty) {
+        seminarRows = await _eventService.getTicketSeminarAttendance(
+          eventId: eventId,
+          registrationId: registrationId,
+          ticketId: ticketId,
+        );
+      }
+
+      if (!mounted) return;
+      setState(() {
+        if (nextAttendance != null) {
+          _liveAttendance = nextAttendance;
+        }
+        if (seminarRows != null) {
+          _seminarAttendance = seminarRows;
+          _isLoadingSeminarAttendance = false;
+          if (seminarRows.isNotEmpty && widget.ticket['events'] is Map) {
+            final patched =
+                Map<String, dynamic>.from(widget.ticket['events'] as Map);
+            patched['event_mode'] = 'seminar_based';
+            patched['uses_sessions'] = true;
+            widget.ticket['events'] = patched;
+          }
+        }
+      });
+    } catch (_) {
+      // Keep last known attendance on transient errors.
+    } finally {
+      _attendanceRefreshInFlight = false;
+    }
+  }
+
+  void _bindAttendanceRealtime() {
+    final ticketId = _ticketId;
+    final registrationId = _registrationId;
+    if (ticketId.isEmpty && registrationId.isEmpty) return;
+
+    final supabase = Supabase.instance.client;
+    final channelName =
+        'public:student_ticket_attendance:${ticketId.isNotEmpty ? ticketId : registrationId}';
+    _attendanceChannel = supabase.channel(channelName);
+
+    void onChange(PostgresChangePayload _) {
+      unawaited(_refreshAttendanceLive(force: true));
+    }
+
+    if (ticketId.isNotEmpty) {
+      _attendanceChannel!.onPostgresChanges(
+        event: PostgresChangeEvent.all,
+        schema: 'public',
+        table: 'attendance',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'ticket_id',
+          value: ticketId,
+        ),
+        callback: onChange,
+      );
+    }
+
+    if (registrationId.isNotEmpty) {
+      _attendanceChannel!.onPostgresChanges(
+        event: PostgresChangeEvent.all,
+        schema: 'public',
+        table: 'event_session_attendance',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'registration_id',
+          value: registrationId,
+        ),
+        callback: onChange,
+      );
+    }
+
+    _attendanceChannel!.subscribe();
   }
 
   Future<void> _loadSeminarAttendance() async {
-    final ticket = widget.ticket;
-    final event = ticket['events'] as Map<String, dynamic>? ?? {};
-    if (!_isSeminarBasedEvent(event)) {
-      if (mounted) {
-        setState(() {
-          _seminarAttendance = [];
-          _isLoadingSeminarAttendance = false;
-        });
-      }
-      return;
-    }
+    final eventId = _eventId;
+    final registrationId = _registrationId;
+    final ticketId = _ticketId;
 
-    final eventId = (event['id'] ?? '').toString().trim();
-    final registrationId = (ticket['id'] ?? '').toString().trim();
-    final ticketData = ticket['tickets'];
-    final ticketId = ticketData is List && ticketData.isNotEmpty
-        ? (ticketData[0]['id'] ?? '').toString()
-        : ticketData is Map
-            ? (ticketData['id'] ?? '').toString()
-            : '';
-
+    // Always try loading sessions — do not trust event_mode alone (BFF used to omit it).
     if (eventId.isEmpty || registrationId.isEmpty) {
       if (mounted) {
         setState(() {
@@ -75,6 +243,19 @@ class _StudentTicketViewState extends State<StudentTicketView> {
       ticketId: ticketId,
     );
     if (!mounted) return;
+
+    // Patch nested event flags when seminars exist so UI stays consistent.
+    if (rows.isNotEmpty && widget.ticket['events'] is Map) {
+      final patched = Map<String, dynamic>.from(widget.ticket['events'] as Map);
+      patched['event_mode'] = 'seminar_based';
+      patched['uses_sessions'] = true;
+      if ((patched['event_structure']?.toString() ?? '').trim().isEmpty) {
+        patched['event_structure'] =
+            rows.length > 1 ? 'two_seminars' : 'one_seminar';
+      }
+      widget.ticket['events'] = patched;
+    }
+
     setState(() {
       _seminarAttendance = rows;
       _isLoadingSeminarAttendance = false;
@@ -278,29 +459,36 @@ class _StudentTicketViewState extends State<StudentTicketView> {
         ? ticketData[0]['id']?.toString() ?? ''
         : ticketData is Map ? ticketData['id']?.toString() ?? '' : '';
 
-    // Extract attendance data
-    Map<String, dynamic>? attendance;
-    if (ticketData is List && ticketData.isNotEmpty) {
-      final att = ticketData[0]['attendance'];
-      if (att is List && att.isNotEmpty) {
-        attendance = att[0];
-      } else if (att is Map) {
-        attendance = Map<String, dynamic>.from(att);
+    // Prefer live attendance (polled / realtime) over the stale nav payload.
+    final attendance = _liveAttendance ?? () {
+      Map<String, dynamic>? nested;
+      if (ticketData is List && ticketData.isNotEmpty) {
+        final att = ticketData[0]['attendance'];
+        if (att is List && att.isNotEmpty) {
+          nested = Map<String, dynamic>.from(att[0] as Map);
+        } else if (att is Map) {
+          nested = Map<String, dynamic>.from(att);
+        }
+      } else if (ticketData is Map) {
+        final att = ticketData['attendance'];
+        if (att is List && att.isNotEmpty) {
+          nested = Map<String, dynamic>.from(att[0] as Map);
+        } else if (att is Map) {
+          nested = Map<String, dynamic>.from(att);
+        }
       }
-    } else if (ticketData is Map) {
-      final att = ticketData['attendance'];
-      if (att is List && att.isNotEmpty) {
-        attendance = att[0];
-      } else if (att is Map) {
-        attendance = Map<String, dynamic>.from(att);
-      }
-    }
+      return nested;
+    }();
 
     final scanStatus = attendance?['status'] as String? ?? 'unscanned';
     final checkInAt = attendance?['check_in_at'] as String?;
     final checkOutAt = attendance?['check_out_at'] as String?;
-    final hasCheckOut = (checkOutAt ?? '').trim().isNotEmpty;
-    final displayStatus = hasCheckOut ? 'timed_out' : scanStatus;
+    final displayStatus = _resolveTicketDisplayStatus(
+      isSeminarBased: isSeminarBased,
+      scanStatus: scanStatus,
+      checkInAt: checkInAt,
+      checkOutAt: checkOutAt,
+    );
     final ticketIdDisplay = ticketId.length > 8 ? ticketId.substring(0, 8).toUpperCase() : ticketId.toUpperCase();
 
     final startDate = parseStoredEventDateTime(startAt);
@@ -628,7 +816,7 @@ class _StudentTicketViewState extends State<StudentTicketView> {
                                 _buildAttendanceRow(
                                   'Time-Out',
                                   _formatAttendanceTime(checkOutAt),
-                                  hasCheckOut,
+                                  (checkOutAt ?? '').trim().isNotEmpty,
                                 ),
                                 const SizedBox(height: 10),
                                 _buildAttendanceRow('Flow', 'Simple event', true),
@@ -750,10 +938,59 @@ class _StudentTicketViewState extends State<StudentTicketView> {
     final usesSessions = usesSessionsRaw == true ||
         (usesSessionsRaw is num && usesSessionsRaw > 0) ||
         (usesSessionsRaw is String && usesSessionsRaw.toLowerCase() == 'true');
+    final sessionCount = int.tryParse(event['session_count']?.toString() ?? '') ?? 0;
     return mode == 'seminar_based' ||
         structure == 'seminar_based' ||
+        structure == 'one_seminar' ||
+        structure == 'two_seminars' ||
         structure.contains('seminar') ||
-        usesSessions;
+        usesSessions ||
+        sessionCount > 0 ||
+        _seminarAttendance.isNotEmpty;
+  }
+
+  /// Seminar check-ins live in event_session_attendance; simple events use
+  /// tickets.attendance. Prefer seminar rows so the badge matches the list.
+  String _resolveTicketDisplayStatus({
+    required bool isSeminarBased,
+    required String scanStatus,
+    String? checkInAt,
+    String? checkOutAt,
+  }) {
+    if (isSeminarBased && _seminarAttendance.isNotEmpty) {
+      var anyCheckIn = false;
+      var anyCheckOut = false;
+      var checkedInCount = 0;
+      var checkedOutCount = 0;
+      for (final row in _seminarAttendance) {
+        final cin = (row['check_in_at']?.toString() ?? '').trim();
+        final cout = (row['check_out_at']?.toString() ?? '').trim();
+        if (cin.isNotEmpty) {
+          anyCheckIn = true;
+          checkedInCount++;
+        }
+        if (cout.isNotEmpty) {
+          anyCheckOut = true;
+          checkedOutCount++;
+        }
+      }
+      if (anyCheckOut &&
+          checkedOutCount >= _seminarAttendance.length &&
+          checkedInCount >= _seminarAttendance.length) {
+        return 'timed_out';
+      }
+      if (anyCheckIn) return 'present';
+      return 'unscanned';
+    }
+
+    final hasCheckOut = (checkOutAt ?? '').trim().isNotEmpty;
+    if (hasCheckOut) return 'timed_out';
+    final hasCheckIn = (checkInAt ?? '').trim().isNotEmpty;
+    if (hasCheckIn &&
+        (scanStatus == 'unscanned' || scanStatus.trim().isEmpty)) {
+      return 'present';
+    }
+    return scanStatus.trim().isEmpty ? 'unscanned' : scanStatus;
   }
 
   Widget _buildSeminarAttendanceRows() {

@@ -39,9 +39,9 @@ class _StudentEventsState extends State<StudentEvents>
   String _selectedEventType = 'All';
 
   late TabController _tabController;
-  Timer? _refreshTimer;
   StreamSubscription<String>? _eventLiveSubscription;
   bool _isRefreshingEvents = false;
+  int _eventsLoadGeneration = 0;
 
   Future<bool> _isOfflineNow() async {
     try {
@@ -60,23 +60,42 @@ class _StudentEventsState extends State<StudentEvents>
     _tabController = TabController(length: 2, vsync: this);
     _tabController.addListener(_handleTabSelection);
     _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
-      if (!mounted || _isRefreshingEvents) return;
+      if (!mounted) return;
+      if (!_isStudentEventsLiveReason(reason)) return;
       final offlinePulse = reason.startsWith('offline:');
+      // Live / push force network when online so deletes show up immediately.
       unawaited(
         _loadEvents(showLoader: false, forceFresh: !offlinePulse),
       );
     });
-    _refreshTimer = Timer.periodic(const Duration(seconds: 60), (_) {
-      _reloadEventsSilently(forceFresh: true);
-    });
-    _loadEvents(forceFresh: true);
+    // Cache paint first, then online catch-up so deleted events don't stick.
+    unawaited(_bootstrapEvents());
+  }
+
+  Future<void> _bootstrapEvents() async {
+    await _loadEvents(forceFresh: false);
+    if (!mounted) return;
+    if (!await _isOfflineNow()) {
+      await _loadEvents(showLoader: false, forceFresh: true);
+    }
+  }
+
+  bool _isStudentEventsLiveReason(String reason) {
+    final offlinePulse = reason.startsWith('offline:');
+    final core = offlinePulse ? reason.substring('offline:'.length) : reason;
+    return core == 'events' ||
+        core.startsWith('events') ||
+        core == 'registrations' ||
+        core.startsWith('registrations') ||
+        core == 'registration_access' ||
+        core.startsWith('registration_access') ||
+        core.startsWith('push');
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _eventLiveSubscription?.cancel();
-    _refreshTimer?.cancel();
     _tabController.removeListener(_handleTabSelection);
     _tabController.dispose();
     super.dispose();
@@ -85,6 +104,7 @@ class _StudentEventsState extends State<StudentEvents>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      // Resume should feel live (catch deletes/archives while backgrounded).
       _loadEvents(showLoader: false, forceFresh: true);
     }
   }
@@ -105,7 +125,8 @@ class _StudentEventsState extends State<StudentEvents>
     bool showLoader = true,
     bool forceFresh = false,
   }) async {
-    if (_isRefreshingEvents) return;
+    if (_isRefreshingEvents && !forceFresh) return;
+    final loadGen = ++_eventsLoadGeneration;
     _isRefreshingEvents = true;
     final hasCachedList = _activeEvents.isNotEmpty || _expiredEvents.isNotEmpty;
     if (showLoader && !hasCachedList && mounted) {
@@ -147,6 +168,8 @@ class _StudentEventsState extends State<StudentEvents>
               )
             : Future.value(<Map<String, dynamic>>[]),
       ]);
+      if (!mounted || loadGen != _eventsLoadGeneration) return;
+
       final active = List<Map<String, dynamic>>.from(results[0] as List);
       final expired = List<Map<String, dynamic>>.from(results[1] as List);
 

@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:bcrypt/bcrypt.dart';
 import 'package:crypto/crypto.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -57,6 +59,40 @@ class AuthService {
 
   static const String _cachedPublicIpKey = 'trusted_public_ip_cache';
   static const String _cachedPublicIpAtKey = 'trusted_public_ip_cached_at';
+  static const String _installIdStorageKey = 'pulse_install_device_id';
+
+  /// Stable per-app-install id (Secure Storage). Survives logout / account switch.
+  /// Cleared only on uninstall or app data wipe — this is what OTP trust should bind to.
+  Future<String> getOrCreateInstallDeviceKey() async {
+    try {
+      const storage = FlutterSecureStorage(
+        aOptions: AndroidOptions(encryptedSharedPreferences: true),
+      );
+      final existing = (await storage.read(key: _installIdStorageKey) ?? '')
+          .trim()
+          .toLowerCase();
+      if (existing.isNotEmpty) {
+        final key = existing.startsWith('install:')
+            ? existing
+            : 'install:$existing';
+        if (RegExp(r'^install:[a-f0-9-]{16,80}$').hasMatch(key)) {
+          return key;
+        }
+      }
+      final rand = Random.secure();
+      final id = List.generate(
+        16,
+        (_) => rand.nextInt(256).toRadixString(16).padLeft(2, '0'),
+      ).join();
+      final key = 'install:$id';
+      await storage.write(key: _installIdStorageKey, value: key);
+      return key;
+    } catch (e) {
+      debugPrint('AuthService.getOrCreateInstallDeviceKey failed: $e');
+      // Last resort — still better than IP churn during a single session.
+      return 'install:fallback-${DateTime.now().millisecondsSinceEpoch}';
+    }
+  }
 
   /// Public IP trust key shared across browsers/apps on the same network.
   Future<String?> resolvePublicIpTrustKey({bool forceRefresh = false}) async {
@@ -125,10 +161,9 @@ class AuthService {
     return key;
   }
 
-  /// @deprecated Prefer [resolvePublicIpTrustKey]. Kept for older call sites.
+  /// @deprecated Prefer [getOrCreateInstallDeviceKey] for mobile OTP trust.
   Future<String> getOrCreateDeviceInstallId() async {
-    final key = await resolvePublicIpTrustKey();
-    return key ?? 'ip:unknown';
+    return getOrCreateInstallDeviceKey();
   }
 
   /// True while [login] (or similar) is writing session state.
@@ -150,18 +185,15 @@ class AuthService {
     }
   }
 
-  /// `true` trusted, `false` not trusted, `null` could not determine (IP/network).
+  /// `true` trusted, `false` not trusted, `null` could not determine (network/API).
   Future<bool?> checkDeviceTrust(String userId) async {
     final id = userId.trim();
     if (id.isEmpty) return false;
     try {
-      final deviceKey = await resolvePublicIpTrustKey();
-      if (deviceKey == null || deviceKey.isEmpty) {
-        return null;
-      }
       if (!MobileBackendService.isConfigured) {
         return null;
       }
+      final deviceKey = await getOrCreateInstallDeviceKey();
       final res = await MobileBackendService().checkDeviceTrust(
         deviceKey: deviceKey,
       );
@@ -172,7 +204,11 @@ class AuthService {
     }
   }
 
-  Future<void> trustCurrentDevice(String userId, {String? label}) async {
+  Future<void> trustCurrentDevice(
+    String userId, {
+    String? label,
+    bool force = false,
+  }) async {
     final id = userId.trim();
     if (id.isEmpty) return;
     if (!MobileBackendService.isConfigured) {
@@ -181,26 +217,29 @@ class AuthService {
     }
 
     // Debounce: resume/idle was hammering the API and flooding logs on 500s.
+    // OTP verify must always persist trust (force: true).
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    if (_trustInFlight ||
-        (nowMs - _lastTrustAttemptMs) < _trustMinInterval.inMilliseconds) {
+    if (!force &&
+        (_trustInFlight ||
+            (nowMs - _lastTrustAttemptMs) < _trustMinInterval.inMilliseconds)) {
       return;
     }
     _trustInFlight = true;
     _lastTrustAttemptMs = nowMs;
 
     try {
-      final deviceKey = await resolvePublicIpTrustKey(forceRefresh: true);
-      if (deviceKey == null || deviceKey.isEmpty) return;
+      final deviceKey = await getOrCreateInstallDeviceKey();
       final platform = Platform.isAndroid
           ? 'android'
           : (Platform.isIOS ? 'ios' : Platform.operatingSystem);
+      // Keep IP as a human-readable label only (not the trust key).
+      final ipKey = await resolvePublicIpTrustKey();
       final res = await MobileBackendService().trustDevice(
         deviceKey: deviceKey,
         platform: platform,
-        label: (label ?? deviceKey).trim().isEmpty
+        label: (label ?? ipKey ?? deviceKey).trim().isEmpty
             ? deviceKey
-            : (label ?? deviceKey).trim(),
+            : (label ?? ipKey ?? deviceKey).trim(),
       );
       if (res['ok'] != true) {
         debugPrint(
@@ -219,7 +258,7 @@ class AuthService {
     return (await checkDeviceTrust(userId)) == true;
   }
 
-  /// OTP is required when the Manila day rolled over OR this public IP is new.
+  /// OTP is required when the Manila day rolled over OR this install is new/untrusted.
   Future<bool> requiresEmailVerification(
     Map<String, dynamic>? user, {
     bool unknownTrustRequiresVerification = true,
@@ -232,7 +271,7 @@ class AuthService {
     return !trusted;
   }
 
-  /// Why OTP is required: `unverified` | `daily` | `new_ip` | null (not required).
+  /// Why OTP is required: `unverified` | `daily` | `new_device` | null (not required).
   Future<String?> emailVerificationGateReason(Map<String, dynamic>? user) async {
     if (user == null) return 'unverified';
     final isVerified = user['email_verified'] == true;
@@ -244,7 +283,7 @@ class AuthService {
     final userId = user['id']?.toString().trim() ?? '';
     if (userId.isEmpty) return 'unverified';
     final trusted = await checkDeviceTrust(userId);
-    if (trusted != true) return 'new_ip';
+    if (trusted != true) return 'new_device';
     return null;
   }
 
@@ -254,7 +293,7 @@ class AuthService {
         return 'Daily security check — verification resets every day at 12:00 AM (Manila).';
       case 'new_ip':
       case 'new_device':
-        return 'New network/IP detected — verify once to trust this connection.';
+        return 'New device/install detected — verify once to trust this phone.';
       case 'unverified':
         return 'Verify your email to continue.';
       default:

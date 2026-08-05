@@ -1845,16 +1845,18 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         : sessionName;
 
     // If the message already names the open/close clock time, skip the
-    // schedule date line so we don't repeat July 31 – August 01…
+    // schedule date line so we don't repeat "August 10 · 07:00 AM - 07:00 PM".
     final lower = base.toLowerCase();
     final hasClockInMessage = RegExp(
-      r'\(\s*\d{1,2}:\d{2}\s*(?:am|pm)\s*\)',
+      r'(?:opens?\s+at|ended\s+at|\()\s*\d{1,2}:\d{2}\s*(?:am|pm)',
       caseSensitive: false,
     ).hasMatch(base);
     final skipSchedule = hasClockInMessage ||
-        lower.contains('time-out opens at the scheduled end') ||
+        lower.contains('opens at') ||
+        lower.contains('time-out opens at') ||
         lower.contains('wait for the scheduled start') ||
-        lower.contains('time-in grace ended at');
+        lower.contains('time-in grace ended at') ||
+        lower.contains('already timed in');
 
     final schedule = skipSchedule ? '' : _formatEventScheduleLine(res);
     if (title.isEmpty && schedule.isEmpty) return base;
@@ -2283,7 +2285,9 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
-                        Positioned.fill(child: _buildCameraSurface()),
+                        Positioned.fill(
+                          child: _buildCameraSurface(),
+                        ),
                         Positioned(
                           top: 8,
                           left: 8,

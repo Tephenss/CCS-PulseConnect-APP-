@@ -60,7 +60,6 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   int _currentHeaderSlide = 0;
   StreamSubscription<int>? _unreadSubscription;
   StreamSubscription<String>? _eventLiveSubscription;
-  Timer? _homeLiveFallbackTimer;
   RealtimeChannel? _scannerAccessChannel;
   Timer? _scannerAccessGuardTimer;
 
@@ -77,12 +76,19 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
       if (!mounted) return;
       unawaited(_refreshTeacherHomeLive(reason));
     });
-    _homeLiveFallbackTimer = Timer.periodic(
-      const Duration(seconds: 60),
-      (_) => unawaited(_refreshTeacherHomeLive('fallback')),
-    );
     _loadData();
     _subscribeToNotifications();
+  }
+
+  bool _isTeacherHomeCatalogLiveReason(String reason) {
+    final offlinePulse = reason.startsWith('offline:');
+    final core = offlinePulse ? reason.substring('offline:'.length) : reason;
+    return core == 'events' ||
+        core.startsWith('events') ||
+        core == 'teacher_assignments' ||
+        core.startsWith('teacher_assignments') ||
+        core.startsWith('push') ||
+        core == 'resume';
   }
 
   Future<void> _refreshTeacherHomeLive(String reason) async {
@@ -94,9 +100,13 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
       unawaited(_refreshUnreadCount());
     }
 
+    if (!_isTeacherHomeCatalogLiveReason(reason)) return;
+
+    final offlinePulse = reason.startsWith('offline:');
     final accessible = await _eventService.getTeacherAccessibleEvents(
       teacherId,
-      forceFresh: true,
+      // Realtime/push/resume hit network; offline soft-signal stays cache-only.
+      forceFresh: !offlinePulse,
     );
     final events = _teacherActiveUpcomingEvents(accessible);
     final calendarEvents = _teacherCalendarEvents(accessible);
@@ -104,7 +114,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     setState(() {
       _upcomingEvents = events;
       _calendarEvents = calendarEvents;
-      _usingCachedUpcomingEvents = false;
+      _usingCachedUpcomingEvents = offlinePulse;
     });
   }
 
@@ -240,7 +250,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     return filtered;
   }
 
-  Future<void> _loadData() async {
+  Future<void> _loadData({bool forceFresh = false}) async {
     final user = await _authService.getCurrentUser();
     unawaited(_primeOfflineReadiness(user));
 
@@ -265,6 +275,25 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     List<Map<String, dynamic>> events = <Map<String, dynamic>>[];
     List<Map<String, dynamic>> calendarEvents = <Map<String, dynamic>>[];
     var usingCachedData = false;
+
+    // Critical-first: paint warm disk cache before network when available.
+    if (teacherId.isNotEmpty && !forceFresh) {
+      final warm = await _appCacheService.loadJsonList(cacheKey);
+      if (warm.isNotEmpty && mounted) {
+        events = _teacherActiveUpcomingEvents(warm);
+        calendarEvents = _teacherCalendarEvents(warm);
+        usingCachedData = true;
+        setState(() {
+          _user = user;
+          _upcomingEvents = events;
+          _calendarEvents = calendarEvents;
+          _usingCachedUpcomingEvents = true;
+          _isLoading = false;
+        });
+      }
+    }
+
+    List<Map<String, dynamic>> accessible = <Map<String, dynamic>>[];
     if (teacherId.isNotEmpty) {
       if (isOffline) {
         final cached = await _appCacheService.loadJsonList(cacheKey);
@@ -272,13 +301,16 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
         calendarEvents = _teacherCalendarEvents(cached);
         usingCachedData = true;
       } else {
-        final accessible = await _eventService.getTeacherAccessibleEvents(
+        accessible = await _eventService.getTeacherAccessibleEvents(
           teacherId,
+          forceFresh: forceFresh,
         );
         events = _teacherActiveUpcomingEvents(accessible);
         calendarEvents = _teacherCalendarEvents(accessible);
 
-        if (events.isEmpty) {
+        // Soft load only: empty active filter may restore warm disk ≤24h.
+        // Pull-to-refresh (forceFresh) must show empty when nothing remains.
+        if (events.isEmpty && !forceFresh) {
           final cached = await _appCacheService.loadJsonList(cacheKey);
           final lastUpdated = await _appCacheService.lastUpdatedAt(cacheKey);
           final cacheStillFresh =
@@ -296,12 +328,15 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
         await _appCacheService.saveJsonList(
           cacheKey,
           accessible,
-          preserveNonEmptyOnEmpty: true,
+          preserveNonEmptyOnEmpty: !forceFresh,
         );
       }
     }
 
-    final unread = await _notifService.getUnreadCount(forceRefresh: true);
+    // Soft unread on normal open; force only on pull-to-refresh.
+    final unread = await _notifService.getUnreadCount(
+      forceRefresh: forceFresh,
+    );
     if (mounted) {
       setState(() {
         _user = user;
@@ -356,7 +391,6 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _unreadSubscription?.cancel();
     _eventLiveSubscription?.cancel();
-    _homeLiveFallbackTimer?.cancel();
     _scannerAccessGuardTimer?.cancel();
     _scannerAccessChannel?.unsubscribe();
     _headerPageController.dispose();
@@ -527,7 +561,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     final firstName = _user?['first_name'] as String? ?? 'Teacher';
 
     return RefreshIndicator(
-      onRefresh: _loadData,
+      onRefresh: () => _loadData(forceFresh: true),
       color: _teacherPrimary,
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),

@@ -146,7 +146,7 @@ class EmailVerificationService {
     }
 
     try {
-      await AuthService().trustCurrentDevice(userId);
+      await AuthService().trustCurrentDevice(userId, force: true);
     } catch (_) {}
 
     if (persistLocalUser && updatedUser != null) {

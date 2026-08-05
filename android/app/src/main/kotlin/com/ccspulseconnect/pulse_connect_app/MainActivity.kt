@@ -24,6 +24,7 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val OFFLINE_BACKUP_CHANNEL = "pulseconnect/offline_backup"
         private const val DOCUMENT_PICKER_CHANNEL = "pulseconnect/document_picker"
+        private const val DOWNLOADS_CHANNEL = "pulseconnect/downloads"
         private const val AUTO_BACKUP_FOLDER = "PulseConnect"
         private const val REQUEST_PICK_DOCUMENT = 0x5043 // 'PC'
         private const val DEFAULT_MAX_BYTES = 15L * 1024L * 1024L
@@ -62,6 +63,16 @@ class MainActivity : FlutterActivity() {
                     clearPersistedDocument()
                     result.success(true)
                 }
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            DOWNLOADS_CHANNEL
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "saveFile" -> savePublicDownload(call, result)
                 else -> result.notImplemented()
             }
         }
@@ -325,6 +336,111 @@ class MainActivity : FlutterActivity() {
             return "document.bin"
         }
         return cleaned.take(120)
+    }
+
+    private fun savePublicDownload(call: MethodCall, result: MethodChannel.Result) {
+        val fileNameRaw = (call.argument<String>("fileName") ?: "").trim()
+        val mimeType = (call.argument<String>("mimeType") ?: "application/octet-stream").trim()
+            .ifEmpty { "application/octet-stream" }
+        val bytes = call.argument<ByteArray>("bytes")
+        val fileName = validateFileName(fileNameRaw)
+        if (fileName == null || bytes == null || bytes.isEmpty()) {
+            result.error("invalid_args", "fileName and bytes are required.", null)
+            return
+        }
+
+        try {
+            val savedName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                writePublicDownloadScoped(fileName, mimeType, bytes)
+            } else {
+                writePublicDownloadLegacy(fileName, bytes)
+            }
+            result.success(
+                hashMapOf(
+                    "ok" to true,
+                    "fileName" to savedName,
+                    "directory" to "Download",
+                )
+            )
+        } catch (e: Exception) {
+            result.error("write_failed", e.message ?: "Failed to save file to Downloads.", null)
+        }
+    }
+
+    private fun writePublicDownloadScoped(
+        fileName: String,
+        mimeType: String,
+        bytes: ByteArray,
+    ): String {
+        val resolver = contentResolver
+        val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/"
+        var displayName = fileName
+        var attempt = 0
+        var targetUri: Uri? = null
+
+        while (attempt < 20 && targetUri == null) {
+            val candidate = if (attempt == 0) {
+                fileName
+            } else {
+                val dot = fileName.lastIndexOf('.')
+                if (dot > 0) {
+                    "${fileName.substring(0, dot)} ($attempt)${fileName.substring(dot)}"
+                } else {
+                    "$fileName ($attempt)"
+                }
+            }
+
+            // Prefer a fresh insert; MediaStore will avoid clobbering existing files.
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, candidate)
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            targetUri = resolver.insert(collection, values)
+            if (targetUri != null) {
+                displayName = candidate
+                break
+            }
+            attempt += 1
+        }
+
+        val uri = targetUri ?: throw IOException("Unable to create Downloads entry.")
+        resolver.openOutputStream(uri, "w")?.use { output ->
+            output.write(bytes)
+            output.flush()
+        } ?: throw IOException("Unable to open Downloads output stream.")
+
+        val finalizeValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.IS_PENDING, 0)
+        }
+        resolver.update(uri, finalizeValues, null, null)
+        return displayName
+    }
+
+    private fun writePublicDownloadLegacy(fileName: String, bytes: ByteArray): String {
+        val downloadsDir = Environment.getExternalStoragePublicDirectory(
+            Environment.DIRECTORY_DOWNLOADS
+        )
+        if (!downloadsDir.exists()) {
+            downloadsDir.mkdirs()
+        }
+
+        var target = File(downloadsDir, fileName)
+        var attempt = 1
+        while (target.exists() && attempt < 20) {
+            val dot = fileName.lastIndexOf('.')
+            val nextName = if (dot > 0) {
+                "${fileName.substring(0, dot)} ($attempt)${fileName.substring(dot)}"
+            } else {
+                "$fileName ($attempt)"
+            }
+            target = File(downloadsDir, nextName)
+            attempt += 1
+        }
+        target.writeBytes(bytes)
+        return target.name
     }
 
     private fun writeBackupFileAuto(call: MethodCall, result: MethodChannel.Result) {

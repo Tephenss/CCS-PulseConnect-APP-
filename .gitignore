@@ -45,3 +45,7 @@ app.*.map.json
 
 # Security Config
 lib/config/env.dart
+android/key.properties
+android/*.jks
+android/*.keystore
+**/upload-keystore.jks
