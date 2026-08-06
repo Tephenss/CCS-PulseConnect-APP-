@@ -471,24 +471,43 @@ class AuthService {
     }
   }
 
-  // Login with email and password, checking the expected role
+  // Login with student number (students) or email (teachers).
   Future<Map<String, dynamic>> login(
-    String email,
+    String identifier,
     String password,
     String expectedRole,
   ) async {
-    return runAuthFlow(() => _loginImpl(email, password, expectedRole));
+    return runAuthFlow(() => _loginImpl(identifier, password, expectedRole));
   }
 
   Future<Map<String, dynamic>> _loginImpl(
-    String email,
+    String identifier,
     String password,
     String expectedRole,
   ) async {
     try {
-      final normalizedEmail = email.toLowerCase().trim();
-      if (!isValidEmail(normalizedEmail)) {
+      final normalizedRole = expectedRole.trim().toLowerCase();
+      final raw = identifier.trim();
+      if (raw.isEmpty) {
+        return {
+          'ok': false,
+          'error': normalizedRole == 'teacher'
+              ? 'Please enter a valid email address.'
+              : 'Enter your student number.',
+        };
+      }
+      final useEmail = raw.contains('@');
+      if (normalizedRole == 'student' && useEmail) {
+        return {
+          'ok': false,
+          'error': 'Students must log in with student number.',
+        };
+      }
+      if (useEmail && !isValidEmail(raw.toLowerCase())) {
         return {'ok': false, 'error': 'Please enter a valid email address.'};
+      }
+      if (normalizedRole == 'teacher' && !useEmail) {
+        return {'ok': false, 'error': 'Teachers must log in with email.'};
       }
       if (!MobileBackendService.isConfigured) {
         return {
@@ -499,9 +518,9 @@ class AuthService {
       }
 
       final loginRes = await MobileBackendService().login(
-        email: normalizedEmail,
+        identifier: raw,
         password: password,
-        expectedRole: expectedRole,
+        expectedRole: normalizedRole,
       );
       if (loginRes['ok'] != true) {
         return {
@@ -599,14 +618,24 @@ class AuthService {
     }
   }
 
-  // Register new student account via PHP (never writes password via anon key).
+  Future<Map<String, dynamic>> lookupStudentRoster(String studentNo) async {
+    try {
+      if (!MobileBackendService.isConfigured) {
+        return {
+          'ok': false,
+          'error':
+              'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
+        };
+      }
+      return await MobileBackendService().lookupStudentRoster(studentNo.trim());
+    } catch (e) {
+      return {'ok': false, 'error': 'Lookup failed. Please try again.'};
+    }
+  }
+
+  // Register new student account via PHP (claims school roster by student number).
   Future<Map<String, dynamic>> register({
-    required String firstName,
-    required String middleName,
-    required String lastName,
-    required String suffix,
     required String idNumber,
-    required String course,
     required String email,
     required String password,
   }) async {
@@ -623,21 +652,8 @@ class AuthService {
         };
       }
 
-      final normalizedCourse = course.trim().toUpperCase();
-      if (normalizedCourse != 'IT' && normalizedCourse != 'CS') {
-        return {
-          'ok': false,
-          'error': 'Please select a valid course (IT or CS).',
-        };
-      }
-
       final result = await MobileBackendService().registerUser({
-        'first_name': firstName.trim(),
-        'middle_name': middleName.trim(),
-        'last_name': lastName.trim(),
-        'suffix': suffix.trim(),
         'student_id': idNumber.trim(),
-        'course': normalizedCourse,
         'email': normalizedEmail,
         'password': password,
       });

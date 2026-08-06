@@ -873,6 +873,9 @@ class OfflineSyncService {
         final participantName = (item['participant_name']?.toString() ?? '').trim();
         final participantStudentId =
             (item['participant_student_id']?.toString() ?? '').trim();
+        final participantStudentNo =
+            (item['participant_student_no']?.toString() ?? participantStudentId)
+                .trim();
         final remotePhotoUrl =
             (item['participant_photo_url']?.toString() ?? '').trim();
         var avatarLocalPath = '';
@@ -909,6 +912,7 @@ class OfflineSyncService {
           'event_id': eventId,
           'participant_name': participantName,
           'participant_student_id': participantStudentId,
+          'participant_student_no': participantStudentNo,
           'participant_photo_url': remotePhotoUrl,
           'participant_photo_local_path': avatarLocalPath,
           'session_presence': sessionPresence,
@@ -1500,6 +1504,8 @@ class OfflineSyncService {
         'participant_photo_url': payload['participant_photo_url'],
         'participant_photo_local_path': payload['participant_photo_local_path'],
         'participant_student_id': payload['participant_student_id'],
+        'participant_student_no':
+            payload['participant_student_no'] ?? payload['participant_student_id'],
       };
     }
 
@@ -1514,6 +1520,8 @@ class OfflineSyncService {
       'participant_photo_url': payload['participant_photo_url'],
       'participant_photo_local_path': payload['participant_photo_local_path'],
       'participant_student_id': payload['participant_student_id'],
+      'participant_student_no':
+          payload['participant_student_no'] ?? payload['participant_student_id'],
       'from_offline_cache': true,
     };
   }
@@ -1603,6 +1611,8 @@ class OfflineSyncService {
         'participant_photo_local_path':
             validation['participant_photo_local_path'],
         'participant_student_id': validation['participant_student_id'],
+        'participant_student_no': validation['participant_student_no'] ??
+            validation['participant_student_id'],
       };
     }
 
@@ -1652,6 +1662,8 @@ class OfflineSyncService {
       'participant_photo_url': validation['participant_photo_url'],
       'participant_photo_local_path': validation['participant_photo_local_path'],
       'participant_student_id': validation['participant_student_id'],
+      'participant_student_no': validation['participant_student_no'] ??
+          validation['participant_student_id'],
     };
   }
 

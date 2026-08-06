@@ -977,12 +977,29 @@ class _TeacherProfileState extends State<TeacherProfile> {
               padding: const EdgeInsets.fromLTRB(24, 24, 24, 40),
               child: Column(
                 children: [
-                  Text('$firstName $lastName', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: Color(0xFF111827), letterSpacing: -0.5)),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        '$firstName $lastName',
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        softWrap: false,
+                        style: const TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF111827),
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                    ),
+                  ),
                   const SizedBox(height: 4),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                     decoration: BoxDecoration(color: TeacherThemeUtils.primary.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(100)),
-                    child: Text(email, style: const TextStyle(color: TeacherThemeUtils.dark, fontSize: 13, fontWeight: FontWeight.w700)),
+                    child: Text(email, textAlign: TextAlign.center, style: const TextStyle(color: TeacherThemeUtils.dark, fontSize: 13, fontWeight: FontWeight.w700)),
                   ),
                   
                   const SizedBox(height: 32),

@@ -56,6 +56,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
   String _lastScannedCode = '';
   DateTime? _lastScannedAt;
   String _lastVerifiedParticipantName = '';
+  String _lastVerifiedParticipantStudentNo = '';
   String _lastVerifiedParticipantPhotoUrl = '';
   String _lastVerifiedParticipantPhotoLocalPath = '';
   String _lastVerifiedStatusLabel = 'Present';
@@ -684,6 +685,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           _hasScanResult = false;
           _scanContext = null;
           _lastVerifiedParticipantName = '';
+          _lastVerifiedParticipantStudentNo = '';
           _lastVerifiedParticipantPhotoUrl = '';
           _lastVerifiedParticipantPhotoLocalPath = '';
           _lastVerifiedStatusLabel = 'Present';
@@ -724,6 +726,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           _statusColor = Colors.red.shade700;
           _hasScanResult = false;
           _lastVerifiedParticipantName = '';
+          _lastVerifiedParticipantStudentNo = '';
           _lastVerifiedParticipantPhotoUrl = '';
           _lastVerifiedParticipantPhotoLocalPath = '';
           _lastVerifiedStatusLabel = 'Present';
@@ -752,6 +755,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           _statusColor = Colors.red.shade700;
           _hasScanResult = false;
           _lastVerifiedParticipantName = '';
+          _lastVerifiedParticipantStudentNo = '';
           _lastVerifiedParticipantPhotoUrl = '';
           _lastVerifiedParticipantPhotoLocalPath = '';
           _lastVerifiedStatusLabel = 'Present';
@@ -1842,6 +1846,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
 
   void _clearVerifiedParticipantOverlay() {
     _lastVerifiedParticipantName = '';
+    _lastVerifiedParticipantStudentNo = '';
     _lastVerifiedParticipantPhotoUrl = '';
     _lastVerifiedParticipantPhotoLocalPath = '';
     _lastVerifiedStatusLabel = 'Present';
@@ -1875,26 +1880,87 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         );
   }
 
-  String get _statusBannerText {
-    if (_isProcessingScan && !_hasScanResult) return _scanStatus;
-    final hasOverlay = _lastVerifiedParticipantName.trim().isNotEmpty;
-    if (hasOverlay && _hasScanResult) {
-      switch (_lastVerifiedStatusLabel.toLowerCase()) {
-        case 'already in':
-          return 'Already checked in';
-        case 'present':
-          return 'Present';
-        case 'timed out':
-          return 'Timed out';
-        case 'already out':
-          return 'Already timed out';
-        case 'queued':
-          return 'Queued offline';
-        default:
-          return _lastVerifiedStatusLabel;
+  List<String> get _scanStatusLines {
+    final raw = _scanStatus.trim();
+    if (raw.isEmpty) return const [];
+    return raw
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList();
+  }
+
+  Widget _buildScanStatusText() {
+    final lines = _scanStatusLines;
+    if (lines.isEmpty) {
+      return Text(
+        _scanStatus,
+        textAlign: TextAlign.left,
+        softWrap: true,
+        style: TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w700,
+          color: _statusColor,
+          height: 1.35,
+        ),
+      );
+    }
+
+    final raw = lines.first;
+    final sepIndex = raw.lastIndexOf(' — ');
+    if (sepIndex > 0) {
+      final namePart = raw.substring(0, sepIndex).trim();
+      var actionPart = raw.substring(sepIndex + 3).trim();
+      if (actionPart.toLowerCase() == 'present') {
+        actionPart = 'Timed in';
+      }
+      if (namePart.isNotEmpty && actionPart.isNotEmpty) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              namePart,
+              softWrap: true,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
+                color: _statusColor,
+                height: 1.25,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              actionPart,
+              softWrap: true,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: _statusColor.withValues(alpha: 0.92),
+                height: 1.3,
+              ),
+            ),
+          ],
+        );
       }
     }
-    return _scanStatus;
+
+    return Text(
+      raw,
+      textAlign: TextAlign.left,
+      softWrap: true,
+      maxLines: 3,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontSize: 14,
+        fontWeight: FontWeight.w700,
+        color: _statusColor,
+        height: 1.35,
+      ),
+    );
   }
 
   Future<void> _hydrateVerifiedParticipantPhoto(String rawPhotoUrl) async {
@@ -1919,12 +1985,14 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
   }) {
     final participantName =
         (response['participant_name']?.toString() ?? '').trim();
+    final participantStudentNo = _resolveParticipantStudentNo(response);
     final participantPhotoUrl =
         (response['participant_photo_url']?.toString() ?? '').trim();
     final participantPhotoLocalPath =
         (response['participant_photo_local_path']?.toString() ?? '').trim();
 
     if (participantName.isEmpty &&
+        participantStudentNo.isEmpty &&
         participantPhotoUrl.isEmpty &&
         participantPhotoLocalPath.isEmpty) {
       return;
@@ -1935,6 +2003,9 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         : (_lastVerifiedParticipantName.isNotEmpty
               ? _lastVerifiedParticipantName
               : 'Verified Student');
+    if (participantStudentNo.isNotEmpty) {
+      _lastVerifiedParticipantStudentNo = participantStudentNo;
+    }
     if (participantPhotoUrl.isNotEmpty) {
       _lastVerifiedParticipantPhotoUrl = participantPhotoUrl;
       unawaited(_hydrateVerifiedParticipantPhoto(participantPhotoUrl));
@@ -1951,9 +2022,34 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         DateTime.now();
   }
 
+  String _resolveParticipantStudentNo(Map<String, dynamic> response) {
+    final fromNo =
+        (response['participant_student_no']?.toString() ?? '').trim();
+    if (fromNo.isNotEmpty) return fromNo;
+    final fromId =
+        (response['participant_student_id']?.toString() ?? '').trim();
+    if (fromId.isEmpty) return '';
+    final uuidLike = RegExp(
+      r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+    );
+    if (uuidLike.hasMatch(fromId)) return '';
+    return fromId;
+  }
+
   String _displayNameInitials(String rawName) {
     final name = rawName.trim();
     if (name.isEmpty) return 'ST';
+    if (name.contains(',')) {
+      final bits = name.split(',');
+      final last = bits.first.trim();
+      final given = bits.length > 1 ? bits.sublist(1).join(' ').trim() : '';
+      final a = last.isNotEmpty ? last[0] : '';
+      final givenParts =
+          given.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+      final b = givenParts.isNotEmpty ? givenParts.first[0] : '';
+      final initials = '$a$b'.toUpperCase();
+      return initials.isEmpty ? 'ST' : initials;
+    }
     final parts = name.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
     if (parts.isEmpty) return 'ST';
     if (parts.length == 1) {
@@ -2042,6 +2138,8 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
 
   Widget _buildLastVerifiedOverlay() {
     final displayName = _lastVerifiedParticipantName.trim();
+    final studentNo = _lastVerifiedParticipantStudentNo.trim();
+    final overlayLabel = studentNo.isNotEmpty ? studentNo : displayName;
     final photoUrl = _lastVerifiedParticipantPhotoUrl;
     final photoLocalPath = _lastVerifiedParticipantPhotoLocalPath;
     final statusLabel = _lastVerifiedStatusLabel.trim().isEmpty
@@ -2055,12 +2153,12 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         ? '$statusLabel · ${_formatStartTime(_lastVerifiedAt!)}'
         : statusLabel;
 
-    final hasData = displayName.isNotEmpty;
+    final hasData = overlayLabel.isNotEmpty;
     final overlayContent = !hasData
         ? const SizedBox.shrink(key: ValueKey('verified-empty'))
         : Container(
             key: ValueKey(
-              '${displayName}_${statusLabel}_${_lastVerifiedAt?.millisecondsSinceEpoch ?? 0}',
+              '${overlayLabel}_${statusLabel}_${_lastVerifiedAt?.millisecondsSinceEpoch ?? 0}',
             ),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             decoration: BoxDecoration(
@@ -2078,7 +2176,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
             child: Row(
               children: [
                 _buildVerifiedParticipantAvatar(
-                  displayName: displayName,
+                  displayName: displayName.isNotEmpty ? displayName : overlayLabel,
                   localPhotoPath: photoLocalPath,
                   photoUrl: photoUrl,
                 ),
@@ -2099,14 +2197,17 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
                         ),
                       ),
                       const SizedBox(height: 1),
-                      Text(
-                        displayName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w800,
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Text(
+                          overlayLabel,
+                          maxLines: 1,
+                          softWrap: false,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w800,
+                          ),
                         ),
                       ),
                     ],
@@ -2233,8 +2334,6 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     return Align(
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
-        // Phone-sized frame — without this the AspectRatio stretches full
-        // content width and the camera looks ultra-wide (GitHub/local bug).
         constraints: const BoxConstraints(maxWidth: 320),
         child: AspectRatio(
           // Match teacher_scanner_trimmed.png (406×546).
@@ -2243,12 +2342,12 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
             builder: (context, constraints) {
               final width = constraints.maxWidth;
               final height = constraints.maxHeight;
-              // Transparent screen-hole insets measured from the PNG.
+              // Bleed padding slightly wider under PNG bezel so zero white gaps or lines show.
               final cameraPadding = EdgeInsets.fromLTRB(
-                width * 0.145,
-                height * 0.194,
-                width * 0.145,
-                height * 0.165,
+                width * 0.125,
+                height * 0.175,
+                width * 0.125,
+                height * 0.145,
               );
 
               return Stack(
@@ -2258,7 +2357,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
                     child: Padding(
                       padding: cameraPadding,
                       child: ClipRRect(
-                        borderRadius: BorderRadius.circular(10),
+                        borderRadius: BorderRadius.circular(4),
                         child: ColoredBox(
                           color: Colors.black,
                           child: Stack(
@@ -2266,7 +2365,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
                             children: [
                               Positioned.fill(
                                 child: Transform.scale(
-                                  scale: 1.02,
+                                  scale: 1.15,
                                   child: _buildCameraSurface(),
                                 ),
                               ),
@@ -2374,15 +2473,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
                       ),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: Text(
-                          _statusBannerText,
-                          textAlign: TextAlign.left,
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w700,
-                            color: _statusColor,
-                          ),
-                        ),
+                        child: _buildScanStatusText(),
                       ),
                     ],
                   ),

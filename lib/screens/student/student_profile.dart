@@ -1029,7 +1029,24 @@ class _StudentProfileState extends State<StudentProfile> {
               padding: const EdgeInsets.fromLTRB(24, 24, 24, 40),
               child: Column(
                 children: [
-                  Text('$firstName $lastName', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: Color(0xFF111827), letterSpacing: -0.5)),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        '$firstName $lastName',
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        softWrap: false,
+                        style: const TextStyle(
+                          fontSize: 26,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF111827),
+                          letterSpacing: -0.5,
+                        ),
+                      ),
+                    ),
+                  ),
                   const SizedBox(height: 4),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -1039,6 +1056,7 @@ class _StudentProfileState extends State<StudentProfile> {
                     ),
                     child: Text(
                       email,
+                      textAlign: TextAlign.center,
                       style: TextStyle(
                         color: _studentPrimary(context),
                         fontSize: 13,

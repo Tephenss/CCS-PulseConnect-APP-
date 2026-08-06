@@ -33,6 +33,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
   bool _usingCachedEvents = false;
   StreamSubscription<String>? _eventLiveSubscription;
   bool _isRefreshingEvents = false;
+  int _eventsLoadGeneration = 0;
 
   bool _isTeacherEventsLiveReason(String reason) {
     final offlinePulse = reason.startsWith('offline:');
@@ -53,8 +54,11 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
       if (!mounted) return;
       if (!_isTeacherEventsLiveReason(reason)) return;
       final offlinePulse = reason.startsWith('offline:');
+      final needLoader = _events.isEmpty;
       // Live delete/archive/publish → forceFresh; offline soft-signal keeps cache.
-      unawaited(_loadEvents(forceFresh: !offlinePulse));
+      unawaited(
+        _loadEvents(showLoader: needLoader, forceFresh: !offlinePulse),
+      );
     });
     // Cache-first init, then online catch-up so deletes don't stick after reopen.
     unawaited(_bootstrapEvents());
@@ -67,7 +71,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
     final offline = connectivity.isEmpty ||
         connectivity.every((result) => result == ConnectivityResult.none);
     if (!offline) {
-      await _loadEvents(forceFresh: true);
+      await _loadEvents(showLoader: _events.isEmpty, forceFresh: true);
     }
   }
 
@@ -82,21 +86,27 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      unawaited(_loadEvents(forceFresh: true));
+      unawaited(
+        _loadEvents(showLoader: _events.isEmpty, forceFresh: true),
+      );
     }
   }
 
-  Future<void> _loadEvents({bool forceFresh = false}) async {
+  Future<void> _loadEvents({
+    bool forceFresh = false,
+    bool showLoader = true,
+  }) async {
     if (_isRefreshingEvents && !forceFresh) return;
+    final loadGen = ++_eventsLoadGeneration;
     _isRefreshingEvents = true;
     final hadCachedEvents = _events.isNotEmpty;
-    if (!hadCachedEvents && mounted) {
+    if (showLoader && !hadCachedEvents && mounted) {
       setState(() => _isLoading = true);
     }
     try {
       final user = await _authService.getCurrentUser();
       if (user == null) {
-        if (!mounted) return;
+        if (!mounted || loadGen != _eventsLoadGeneration) return;
         setState(() => _isLoading = false);
         return;
       }
@@ -143,6 +153,16 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
         }
       }
 
+      if (!mounted || loadGen != _eventsLoadGeneration) return;
+
+      // Soft empty while a newer forceFresh is already queued should not paint
+      // "No events" — generation guard above handles most races; keep prior list
+      // if soft returned empty but we already had events and weren't forceFresh.
+      if (events.isEmpty && !forceFresh && hadCachedEvents && !isOffline) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
+
       if (mounted) {
         setState(() {
           _events = events;
@@ -151,7 +171,12 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
         });
       }
     } finally {
-      _isRefreshingEvents = false;
+      if (loadGen == _eventsLoadGeneration) {
+        _isRefreshingEvents = false;
+        if (mounted && _isLoading) {
+          setState(() => _isLoading = false);
+        }
+      }
     }
   }
 

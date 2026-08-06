@@ -162,7 +162,10 @@ class _StudentTicketsState extends State<StudentTickets>
     if (endAt != null && endAt.isNotEmpty) {
       final endDate = parseStoredEventDateTime(endAt);
       if (endDate != null) {
-        return endDate.isAfter(now) || endDate.isAtSameMomentAs(now);
+        // Keep ticket through the normal timeout window (event end + 1h).
+        // Cutting at end_at alone hid the pass exactly when students time out.
+        final visibleUntil = endDate.add(const Duration(hours: 1));
+        return !now.isAfter(visibleUntil);
       }
     }
     return true;

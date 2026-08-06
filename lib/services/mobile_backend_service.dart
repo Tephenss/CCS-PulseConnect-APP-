@@ -253,14 +253,18 @@ class MobileBackendService {
   }
 
   Future<Map<String, dynamic>> login({
-    required String email,
+    required String identifier,
     required String password,
     required String expectedRole,
   }) async {
+    final id = identifier.trim();
+    final useEmail = id.contains('@');
     final result = await post(
       '/api/mobile_login.php',
       {
-        'email': email.trim().toLowerCase(),
+        if (useEmail) 'email': id.toLowerCase(),
+        if (!useEmail) 'student_no': id,
+        'identifier': id,
         'password': password,
         'role': expectedRole.trim().toLowerCase(),
         'platform': Platform.isAndroid
@@ -281,6 +285,15 @@ class MobileBackendService {
       }
     }
     return result;
+  }
+
+  Future<Map<String, dynamic>> lookupStudentRoster(String studentNo) {
+    return post(
+      '/api/mobile_roster_lookup.php',
+      {'student_no': studentNo.trim()},
+      withSession: false,
+      timeout: const Duration(seconds: 20),
+    );
   }
 
   Future<Map<String, dynamic>> logout() async {

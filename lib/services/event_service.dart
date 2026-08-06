@@ -28,6 +28,9 @@ class EventService {
   static final Map<String, _CachedStudentRequirements> _studentRequirementsCache =
       {};
   static final Map<String, _ListCacheEntry> _listCache = {};
+  /// In-memory Fabric canvas_state by template key (survives reopen in-session).
+  static final Map<String, Map<String, dynamic>> _canvasStateCache = {};
+  static const Duration _certCanvasTtl = Duration(hours: 6);
   static const Duration _activeEventsTtl = Duration(seconds: 45);
   static const Duration _teacherEventsTtl = Duration(seconds: 45);
   static const Duration _expiredEvalTtl = Duration(seconds: 120);
@@ -150,6 +153,8 @@ class EventService {
         uid = (prefs.getString('user_id') ?? '').trim();
       } catch (_) {}
     }
+    _canvasStateCache.clear();
+    cache.cancelInFlightPrefix('fetch:cert_canvas:');
     if (uid.isNotEmpty) {
       final cacheKey = 'certs:v2:$uid';
       _listCache.remove(cacheKey);
@@ -506,11 +511,39 @@ class EventService {
     final lastName = (user['last_name']?.toString() ?? '').trim();
     final suffix = (user['suffix']?.toString() ?? '').trim();
 
-    final parts = <String>[];
-    if (firstName.isNotEmpty) parts.add(firstName);
-    if (middleName.isNotEmpty) parts.add(middleName);
-    if (lastName.isNotEmpty) parts.add(lastName);
+    final parts = <String>[
+      if (firstName.isNotEmpty) firstName,
+      if (middleName.isNotEmpty) middleName,
+      if (lastName.isNotEmpty) lastName,
+    ];
     var fullName = parts.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (suffix.isNotEmpty) {
+      fullName = fullName.isEmpty ? suffix : '$fullName $suffix';
+    }
+    return fullName.trim();
+  }
+
+  /// Surname-first for attendance overlays / status banners (not certificates).
+  String _composeSurnameFirstDisplayName(Map<String, dynamic>? user) {
+    if (user == null || user.isEmpty) return '';
+
+    final firstName = (user['first_name']?.toString() ?? '').trim();
+    final middleName = (user['middle_name']?.toString() ?? '').trim();
+    final lastName = (user['last_name']?.toString() ?? '').trim();
+    final suffix = (user['suffix']?.toString() ?? '').trim();
+
+    final given = <String>[
+      if (firstName.isNotEmpty) firstName,
+      if (middleName.isNotEmpty) middleName,
+    ].join(' ');
+    var fullName = '';
+    if (lastName.isNotEmpty && given.isNotEmpty) {
+      fullName = '$lastName, $given';
+    } else if (lastName.isNotEmpty) {
+      fullName = lastName;
+    } else {
+      fullName = given;
+    }
     if (suffix.isNotEmpty) {
       fullName = fullName.isEmpty ? suffix : '$fullName $suffix';
     }
@@ -4422,56 +4455,93 @@ class EventService {
   }
 
   /// Lazy-load Fabric canvas for certificate preview/download only.
+  /// Cached in-memory + in-flight dedupe so list/modal don't double-fetch.
   Future<Map<String, dynamic>?> fetchCertificateCanvasState({
     String? templateId,
     String? sessionTemplateId,
+    bool forceFresh = false,
   }) async {
     final sessionId = (sessionTemplateId ?? '').trim();
     final eventTplId = (templateId ?? '').trim();
-    try {
-      if (sessionId.isNotEmpty) {
-        final rows = await _supabase
-            .from('event_session_certificate_templates')
-            .select('canvas_state')
-            .eq('id', sessionId)
-            .limit(1);
-        if (rows.isNotEmpty) {
-          final raw = rows.first['canvas_state'];
-          if (raw is Map<String, dynamic>) return raw;
-          if (raw is Map) {
-            return raw.map((k, v) => MapEntry(k.toString(), v));
-          }
-          if (raw is String && raw.trim().isNotEmpty) {
-            final decoded = jsonDecode(raw);
-            if (decoded is Map<String, dynamic>) return decoded;
-            if (decoded is Map) {
-              return decoded.map((k, v) => MapEntry(k.toString(), v));
+    if (sessionId.isEmpty && eventTplId.isEmpty) return null;
+
+    final cacheKey = sessionId.isNotEmpty
+        ? 'cert_canvas:session:$sessionId'
+        : 'cert_canvas:tpl:$eventTplId';
+
+    if (!forceFresh) {
+      final mem = _canvasStateCache[cacheKey];
+      if (mem != null && mem.isNotEmpty) {
+        return Map<String, dynamic>.from(mem);
+      }
+      final cached = _appCache.readMemory<Map<String, dynamic>>(
+        cacheKey,
+        _certCanvasTtl,
+      );
+      if (cached != null && cached.isNotEmpty) {
+        _canvasStateCache[cacheKey] = Map<String, dynamic>.from(cached);
+        return Map<String, dynamic>.from(cached);
+      }
+    }
+
+    return _appCache.fetchOnce<Map<String, dynamic>?>(
+      'fetch:$cacheKey',
+      () async {
+        try {
+          if (sessionId.isNotEmpty) {
+            final rows = await _supabase
+                .from('event_session_certificate_templates')
+                .select('canvas_state')
+                .eq('id', sessionId)
+                .limit(1);
+            final parsed = _parseCanvasStatePayload(
+              rows.isNotEmpty ? rows.first['canvas_state'] : null,
+            );
+            if (parsed != null) {
+              _canvasStateCache[cacheKey] = parsed;
+              return Map<String, dynamic>.from(parsed);
             }
           }
-        }
-      }
-      if (eventTplId.isNotEmpty) {
-        final rows = await _supabase
-            .from('certificate_templates')
-            .select('canvas_state')
-            .eq('id', eventTplId)
-            .limit(1);
-        if (rows.isNotEmpty) {
-          final raw = rows.first['canvas_state'];
-          if (raw is Map<String, dynamic>) return raw;
-          if (raw is Map) {
-            return raw.map((k, v) => MapEntry(k.toString(), v));
-          }
-          if (raw is String && raw.trim().isNotEmpty) {
-            final decoded = jsonDecode(raw);
-            if (decoded is Map<String, dynamic>) return decoded;
-            if (decoded is Map) {
-              return decoded.map((k, v) => MapEntry(k.toString(), v));
+          if (eventTplId.isNotEmpty) {
+            final rows = await _supabase
+                .from('certificate_templates')
+                .select('canvas_state')
+                .eq('id', eventTplId)
+                .limit(1);
+            final parsed = _parseCanvasStatePayload(
+              rows.isNotEmpty ? rows.first['canvas_state'] : null,
+            );
+            if (parsed != null) {
+              _canvasStateCache[cacheKey] = parsed;
+              return Map<String, dynamic>.from(parsed);
             }
           }
+        } catch (_) {}
+        return null;
+      },
+      ttl: _certCanvasTtl,
+      forceFresh: forceFresh,
+    );
+  }
+
+  Map<String, dynamic>? _parseCanvasStatePayload(dynamic raw) {
+    if (raw is Map<String, dynamic>) {
+      return Map<String, dynamic>.from(raw);
+    }
+    if (raw is Map) {
+      return raw.map((k, v) => MapEntry(k.toString(), v));
+    }
+    if (raw is String && raw.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map<String, dynamic>) {
+          return Map<String, dynamic>.from(decoded);
         }
-      }
-    } catch (_) {}
+        if (decoded is Map) {
+          return decoded.map((k, v) => MapEntry(k.toString(), v));
+        }
+      } catch (_) {}
+    }
     return null;
   }
 
@@ -4732,12 +4802,12 @@ class EventService {
       final all = <Map<String, dynamic>>[...simpleCerts, ...sessionCerts].map((
         row,
       ) {
-        final existingName = (row['participant_name']?.toString() ?? '').trim();
         return {
           ...row,
-          'participant_name': existingName.isNotEmpty
-              ? existingName
-              : participantName,
+          // Always First Middle Last for certificates (never attendance surname-first).
+          'participant_name': participantName.isNotEmpty
+              ? participantName
+              : (row['participant_name']?.toString() ?? '').trim(),
         };
       }).toList();
       all.sort((a, b) {
@@ -5804,7 +5874,7 @@ class EventService {
         }
 
         final registrationId = (participantRow['id']?.toString() ?? '').trim();
-        final participantName = _composeDisplayName(user);
+        final participantName = _composeSurnameFirstDisplayName(user);
         final participantStudentId =
             (user?['student_id']?.toString() ??
                     participantRow['student_id']?.toString() ??
@@ -5875,6 +5945,7 @@ class EventService {
             'event_id': eventId,
             'participant_name': participantName,
             'participant_student_id': participantStudentId,
+            'participant_student_no': participantStudentId,
             'participant_photo_url': participantPhotoUrl,
             'session_presence': sessionPresence,
             'attendance_status': attendanceStatus,
@@ -7829,6 +7900,10 @@ class EventService {
           debugPrint('[cert] claim error: $e');
           cert = {'ok': true, 'issued': 0, 'skipped': ''};
         }
+        // Drop stale Evaluation-tab cache so UI cannot keep "tap to answer".
+        try {
+          await EventService.invalidateEventListCache(prefix: 'expired_eval:');
+        } catch (_) {}
         return {
           'ok': true,
           if (cert != null) 'certificate': cert,

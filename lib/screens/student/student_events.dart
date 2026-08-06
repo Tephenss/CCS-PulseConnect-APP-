@@ -63,9 +63,14 @@ class _StudentEventsState extends State<StudentEvents>
       if (!mounted) return;
       if (!_isStudentEventsLiveReason(reason)) return;
       final offlinePulse = reason.startsWith('offline:');
+      final needLoader = _activeEvents.isEmpty && _expiredEvents.isEmpty;
       // Live / push force network when online so deletes show up immediately.
+      // Keep loader if we have nothing yet — avoids "No events" flash mid-fetch.
       unawaited(
-        _loadEvents(showLoader: false, forceFresh: !offlinePulse),
+        _loadEvents(
+          showLoader: needLoader,
+          forceFresh: !offlinePulse,
+        ),
       );
     });
     // Cache paint first, then online catch-up so deleted events don't stick.
@@ -76,7 +81,8 @@ class _StudentEventsState extends State<StudentEvents>
     await _loadEvents(forceFresh: false);
     if (!mounted) return;
     if (!await _isOfflineNow()) {
-      await _loadEvents(showLoader: false, forceFresh: true);
+      final needLoader = _activeEvents.isEmpty && _expiredEvents.isEmpty;
+      await _loadEvents(showLoader: needLoader, forceFresh: true);
     }
   }
 
@@ -105,7 +111,8 @@ class _StudentEventsState extends State<StudentEvents>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       // Resume should feel live (catch deletes/archives while backgrounded).
-      _loadEvents(showLoader: false, forceFresh: true);
+      final needLoader = _activeEvents.isEmpty && _expiredEvents.isEmpty;
+      _loadEvents(showLoader: needLoader, forceFresh: true);
     }
   }
 
@@ -137,81 +144,112 @@ class _StudentEventsState extends State<StudentEvents>
       final effectiveForceFresh = forceFresh && !offline;
       final prefs = await SharedPreferences.getInstance();
 
-      // Instead of using SharedPreferences directly for yearLevel,
-      // let's just use the AuthService helper because it's safer and up-to-date.
       final authService = AuthService();
       final user = await authService.getCurrentUser();
       final userId = user?['id']?.toString().trim().isNotEmpty == true
           ? user!['id'].toString().trim()
           : (prefs.getString('user_id') ?? '');
-      final yearLevel = await authService.getStudentYearLevel();
-      final courseCode = await authService.getStudentCourseCode();
+
+      // Same scope path as Home — avoid ALL/ALL false-empty while sections resolve.
+      String? yearLevel;
+      String? courseCode;
       String? specialization;
       if (userId.isNotEmpty) {
-        final scope = await _eventService.getStudentTargetScope(userId);
-        specialization = (scope['specialization']?.toString() ?? '').trim();
-        if (specialization.isEmpty) specialization = null;
+        try {
+          final scope = await _eventService.getStudentTargetScope(userId);
+          final scopedYear = (scope['yearLevel']?.toString() ?? '').trim();
+          final scopedCourse = (scope['courseCode']?.toString() ?? '').trim();
+          final scopedSpec = (scope['specialization']?.toString() ?? '').trim();
+          yearLevel =
+              scopedYear.isEmpty || scopedYear == 'ALL' ? null : scopedYear;
+          courseCode = scopedCourse.isEmpty || scopedCourse == 'ALL'
+              ? null
+              : scopedCourse;
+          specialization = scopedSpec.isEmpty ? null : scopedSpec;
+        } catch (_) {
+          // Fall through to AuthService helpers.
+        }
       }
+      yearLevel ??= await authService.getStudentYearLevel();
+      courseCode ??= await authService.getStudentCourseCode();
 
-      final results = await Future.wait([
-        _eventService.getActiveEvents(
-          yearLevel: yearLevel,
-          courseCode: courseCode,
-          specialization: specialization,
-          forceFresh: effectiveForceFresh,
-        ),
-        userId.isNotEmpty
-            ? _eventService.getExpiredEventsOpenForEvaluation(
-                studentId: userId,
-                yearLevel: yearLevel,
-                forceFresh: effectiveForceFresh,
-              )
-            : Future.value(<Map<String, dynamic>>[]),
-      ]);
+      // Paint Active first — Evaluation fetch is heavy and was blocking empty/list.
+      final active = await _eventService.getActiveEvents(
+        yearLevel: yearLevel,
+        courseCode: courseCode,
+        specialization: specialization,
+        forceFresh: effectiveForceFresh,
+      );
       if (!mounted || loadGen != _eventsLoadGeneration) return;
 
-      final active = List<Map<String, dynamic>>.from(results[0] as List);
-      final expired = List<Map<String, dynamic>>.from(results[1] as List);
-
-      // Only keep prior lists on a true offline blip — never when online empty
-      // (archived/deleted events must clear from the UI).
-      if (active.isEmpty && expired.isEmpty && hasCachedList && offline) {
+      if (active.isEmpty &&
+          _expiredEvents.isEmpty &&
+          hasCachedList &&
+          offline) {
         if (mounted) setState(() => _isLoading = false);
         return;
-      }
-
-      final evaluatedMap = <String, bool>{};
-      if (userId.isNotEmpty && expired.isNotEmpty) {
-        for (final event in expired) {
-          final eventId = event['id']?.toString() ?? '';
-          if (eventId.isEmpty) continue;
-          final rawBundle = event['evaluation_bundle'];
-          final bundle = rawBundle is Map<String, dynamic>
-              ? rawBundle
-              : (rawBundle is Map
-                    ? Map<String, dynamic>.from(rawBundle)
-                    : <String, dynamic>{});
-          evaluatedMap[eventId] = bundle['is_complete'] == true;
-        }
       }
 
       if (mounted) {
         setState(() {
           _userId = userId;
           _activeEvents = active;
+          _applyFilters();
+          _isLoading = false;
+        });
+        _precacheEventCovers(active);
+      }
+
+      // Evaluation tab in background (don't gate Active on it).
+      if (userId.isEmpty) {
+        if (mounted && loadGen == _eventsLoadGeneration) {
+          setState(() {
+            _expiredEvents = [];
+            _expiredEvaluated.clear();
+            _applyFilters();
+          });
+        }
+        return;
+      }
+
+      final expired = await _eventService.getExpiredEventsOpenForEvaluation(
+        studentId: userId,
+        yearLevel: yearLevel,
+        forceFresh: effectiveForceFresh,
+      );
+      if (!mounted || loadGen != _eventsLoadGeneration) return;
+
+      final evaluatedMap = <String, bool>{};
+      for (final event in expired) {
+        final eventId = event['id']?.toString() ?? '';
+        if (eventId.isEmpty) continue;
+        final rawBundle = event['evaluation_bundle'];
+        final bundle = rawBundle is Map<String, dynamic>
+            ? rawBundle
+            : (rawBundle is Map
+                ? Map<String, dynamic>.from(rawBundle)
+                : <String, dynamic>{});
+        evaluatedMap[eventId] = bundle['is_complete'] == true;
+      }
+
+      if (mounted) {
+        setState(() {
           _expiredEvents = expired;
           _expiredEvaluated
             ..clear()
             ..addAll(evaluatedMap);
           _applyFilters();
-          _isLoading = false;
         });
-        _precacheEventCovers([...active, ...expired]);
+        _precacheEventCovers(expired);
       }
     } finally {
-      _isRefreshingEvents = false;
-      if (mounted && _isLoading) {
-        setState(() => _isLoading = false);
+      // Stale generations must not clear loading or the refresh lock — a newer
+      // load is still in flight and would flash "No active events found".
+      if (loadGen == _eventsLoadGeneration) {
+        _isRefreshingEvents = false;
+        if (mounted && _isLoading) {
+          setState(() => _isLoading = false);
+        }
       }
     }
   }
@@ -264,7 +302,22 @@ class _StudentEventsState extends State<StudentEvents>
     );
 
     if (success == true && mounted) {
-      await _loadEvents();
+      var markedComplete = true;
+      try {
+        final bundle = await _eventService.getEvaluationBundle(
+          eventId: eventId,
+          studentId: _userId,
+        );
+        markedComplete = bundle['is_complete'] == true;
+      } catch (_) {
+        markedComplete = true; // submit succeeded — prefer submitted UI over stale open
+      }
+      if (mounted) {
+        setState(() {
+          _expiredEvaluated[eventId] = markedComplete;
+        });
+      }
+      await _loadEvents(showLoader: false, forceFresh: true);
     }
   }
 

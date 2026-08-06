@@ -155,7 +155,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
             : (res['message']?.toString() ??
                 'Offline check-in saved. Syncing when online.');
         _statusColor = Colors.orange.shade700;
-        _rememberVerifiedParticipant(res);
+        _rememberVerifiedParticipant(res, statusLabel: 'Queued');
         _playSuccessScanSound();
       } else if (res['ok'] == true) {
         final participantName =
@@ -169,28 +169,28 @@ class _StudentScanScreenState extends State<StudentScanScreen>
               ? '$participantName — Already timed in'
               : (res['message']?.toString() ?? 'Already timed in.');
           _statusColor = Colors.orange.shade700;
-          _rememberVerifiedParticipant(res);
+          _rememberVerifiedParticipant(res, statusLabel: 'Already in');
           _playFailedScanSound();
         } else if (status == 'already_checked_out') {
           _scanStatus = participantName.isNotEmpty
               ? '$participantName — Already timed out'
               : (res['message']?.toString() ?? 'Already timed out.');
           _statusColor = Colors.orange.shade700;
-          _rememberVerifiedParticipant(res);
+          _rememberVerifiedParticipant(res, statusLabel: 'Already out');
           _playFailedScanSound();
         } else if (isOut) {
           _scanStatus = participantName.isNotEmpty
               ? '$participantName — Timed out'
               : (res['message']?.toString() ?? 'Timed out successfully!');
           _statusColor = successColor;
-          _rememberVerifiedParticipant(res);
+          _rememberVerifiedParticipant(res, statusLabel: 'Timed out');
           _playSuccessScanSound();
         } else {
           _scanStatus = participantName.isNotEmpty
               ? '$participantName — Timed in'
               : (res['message']?.toString() ?? 'Timed in successfully!');
           _statusColor = successColor;
-          _rememberVerifiedParticipant(res);
+          _rememberVerifiedParticipant(res, statusLabel: 'Present');
           _playSuccessScanSound();
         }
       } else if (status == 'already_checked_in' || status == 'used') {
@@ -203,7 +203,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                 fallback: 'Already timed in.',
               );
         _statusColor = Colors.orange.shade700;
-        _rememberVerifiedParticipant(res);
+        _rememberVerifiedParticipant(res, statusLabel: 'Already in');
         _playFailedScanSound();
       } else if (status == 'already_checked_out') {
         final participantName =
@@ -215,7 +215,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                 fallback: 'Already timed out.',
               );
         _statusColor = Colors.orange.shade700;
-        _rememberVerifiedParticipant(res);
+        _rememberVerifiedParticipant(res, statusLabel: 'Already out');
         _playFailedScanSound();
       } else {
         _scanStatus = _withEventContext(
@@ -279,8 +279,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
   DateTime? _lastScannedAt;
   StudentScanMode? _selectedMode;
   String _lastVerifiedParticipantName = '';
+  String _lastVerifiedParticipantStudentNo = '';
   String _lastVerifiedParticipantPhotoUrl = '';
   String _lastVerifiedParticipantPhotoLocalPath = '';
+  String _lastVerifiedStatusLabel = 'Present';
   DateTime? _lastVerifiedAt;
 
   Timer? _scanResumeTimer;
@@ -549,8 +551,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           _hasScanResult = false;
           _scanContext = null;
           _lastVerifiedParticipantName = '';
+          _lastVerifiedParticipantStudentNo = '';
           _lastVerifiedParticipantPhotoUrl = '';
           _lastVerifiedParticipantPhotoLocalPath = '';
+          _lastVerifiedStatusLabel = 'Present';
           _lastVerifiedAt = null;
           _isLoading = true;
           if (isTakeAttendance) {
@@ -610,8 +614,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           _statusColor = Colors.red.shade700;
           _hasScanResult = false;
           _lastVerifiedParticipantName = '';
+          _lastVerifiedParticipantStudentNo = '';
           _lastVerifiedParticipantPhotoUrl = '';
           _lastVerifiedParticipantPhotoLocalPath = '';
+          _lastVerifiedStatusLabel = 'Present';
           _lastVerifiedAt = null;
         });
       }
@@ -629,8 +635,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           _isScanning = false;
           _hasScanResult = false;
           _lastVerifiedParticipantName = '';
+          _lastVerifiedParticipantStudentNo = '';
           _lastVerifiedParticipantPhotoUrl = '';
           _lastVerifiedParticipantPhotoLocalPath = '';
+          _lastVerifiedStatusLabel = 'Present';
           _lastVerifiedAt = null;
           _isLoading = false;
           if (_selectedMode == StudentScanMode.takeAttendance) {
@@ -1370,14 +1378,19 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     });
   }
 
-  void _rememberVerifiedParticipant(Map<String, dynamic> response) {
+  void _rememberVerifiedParticipant(
+    Map<String, dynamic> response, {
+    String statusLabel = 'Present',
+  }) {
     final participantName =
         (response['participant_name']?.toString() ?? '').trim();
+    final participantStudentNo = _resolveParticipantStudentNo(response);
     final participantPhotoUrl =
         (response['participant_photo_url']?.toString() ?? '').trim();
     final participantPhotoLocalPath =
         (response['participant_photo_local_path']?.toString() ?? '').trim();
     if (participantName.isEmpty &&
+        participantStudentNo.isEmpty &&
         participantPhotoUrl.isEmpty &&
         participantPhotoLocalPath.isEmpty) {
       return;
@@ -1388,6 +1401,9 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         : (_lastVerifiedParticipantName.isNotEmpty
               ? _lastVerifiedParticipantName
               : 'Verified Student');
+    if (participantStudentNo.isNotEmpty) {
+      _lastVerifiedParticipantStudentNo = participantStudentNo;
+    }
     if (participantPhotoUrl.isNotEmpty) {
       _lastVerifiedParticipantPhotoUrl = participantPhotoUrl;
       unawaited(_hydrateVerifiedParticipantPhoto(participantPhotoUrl));
@@ -1395,14 +1411,35 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     if (participantPhotoLocalPath.isNotEmpty) {
       _lastVerifiedParticipantPhotoLocalPath = participantPhotoLocalPath;
     }
+    _lastVerifiedStatusLabel =
+        statusLabel.trim().isEmpty ? 'Present' : statusLabel.trim();
     final checkOut = (response['check_out_at']?.toString() ?? '').trim();
     final checkIn = (response['check_in_at']?.toString() ?? '').trim();
     final status = (response['status']?.toString() ?? '').toLowerCase();
-    final rawTime = (status.contains('out') && checkOut.isNotEmpty)
+    final label = _lastVerifiedStatusLabel.toLowerCase();
+    final prefersOut = label.contains('out') ||
+        status.contains('out') ||
+        (response['action']?.toString() ?? '').toLowerCase() == 'check_out';
+    final rawTime = (prefersOut && checkOut.isNotEmpty)
         ? checkOut
         : (checkIn.isNotEmpty ? checkIn : checkOut);
     final parsed = rawTime.isNotEmpty ? DateTime.tryParse(rawTime) : null;
     _lastVerifiedAt = parsed?.toLocal() ?? DateTime.now();
+  }
+
+  String _resolveParticipantStudentNo(Map<String, dynamic> response) {
+    final fromNo =
+        (response['participant_student_no']?.toString() ?? '').trim();
+    if (fromNo.isNotEmpty) return fromNo;
+    final fromId =
+        (response['participant_student_id']?.toString() ?? '').trim();
+    if (fromId.isEmpty) return '';
+    // Ignore UUID user ids — overlay should show school student number only.
+    final uuidLike = RegExp(
+      r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+    );
+    if (uuidLike.hasMatch(fromId)) return '';
+    return fromId;
   }
 
   Future<void> _hydrateVerifiedParticipantPhoto(String rawPhotoUrl) async {
@@ -1969,14 +2006,60 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       );
     }
 
-    return Text(
-      lines.first,
-      textAlign: TextAlign.left,
-      style: TextStyle(
-        fontSize: 14,
-        fontWeight: FontWeight.w700,
-        color: _statusColor,
-        height: 1.35,
+    // "Name — Timed in": name on top (scrollable), action always under it.
+    final raw = lines.first;
+    final sepIndex = raw.lastIndexOf(' — ');
+    if (sepIndex > 0) {
+      final namePart = raw.substring(0, sepIndex).trim();
+      final actionPart = raw.substring(sepIndex + 3).trim();
+      if (namePart.isNotEmpty && actionPart.isNotEmpty) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Text(
+                namePart,
+                softWrap: false,
+                maxLines: 1,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
+                  color: _statusColor,
+                  height: 1.25,
+                ),
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              actionPart,
+              softWrap: false,
+              maxLines: 1,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: _statusColor.withValues(alpha: 0.92),
+                height: 1.3,
+              ),
+            ),
+          ],
+        );
+      }
+    }
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Text(
+        raw,
+        textAlign: TextAlign.left,
+        softWrap: false,
+        maxLines: 1,
+        style: TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w700,
+          color: _statusColor,
+          height: 1.35,
+        ),
       ),
     );
   }
@@ -1984,6 +2067,17 @@ class _StudentScanScreenState extends State<StudentScanScreen>
   String _displayNameInitials(String rawName) {
     final name = rawName.trim();
     if (name.isEmpty) return 'ST';
+    if (name.contains(',')) {
+      final bits = name.split(',');
+      final last = bits.first.trim();
+      final given = bits.length > 1 ? bits.sublist(1).join(' ').trim() : '';
+      final a = last.isNotEmpty ? last[0] : '';
+      final givenParts =
+          given.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+      final b = givenParts.isNotEmpty ? givenParts.first[0] : '';
+      final initials = '$a$b'.toUpperCase();
+      return initials.isEmpty ? 'ST' : initials;
+    }
     final parts = name.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
     if (parts.isEmpty) return 'ST';
     if (parts.length == 1) {
@@ -2073,18 +2167,34 @@ class _StudentScanScreenState extends State<StudentScanScreen>
 
   Widget _buildLastVerifiedOverlay() {
     final displayName = _lastVerifiedParticipantName.trim();
+    final studentNo = _lastVerifiedParticipantStudentNo.trim();
+    final overlayLabel = studentNo.isNotEmpty ? studentNo : displayName;
     final photoUrl = _lastVerifiedParticipantPhotoUrl;
     final photoLocalPath = _lastVerifiedParticipantPhotoLocalPath;
+    final statusLabel = _lastVerifiedStatusLabel.trim().isEmpty
+        ? 'Present'
+        : _lastVerifiedStatusLabel.trim();
+    final isWarning = statusLabel.toLowerCase().contains('already') ||
+        statusLabel.toLowerCase().contains('queued');
+    final isTimedOut = statusLabel.toLowerCase().contains('out');
+    final overlayStatusText = switch (statusLabel.toLowerCase()) {
+      'present' => 'Timed in',
+      'timed out' => 'Timed out',
+      'already in' => 'Already in',
+      'already out' => 'Already out',
+      'queued' => 'Queued',
+      _ => statusLabel,
+    };
     final verifiedLabel = _lastVerifiedAt != null
-        ? 'Present ${_formatStartTime(_lastVerifiedAt!)}'
-        : 'Present';
+        ? '$overlayStatusText ${_formatStartTime(_lastVerifiedAt!)}'
+        : overlayStatusText;
 
-    final hasData = displayName.isNotEmpty;
+    final hasData = overlayLabel.isNotEmpty;
     final overlayContent = !hasData
         ? const SizedBox.shrink(key: ValueKey('verified-empty'))
         : Container(
             key: ValueKey(
-              '${displayName}_${_lastVerifiedAt?.millisecondsSinceEpoch ?? 0}',
+              '${overlayLabel}_${statusLabel}_${_lastVerifiedAt?.millisecondsSinceEpoch ?? 0}',
             ),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             decoration: BoxDecoration(
@@ -2102,7 +2212,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
             child: Row(
               children: [
                 _buildVerifiedParticipantAvatar(
-                  displayName: displayName,
+                  displayName: displayName.isNotEmpty ? displayName : overlayLabel,
                   localPhotoPath: photoLocalPath,
                   photoUrl: photoUrl,
                 ),
@@ -2123,14 +2233,17 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                         ),
                       ),
                       const SizedBox(height: 1),
-                      Text(
-                        displayName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w800,
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Text(
+                          overlayLabel,
+                          maxLines: 1,
+                          softWrap: false,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w800,
+                          ),
                         ),
                       ),
                     ],
@@ -2138,8 +2251,16 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                 ),
                 const SizedBox(width: 6),
                 Icon(
-                  Icons.verified_rounded,
-                  color: const Color(0xFF34D399),
+                  isWarning
+                      ? Icons.warning_amber_rounded
+                      : (isTimedOut
+                          ? Icons.logout_rounded
+                          : Icons.verified_rounded),
+                  color: isWarning
+                      ? const Color(0xFFFBBF24)
+                      : (isTimedOut
+                          ? const Color(0xFF93C5FD)
+                          : const Color(0xFF34D399)),
                   size: 18,
                 ),
               ],
@@ -2260,58 +2381,71 @@ class _StudentScanScreenState extends State<StudentScanScreen>
   Widget _buildFramedScannerWindow() {
     final frameAsset = _studentScannerFrameAsset(context);
 
-    return AspectRatio(
-      // Trimmed frames keep full body visible without edge cutting.
-      aspectRatio: 0.74,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final width = constraints.maxWidth;
-          final height = constraints.maxHeight;
-          final cameraPadding = EdgeInsets.fromLTRB(
-            width * 0.13,
-            height * 0.148,
-            width * 0.13,
-            height * 0.162,
-          );
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 320),
+        child: AspectRatio(
+          // Match trimmed scanner asset (~405×545) so BoxFit.fill matches container 1:1.
+          aspectRatio: 405 / 545,
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final width = constraints.maxWidth;
+              final height = constraints.maxHeight;
+              // Bleed padding slightly wider under PNG bezel so zero white gaps or lines show.
+              final cameraPadding = EdgeInsets.fromLTRB(
+                width * 0.125,
+                height * 0.175,
+                width * 0.125,
+                height * 0.145,
+              );
 
-          return Stack(
-            fit: StackFit.expand,
-            children: [
-              Positioned.fill(
-                child: Padding(
-                  padding: cameraPadding,
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        Positioned.fill(
-                          child: _buildCameraSurface(),
-                        ),
-                        Positioned(
-                          top: 8,
-                          left: 8,
-                          right: 8,
-                          child: IgnorePointer(
-                            child: _buildLastVerifiedOverlay(),
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  Positioned.fill(
+                    child: Padding(
+                      padding: cameraPadding,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: ColoredBox(
+                          color: Colors.black,
+                          child: Stack(
+                            fit: StackFit.expand,
+                            children: [
+                              Positioned.fill(
+                                child: Transform.scale(
+                                  scale: 1.15,
+                                  child: _buildCameraSurface(),
+                                ),
+                              ),
+                              Positioned(
+                                top: 8,
+                                left: 8,
+                                right: 8,
+                                child: IgnorePointer(
+                                  child: _buildLastVerifiedOverlay(),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
+                      ),
                     ),
                   ),
-                ),
-              ),
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: Image.asset(
-                    frameAsset,
-                    fit: BoxFit.contain,
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: Image.asset(
+                        frameAsset,
+                        fit: BoxFit.fill,
+                      ),
+                    ),
                   ),
-                ),
-              ),
-            ],
-          );
-        },
+                ],
+              );
+            },
+          ),
+        ),
       ),
     );
   }

@@ -360,7 +360,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Icon(
-                                widget.role == 'Teacher' ? Icons.school_rounded : Icons.person_rounded,
+                                _isTeacher ? Icons.school_rounded : Icons.person_rounded,
                                 color: Colors.white,
                                 size: 15,
                               ),
@@ -522,10 +522,12 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                                         ),
                                       ),
 
-                                    // Email
-                                    const Text(
-                                      'Email Address',
-                                      style: TextStyle(
+                                    // Student number only (teachers still use email)
+                                    Text(
+                                      _isTeacher
+                                          ? 'Email Address'
+                                          : 'Student Number',
+                                      style: const TextStyle(
                                         color: Color(0xFFA1A1AA),
                                         fontWeight: FontWeight.w600,
                                         fontSize: 13,
@@ -534,13 +536,23 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                                     const SizedBox(height: 10),
                                     TextFormField(
                                       controller: _emailController,
-                                      keyboardType: TextInputType.emailAddress,
+                                      keyboardType: _isTeacher
+                                          ? TextInputType.emailAddress
+                                          : TextInputType.text,
                                       style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
                                       cursorColor: _primaryColor,
                                       decoration: InputDecoration(
-                                        hintText: 'you@gmail.com',
+                                        hintText: _isTeacher
+                                            ? 'you@gmail.com'
+                                            : 'e.g. 231-0001',
                                         hintStyle: const TextStyle(color: Color(0xFF52525B), fontSize: 14),
-                                        prefixIcon: const Icon(Icons.email_outlined, color: Color(0xFF52525B), size: 20),
+                                        prefixIcon: Icon(
+                                          _isTeacher
+                                              ? Icons.email_outlined
+                                              : Icons.badge_outlined,
+                                          color: const Color(0xFF52525B),
+                                          size: 20,
+                                        ),
                                         filled: true,
                                         fillColor: const Color(0xFF1C1C22),
                                         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
@@ -567,8 +579,24 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                                         errorStyle: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 12),
                                       ),
                                       validator: (val) {
-                                        if (val == null || val.isEmpty) return 'Email is required';
-                                        if (!AuthService.isValidEmail(val)) return 'Enter a valid email';
+                                        final trimmed = (val ?? '').trim();
+                                        if (trimmed.isEmpty) {
+                                          return _isTeacher
+                                              ? 'Email is required'
+                                              : 'Student number is required';
+                                        }
+                                        if (_isTeacher) {
+                                          if (!AuthService.isValidEmail(trimmed)) {
+                                            return 'Enter a valid email';
+                                          }
+                                          return null;
+                                        }
+                                        if (trimmed.contains('@')) {
+                                          return 'Use your student number, not email';
+                                        }
+                                        if (trimmed.length < 5) {
+                                          return 'Enter a valid student number';
+                                        }
                                         return null;
                                       },
                                     ),

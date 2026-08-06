@@ -1105,7 +1105,7 @@ class _StudentTicketViewState extends State<StudentTicketView>
 
   Widget _buildAttendanceRow(String label, String value, bool active) {
     return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           label,
@@ -1115,12 +1115,18 @@ class _StudentTicketViewState extends State<StudentTicketView>
             color: Colors.grey.shade600,
           ),
         ),
-        Text(
-          value,
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w700,
-            color: active ? const Color(0xFF1F2937) : Colors.grey.shade400,
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            softWrap: true,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: active ? const Color(0xFF1F2937) : Colors.grey.shade400,
+              height: 1.35,
+            ),
           ),
         ),
       ],

@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../main.dart';
 import '../../services/auth_service.dart';
-import '../../widgets/custom_loader.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -16,17 +15,17 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
   final _formKey = GlobalKey<FormState>();
   final _authService = AuthService();
 
-  final _firstNameCtrl = TextEditingController();
-  final _middleNameCtrl = TextEditingController();
-  final _lastNameCtrl = TextEditingController();
-  final _suffixCtrl = TextEditingController();
   final _idNumberCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
+  final _confirmPasswordCtrl = TextEditingController();
 
-  String? _selectedCourse;
+  /// null = enter student no; map = roster matched, show email/password.
+  Map<String, dynamic>? _rosterMatch;
+  bool _isLookingUp = false;
   bool _isLoading = false;
   bool _obscurePassword = true;
+  bool _obscureConfirm = true;
   String? _errorMessage;
   String? _successMessage;
 
@@ -45,20 +44,46 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
 
   @override
   void dispose() {
-    _firstNameCtrl.dispose();
-    _middleNameCtrl.dispose();
-    _lastNameCtrl.dispose();
-    _suffixCtrl.dispose();
     _idNumberCtrl.dispose();
     _emailCtrl.dispose();
     _passwordCtrl.dispose();
+    _confirmPasswordCtrl.dispose();
     _logoFloatController.dispose();
     super.dispose();
   }
 
-  // _loadSections is no longer used during registration
+  Future<void> _handleLookup() async {
+    final studentNo = _idNumberCtrl.text.trim();
+    if (studentNo.isEmpty) {
+      setState(() => _errorMessage = 'Enter your student number.');
+      return;
+    }
+    setState(() {
+      _isLookingUp = true;
+      _errorMessage = null;
+      _successMessage = null;
+    });
+    final result = await _authService.lookupStudentRoster(studentNo);
+    if (!mounted) return;
+    setState(() => _isLookingUp = false);
+    if (result['ok'] == true && result['roster'] is Map) {
+      setState(() {
+        _rosterMatch = Map<String, dynamic>.from(result['roster'] as Map);
+        _errorMessage = null;
+      });
+    } else {
+      setState(() {
+        _rosterMatch = null;
+        _errorMessage = result['error'] as String? ?? 'No matching student record.';
+      });
+    }
+  }
 
   Future<void> _handleRegister() async {
+    if (_rosterMatch == null) {
+      await _handleLookup();
+      return;
+    }
     if (!_formKey.currentState!.validate()) return;
 
     setState(() {
@@ -68,12 +93,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
     });
 
     final result = await _authService.register(
-      firstName: _firstNameCtrl.text,
-      middleName: _middleNameCtrl.text,
-      lastName: _lastNameCtrl.text,
-      suffix: _suffixCtrl.text,
       idNumber: _idNumberCtrl.text,
-      course: _selectedCourse ?? '',
       email: _emailCtrl.text,
       password: _passwordCtrl.text,
     );
@@ -87,6 +107,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
         PulseConnectApp.of(context).showEmailVerificationGate(
           user,
           gateReason: 'unverified',
+          // After OTP: success dialog → login (do not enter app automatically).
           postRegistrationReviewFlow: true,
         );
         return;
@@ -97,6 +118,16 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
     } else {
       setState(() => _errorMessage = result['error'] as String?);
     }
+  }
+
+  void _clearRosterMatch() {
+    setState(() {
+      _rosterMatch = null;
+      _emailCtrl.clear();
+      _passwordCtrl.clear();
+      _confirmPasswordCtrl.clear();
+      _errorMessage = null;
+    });
   }
 
   void _updatePointer(PointerEvent details) {
@@ -435,7 +466,9 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                             ),
                             const SizedBox(height: 6),
                             Text(
-                              'Fill in your details to get started',
+                              _rosterMatch == null
+                                  ? 'Enter your student number to continue'
+                                  : 'Confirm your details, then set email & password',
                               style: TextStyle(
                                 fontSize: 14,
                                 color: Colors.white.withValues(alpha: 0.4),
@@ -468,311 +501,236 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                     if (_errorMessage != null) _buildMessage(_errorMessage!, false),
                                     if (_successMessage != null) _buildMessage(_successMessage!, true),
 
-                                    // Full Name
-                                    _buildLabel('First Name'),
+                                    _buildLabel('Student Number'),
                                     const SizedBox(height: 8),
                                     TextFormField(
-                                      controller: _firstNameCtrl,
-                                      style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                                      cursorColor: const Color(0xFF9F1239),
-                                      decoration: _inputDeco(hint: 'First Name', icon: Icons.person_outlined),
-                                      validator: (v) => v == null || v.trim().length < 2 ? 'Required' : null,
-                                    ),
-                                    const SizedBox(height: 14),
-
-                                    Row(
-                                      children: [
-                                        Expanded(
-                                          flex: 3,
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            children: [
-                                              _buildLabel('Middle Name'),
-                                              const SizedBox(height: 8),
-                                              TextFormField(
-                                                controller: _middleNameCtrl,
-                                                style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                                                cursorColor: const Color(0xFF9F1239),
-                                                decoration: _inputDeco(hint: 'Middle Name'),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                        const SizedBox(width: 12),
-                                        Expanded(
-                                          flex: 2,
-                                          child: Column(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
-                                            children: [
-                                              _buildLabel('Suffix'),
-                                              const SizedBox(height: 8),
-                                              TextFormField(
-                                                controller: _suffixCtrl,
-                                                style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                                                cursorColor: const Color(0xFF9F1239),
-                                                decoration: _inputDeco(hint: 'Jr, III'),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 14),
-
-                                    _buildLabel('Last Name'),
-                                    const SizedBox(height: 8),
-                                    TextFormField(
-                                      controller: _lastNameCtrl,
-                                      style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                                      cursorColor: const Color(0xFF9F1239),
-                                      decoration: _inputDeco(hint: 'Last Name', icon: Icons.person_outlined),
-                                      validator: (v) => v == null || v.trim().length < 2 ? 'Required' : null,
-                                    ),
-
-                                    const SizedBox(height: 20),
-
-                                    // ID Number
-                                    _buildLabel('School ID Number'),
-                                    const SizedBox(height: 8),
-                                    TextFormField(
-                                      controller: _idNumberCtrl, // added new controller
+                                      controller: _idNumberCtrl,
+                                      enabled: _rosterMatch == null,
                                       style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
                                       cursorColor: const Color(0xFF9F1239),
                                       keyboardType: TextInputType.text,
                                       inputFormatters: [
-                                        FilteringTextInputFormatter.allow(RegExp(r'[0-9-]')),
+                                        FilteringTextInputFormatter.allow(RegExp(r'[0-9A-Za-z-]')),
                                       ],
                                       decoration: _inputDeco(hint: 'e.g. 231-*****', icon: Icons.badge_outlined),
                                       validator: (v) {
                                         final value = (v ?? '').trim();
-                                        if (value.isEmpty) return 'ID Number is required';
-                                        if (!RegExp(r'^[0-9-]+$').hasMatch(value)) {
-                                          return 'Only numbers and - are allowed';
-                                        }
+                                        if (value.isEmpty) return 'Student number is required';
                                         return null;
                                       },
                                     ),
 
-                                    const SizedBox(height: 20),
-
-                                    _buildLabel('Course'),
-                                    const SizedBox(height: 8),
-                                    DropdownButtonFormField<String>(
-                                      initialValue: _selectedCourse,
-                                      dropdownColor: const Color(0xFF1C1C22),
-                                      iconEnabledColor: const Color(0xFFA1A1AA),
-                                      hint: const Text(
-                                        'Select Course',
-                                        style: TextStyle(
-                                          fontSize: 14,
-                                          color: Color(0xFF71717A),
-                                          fontWeight: FontWeight.w500,
+                                    if (_rosterMatch != null) ...[
+                                      const SizedBox(height: 16),
+                                      Container(
+                                        width: double.infinity,
+                                        padding: const EdgeInsets.all(14),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF14532D).withValues(alpha: 0.35),
+                                          borderRadius: BorderRadius.circular(14),
+                                          border: Border.all(color: const Color(0xFF166534)),
                                         ),
-                                      ),
-                                      style: const TextStyle(
-                                        fontSize: 14,
-                                        color: Color(0xFFF4F4F5),
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                      decoration: _inputDeco(
-                                        hint: '',
-                                        icon: Icons.school_outlined,
-                                      ),
-                                      items: const [
-                                        DropdownMenuItem(
-                                          value: 'IT',
-                                          child: Text(
-                                            'BSIT (IT)',
-                                            style: TextStyle(
-                                              color: Color(0xFFF4F4F5),
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                        ),
-                                        DropdownMenuItem(
-                                          value: 'CS',
-                                          child: Text(
-                                            'BSCS (CS)',
-                                            style: TextStyle(
-                                              color: Color(0xFFF4F4F5),
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                      onChanged: (value) {
-                                        setState(() => _selectedCourse = value);
-                                      },
-                                      validator: (value) {
-                                        if (value == null || value.isEmpty) {
-                                          return 'Course is required';
-                                        }
-                                        return null;
-                                      },
-                                    ),
-
-                                    const SizedBox(height: 20),
-
-                                    // Email
-                                    _buildLabel('Email Address'),
-                                    const SizedBox(height: 8),
-                                    TextFormField(
-                                      controller: _emailCtrl,
-                                      keyboardType: TextInputType.emailAddress,
-                                      style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                                      cursorColor: const Color(0xFF9F1239),
-                                      decoration: _inputDeco(hint: 'you@gmail.com', icon: Icons.email_outlined),
-                                      validator: (v) {
-                                        if (v == null || v.isEmpty) return 'Required';
-                                        if (!AuthService.isValidEmail(v)) return 'Invalid email';
-                                        return null;
-                                      },
-                                    ),
-
-                                    const SizedBox(height: 20),
-
-// Section dropdown removed 
-
-                                    // Password
-                                    _buildLabel('Password'),
-                                    const SizedBox(height: 8),
-                                    TextFormField(
-                                      controller: _passwordCtrl,
-                                      obscureText: _obscurePassword,
-                                      style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-                                      cursorColor: const Color(0xFF9F1239),
-                                      onChanged: (_) => setState(() {}),
-                                      decoration: _inputDeco(
-                                        hint: 'Minimum 8 characters',
-                                        icon: Icons.lock_outline_rounded,
-                                        suffix: IconButton(
-                                          icon: Icon(
-                                            _obscurePassword ? Icons.visibility_off_outlined : Icons.visibility_outlined,
-                                            color: const Color(0xFF52525B), size: 20,
-                                          ),
-                                          onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
-                                        ),
-                                      ),
-                                      validator: (v) {
-                                        final value = (v ?? '').trim();
-                                        if (value.isEmpty) return 'Password is required';
-                                        if (!_isStrongPassword(value)) {
-                                          return 'Use 8+ chars with upper, lower, number, and symbol';
-                                        }
-                                        return null;
-                                      },
-                                    ),
-
-                                    const SizedBox(height: 10),
-                                    Builder(
-                                      builder: (_) {
-                                        final password = _passwordCtrl.text;
-                                        final score = _passwordStrengthScore(password);
-                                        final color = _strengthColor(score);
-                                        final meterValue = password.isEmpty ? 0.0 : (score / 5).clamp(0.0, 1.0);
-                                        return Column(
+                                        child: Column(
                                           crossAxisAlignment: CrossAxisAlignment.start,
                                           children: [
-                                            Row(
-                                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                              children: [
-                                                const Text(
-                                                  'Password strength',
-                                                  style: TextStyle(
-                                                    fontSize: 11,
-                                                    color: Color(0xFFA1A1AA),
-                                                    fontWeight: FontWeight.w600,
-                                                  ),
-                                                ),
-                                                Text(
-                                                  password.isEmpty ? '-' : _strengthLabel(score),
-                                                  style: TextStyle(
-                                                    fontSize: 11,
-                                                    color: password.isEmpty ? const Color(0xFF71717A) : color,
-                                                    fontWeight: FontWeight.w700,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                            const SizedBox(height: 6),
-                                            ClipRRect(
-                                              borderRadius: BorderRadius.circular(99),
-                                              child: LinearProgressIndicator(
-                                                minHeight: 6,
-                                                value: meterValue,
-                                                backgroundColor: const Color(0xFF27272A),
-                                                valueColor: AlwaysStoppedAnimation<Color>(color),
+                                            const Text(
+                                              'Matched school record',
+                                              style: TextStyle(
+                                                color: Color(0xFF86EFAC),
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.w800,
+                                                letterSpacing: 0.6,
                                               ),
                                             ),
                                             const SizedBox(height: 8),
-                                            Wrap(
-                                              spacing: 10,
-                                              runSpacing: 6,
-                                              children: [
-                                                _buildPasswordRule(text: '8+ chars', met: password.length >= 8),
-                                                _buildPasswordRule(text: 'Uppercase', met: _hasUppercase(password)),
-                                                _buildPasswordRule(text: 'Lowercase', met: _hasLowercase(password)),
-                                                _buildPasswordRule(text: 'Number', met: _hasDigit(password)),
-                                                _buildPasswordRule(text: 'Symbol', met: _hasSpecial(password)),
-                                              ],
+                                            Text(
+                                              (_rosterMatch!['name'] ?? '').toString(),
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 15,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              [
+                                                (_rosterMatch!['program_label'] ?? '').toString(),
+                                                if (_rosterMatch!['is_irregular'] == true)
+                                                  'IRREGULAR'
+                                                else ...[
+                                                  if ((_rosterMatch!['year_level'] ?? '').toString().isNotEmpty)
+                                                    'Year ${_rosterMatch!['year_level']}',
+                                                  if ((_rosterMatch!['block'] ?? '').toString().isNotEmpty)
+                                                    'Block ${_rosterMatch!['block']}',
+                                                ],
+                                              ].where((e) => e.toString().trim().isNotEmpty).join(' · '),
+                                              style: const TextStyle(
+                                                color: Color(0xFFA1A1AA),
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                            TextButton(
+                                              onPressed: _clearRosterMatch,
+                                              style: TextButton.styleFrom(
+                                                foregroundColor: const Color(0xFF86EFAC),
+                                                padding: EdgeInsets.zero,
+                                              ),
+                                              child: const Text('Change student number'),
                                             ),
                                           ],
-                                        );
-                                      },
-                                    ),
-
-                                    const SizedBox(height: 28),
-
-                                    // Register Button
-                                    SizedBox(
-                                      width: double.infinity,
-                                      child: Container(
-                                        decoration: BoxDecoration(
-                                          borderRadius: BorderRadius.circular(16),
-                                          gradient: const LinearGradient(
-                                            colors: [Color(0xFFBE123C), Color(0xFF9F1239)],
-                                            begin: Alignment.topLeft,
-                                            end: Alignment.bottomRight,
-                                          ),
-                                          boxShadow: [
-                                            BoxShadow(
-                                              color: const Color(0xFF9F1239).withValues(alpha: 0.45),
-                                              blurRadius: 14,
-                                              offset: const Offset(0, 8),
-                                            ),
-                                          ],
-                                        ),
-                                        child: ElevatedButton(
-                                          onPressed: _isLoading ? null : _handleRegister,
-                                          style: ElevatedButton.styleFrom(
-                                            backgroundColor: Colors.transparent,
-                                            shadowColor: Colors.transparent,
-                                            foregroundColor: Colors.white,
-                                            padding: const EdgeInsets.symmetric(vertical: 18),
-                                            shape: RoundedRectangleBorder(
-                                              borderRadius: BorderRadius.circular(16),
-                                            ),
-                                          ),
-                                          child: _isLoading
-                                              ? const PulseConnectLoader(size: 18, color: Colors.white)
-                                              : const Row(
-                                                  mainAxisAlignment: MainAxisAlignment.center,
-                                                  children: [
-                                                    Text(
-                                                      'Create Account',
-                                                      style: TextStyle(
-                                                        fontSize: 16,
-                                                        fontWeight: FontWeight.w800,
-                                                        letterSpacing: 0.5,
-                                                      ),
-                                                    ),
-                                                    SizedBox(width: 8),
-                                                    Icon(Icons.arrow_forward_rounded, size: 20),
-                                                  ],
-                                                ),
                                         ),
                                       ),
+                                      const SizedBox(height: 20),
+                                      _buildLabel('Email Address'),
+                                      const SizedBox(height: 8),
+                                      TextFormField(
+                                        controller: _emailCtrl,
+                                        keyboardType: TextInputType.emailAddress,
+                                        style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
+                                        cursorColor: const Color(0xFF9F1239),
+                                        decoration: _inputDeco(hint: 'you@gmail.com', icon: Icons.email_outlined),
+                                        validator: (v) {
+                                          if (v == null || v.isEmpty) return 'Required';
+                                          if (!AuthService.isValidEmail(v)) return 'Invalid email';
+                                          return null;
+                                        },
+                                      ),
+                                      const SizedBox(height: 20),
+                                      _buildLabel('Password'),
+                                      const SizedBox(height: 8),
+                                      TextFormField(
+                                        controller: _passwordCtrl,
+                                        obscureText: _obscurePassword,
+                                        style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
+                                        cursorColor: const Color(0xFF9F1239),
+                                        onChanged: (_) => setState(() {}),
+                                        decoration: _inputDeco(
+                                          hint: 'Minimum 8 characters',
+                                          icon: Icons.lock_outline_rounded,
+                                          suffix: IconButton(
+                                            icon: Icon(
+                                              _obscurePassword
+                                                  ? Icons.visibility_outlined
+                                                  : Icons.visibility_off_outlined,
+                                              color: const Color(0xFFA1A1AA),
+                                              size: 20,
+                                            ),
+                                            onPressed: () =>
+                                                setState(() => _obscurePassword = !_obscurePassword),
+                                          ),
+                                        ),
+                                        validator: (v) {
+                                          if (v == null || v.isEmpty) return 'Required';
+                                          if (!_isStrongPassword(v)) {
+                                            return 'Password does not meet requirements';
+                                          }
+                                          return null;
+                                        },
+                                      ),
+                                      const SizedBox(height: 10),
+                                      Builder(builder: (_) {
+                                        final pwd = _passwordCtrl.text;
+                                        final score = _passwordStrengthScore(pwd);
+                                        return Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            LinearProgressIndicator(
+                                              value: score / 5,
+                                              minHeight: 4,
+                                              backgroundColor: const Color(0xFF27272A),
+                                              color: _strengthColor(score),
+                                            ),
+                                            const SizedBox(height: 6),
+                                            Text(
+                                              _strengthLabel(score),
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                color: _strengthColor(score),
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 8),
+                                            _buildPasswordRule(text: 'At least 8 characters', met: pwd.length >= 8),
+                                            _buildPasswordRule(text: 'Uppercase letter', met: _hasUppercase(pwd)),
+                                            _buildPasswordRule(text: 'Lowercase letter', met: _hasLowercase(pwd)),
+                                            _buildPasswordRule(text: 'Number', met: _hasDigit(pwd)),
+                                            _buildPasswordRule(text: 'Special character', met: _hasSpecial(pwd)),
+                                          ],
+                                        );
+                                      }),
+                                      const SizedBox(height: 16),
+                                      _buildLabel('Confirm Password'),
+                                      const SizedBox(height: 8),
+                                      TextFormField(
+                                        controller: _confirmPasswordCtrl,
+                                        obscureText: _obscureConfirm,
+                                        style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
+                                        cursorColor: const Color(0xFF9F1239),
+                                        decoration: _inputDeco(
+                                          hint: 'Re-enter password',
+                                          icon: Icons.lock_outline_rounded,
+                                          suffix: IconButton(
+                                            icon: Icon(
+                                              _obscureConfirm
+                                                  ? Icons.visibility_outlined
+                                                  : Icons.visibility_off_outlined,
+                                              color: const Color(0xFFA1A1AA),
+                                              size: 20,
+                                            ),
+                                            onPressed: () =>
+                                                setState(() => _obscureConfirm = !_obscureConfirm),
+                                          ),
+                                        ),
+                                        validator: (v) {
+                                          if (v != _passwordCtrl.text) return 'Passwords do not match';
+                                          return null;
+                                        },
+                                      ),
+                                    ],
+
+                                    const SizedBox(height: 24),
+
+                                    SizedBox(
+                                      width: double.infinity,
+                                      height: 52,
+                                      child: ElevatedButton(
+                                        onPressed: (_isLoading || _isLookingUp)
+                                            ? null
+                                            : () {
+                                                if (_rosterMatch == null) {
+                                                  _handleLookup();
+                                                } else {
+                                                  _handleRegister();
+                                                }
+                                              },
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: const Color(0xFF9F1239),
+                                          disabledBackgroundColor: const Color(0xFF9F1239).withValues(alpha: 0.5),
+                                          foregroundColor: Colors.white,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(14),
+                                          ),
+                                          elevation: 0,
+                                        ),
+                                        child: (_isLoading || _isLookingUp)
+                                            ? const SizedBox(
+                                                width: 22,
+                                                height: 22,
+                                                child: CircularProgressIndicator(
+                                                  strokeWidth: 2.5,
+                                                  color: Colors.white,
+                                                ),
+                                              )
+                                            : Text(
+                                                _rosterMatch == null ? 'Find my record' : 'Create Account',
+                                                style: const TextStyle(
+                                                  fontSize: 15,
+                                                  fontWeight: FontWeight.w700,
+                                                ),
+                                              ),
+                                      ),
                                     ),
+
                                   ],
                                 ),
                               ),

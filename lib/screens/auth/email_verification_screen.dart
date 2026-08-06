@@ -107,7 +107,9 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
     PulseConnectApp.of(context).exitEmailVerificationToLogin(roleLabel);
   }
 
-  Future<void> _showVerificationSuccessDialog() async {
+  Future<void> _showAccountCreatedSuccessDialog({
+    required bool pendingAdminReview,
+  }) async {
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -119,7 +121,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
             side: BorderSide(color: _primaryColor.withValues(alpha: 0.35)),
           ),
           title: const Text(
-            'Verification Successful',
+            'Account Created Successfully',
             style: TextStyle(
               color: Colors.white,
               fontWeight: FontWeight.w700,
@@ -127,7 +129,9 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
             ),
           ),
           content: Text(
-            'Your email is now verified. Your account is under admin review. Please wait for approval before logging in.',
+            pendingAdminReview
+                ? 'Your email is verified. Your account is under admin review. Please wait for approval, then sign in from the login page.'
+                : 'Your account was created successfully. Please sign in with your student number and password.',
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.82),
               fontSize: 13,
@@ -138,7 +142,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
             TextButton(
               onPressed: () => Navigator.of(ctx).pop(),
               child: Text(
-                'OK',
+                'Go to Sign In',
                 style: TextStyle(
                   color: _primaryColor,
                   fontWeight: FontWeight.w700,
@@ -210,15 +214,26 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
       if (result['ok'] == true) {
         final updatedUser = Map<String, dynamic>.from(result['user'] as Map);
         if (widget.postRegistrationReviewFlow) {
-          await _service.sendUnderReviewEmail(
-            userId: _userId,
-            email: _email,
-            fullName: _name,
+          final status = (updatedUser['account_status']?.toString() ?? '')
+              .toLowerCase()
+              .trim();
+          final pendingAdminReview = status == 'pending';
+          if (pendingAdminReview) {
+            await _service.sendUnderReviewEmail(
+              userId: _userId,
+              email: _email,
+              fullName: _name,
+            );
+          }
+          // Force a real login next — do not keep the signup session.
+          await _authService.logout();
+          if (!mounted) return;
+          await _showAccountCreatedSuccessDialog(
+            pendingAdminReview: pendingAdminReview,
           );
           if (!mounted) return;
-          await _showVerificationSuccessDialog();
-          if (!mounted) return;
-          PulseConnectApp.of(context).exitEmailVerificationToLogin('Student');
+          final roleLabel = _isTeacher ? 'Teacher' : 'Student';
+          PulseConnectApp.of(context).exitEmailVerificationToLogin(roleLabel);
           return;
         }
         final role = updatedUser['role']?.toString().toLowerCase() ?? 'student';
@@ -513,9 +528,11 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                                                         size: 18,
                                                         color: Colors.white,
                                                       )
-                                                    : const Text(
-                                                        'Verify and Continue',
-                                                        style: TextStyle(
+                                                    : Text(
+                                                        widget.postRegistrationReviewFlow
+                                                            ? 'Verify Account'
+                                                            : 'Verify and Continue',
+                                                        style: const TextStyle(
                                                           fontWeight:
                                                               FontWeight.w800,
                                                           fontSize: 15,
