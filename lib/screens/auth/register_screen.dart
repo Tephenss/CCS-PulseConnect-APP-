@@ -1,8 +1,12 @@
+import 'dart:io';
 import 'dart:ui' show PointerDeviceKind;
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../main.dart';
 import '../../services/auth_service.dart';
+import '../../services/native_document_picker.dart';
+import '../../utils/class_schedule_format.dart';
 
 class RegisterScreen extends StatefulWidget {
   const RegisterScreen({super.key});
@@ -24,10 +28,15 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
   Map<String, dynamic>? _rosterMatch;
   bool _isLookingUp = false;
   bool _isLoading = false;
+  bool _isParsingSchedule = false;
   bool _obscurePassword = true;
   bool _obscureConfirm = true;
   String? _errorMessage;
   String? _successMessage;
+  String? _scheduleFileName;
+  String? _scheduleFilePath;
+  List<int>? _scheduleBytes;
+  List<Map<String, dynamic>> _scheduleSubjects = [];
 
   late AnimationController _logoFloatController;
   Offset _pointerPosition = const Offset(0, 0);
@@ -85,6 +94,10 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
       return;
     }
     if (!_formKey.currentState!.validate()) return;
+    if (_scheduleSubjects.isEmpty) {
+      setState(() => _errorMessage = 'Upload your LU registration form PDF first.');
+      return;
+    }
 
     setState(() {
       _isLoading = true;
@@ -96,6 +109,9 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
       idNumber: _idNumberCtrl.text,
       email: _emailCtrl.text,
       password: _passwordCtrl.text,
+      scheduleFileName: _scheduleFileName,
+      scheduleFilePath: _scheduleFilePath,
+      scheduleBytes: _scheduleBytes,
     );
 
     setState(() => _isLoading = false);
@@ -127,7 +143,113 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
       _passwordCtrl.clear();
       _confirmPasswordCtrl.clear();
       _errorMessage = null;
+      _scheduleFileName = null;
+      _scheduleFilePath = null;
+      _scheduleBytes = null;
+      _scheduleSubjects = [];
     });
+  }
+
+  Future<void> _pickRegistrationForm() async {
+    if (_isParsingSchedule || _isLoading) return;
+    setState(() {
+      _isParsingSchedule = true;
+      _errorMessage = null;
+    });
+    try {
+      String? fileName;
+      String? filePath;
+      List<int>? bytes;
+      if (Platform.isAndroid) {
+        final native = await NativeDocumentPicker.pickAndroid(
+          maxBytes: 8 * 1024 * 1024,
+        );
+        if (native == null) {
+          if (mounted) setState(() => _isParsingSchedule = false);
+          return;
+        }
+        fileName = native.name;
+        filePath = native.path;
+        // Keep bytes so Create Account still works if the temp path is gone.
+        try {
+          bytes = await File(native.path).readAsBytes();
+        } catch (_) {
+          bytes = null;
+        }
+      } else {
+        final result = await FilePicker.platform.pickFiles(
+          type: FileType.custom,
+          allowedExtensions: const ['pdf'],
+          allowMultiple: false,
+          withData: !Platform.isIOS,
+        );
+        if (result == null || result.files.isEmpty) {
+          if (mounted) setState(() => _isParsingSchedule = false);
+          return;
+        }
+        final picked = result.files.first;
+        fileName = picked.name;
+        filePath = picked.path;
+        bytes = picked.bytes;
+      }
+      final ext = (fileName ?? '').toLowerCase();
+      if (!ext.endsWith('.pdf')) {
+        if (!mounted) return;
+        setState(() {
+          _isParsingSchedule = false;
+          _errorMessage = 'Please choose the PDF registration form.';
+        });
+        return;
+      }
+      final parsed = await _authService.parseRegistrationForm(
+        fileName: fileName ?? 'registration.pdf',
+        filePath: filePath,
+        bytes: bytes,
+      );
+      if (!mounted) return;
+      if (parsed['ok'] != true) {
+        setState(() {
+          _isParsingSchedule = false;
+          _scheduleFileName = null;
+          _scheduleFilePath = null;
+          _scheduleBytes = null;
+          _scheduleSubjects = [];
+          _errorMessage = parsed['error']?.toString() ?? 'Could not read that PDF.';
+        });
+        return;
+      }
+      final raw = parsed['subjects'];
+      final subjects = <Map<String, dynamic>>[];
+      if (raw is List) {
+        for (final row in raw) {
+          if (row is Map) {
+            subjects.add(Map<String, dynamic>.from(row));
+          }
+        }
+      }
+      setState(() {
+        _isParsingSchedule = false;
+        _scheduleFileName = fileName;
+        _scheduleFilePath = filePath;
+        _scheduleBytes = bytes;
+        _scheduleSubjects = subjects;
+        _errorMessage = subjects.isEmpty ? 'No subjects found in that PDF.' : null;
+      });
+    } on PlatformException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isParsingSchedule = false;
+        _errorMessage = (error.message ?? error.code).trim().isEmpty
+            ? 'Unable to open file picker.'
+            : (error.message ?? error.code);
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isParsingSchedule = false;
+        _errorMessage = 'Unable to open file picker: $error';
+      });
+    }
   }
 
   void _updatePointer(PointerEvent details) {
@@ -581,6 +703,103 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                         ),
                                       ),
                                       const SizedBox(height: 20),
+                                      _buildLabel('Registration Form (PDF)'),
+                                      const SizedBox(height: 8),
+                                      OutlinedButton(
+                                        onPressed: _isParsingSchedule ? null : _pickRegistrationForm,
+                                        style: OutlinedButton.styleFrom(
+                                          foregroundColor: const Color(0xFFF4F4F5),
+                                          side: const BorderSide(color: Color(0xFF3F3F46)),
+                                          minimumSize: const Size.fromHeight(48),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(14),
+                                          ),
+                                        ),
+                                        child: _isParsingSchedule
+                                            ? const SizedBox(
+                                                width: 18,
+                                                height: 18,
+                                                child: CircularProgressIndicator(
+                                                  strokeWidth: 2,
+                                                  color: Color(0xFFF4F4F5),
+                                                ),
+                                              )
+                                            : Text(
+                                                _scheduleFileName == null
+                                                    ? 'Upload LU Form No. 1 PDF'
+                                                    : _scheduleFileName!,
+                                                overflow: TextOverflow.ellipsis,
+                                              ),
+                                      ),
+                                      if (_scheduleSubjects.isNotEmpty) ...[
+                                        const SizedBox(height: 10),
+                                        Container(
+                                          width: double.infinity,
+                                          padding: const EdgeInsets.all(12),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFF18181B),
+                                            borderRadius: BorderRadius.circular(12),
+                                            border: Border.all(color: const Color(0xFF27272A)),
+                                          ),
+                                          child: Column(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                '${_scheduleSubjects.length} subject(s) found',
+                                                style: const TextStyle(
+                                                  color: Color(0xFFA1A1AA),
+                                                  fontSize: 11,
+                                                  fontWeight: FontWeight.w700,
+                                                ),
+                                              ),
+                                              const SizedBox(height: 8),
+                                              ..._scheduleSubjects.take(8).map((s) {
+                                                final code = (s['course_code'] ?? '').toString().trim();
+                                                final desc = (s['course_description'] ?? '').toString().trim();
+                                                final days = (s['days'] ?? '').toString().trim();
+                                                final time = classScheduleFormatTimeLabel(
+                                                  (s['time_label'] ?? '').toString(),
+                                                );
+                                                final when = [
+                                                  if (days.isNotEmpty) days,
+                                                  if (time.isNotEmpty) time,
+                                                ].join(' · ');
+                                                return Padding(
+                                                  padding: const EdgeInsets.only(bottom: 8),
+                                                  child: Column(
+                                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                                    children: [
+                                                      Text(
+                                                        [
+                                                          if (code.isNotEmpty) code,
+                                                          if (desc.isNotEmpty) desc,
+                                                        ].join('  '),
+                                                        style: const TextStyle(
+                                                          color: Color(0xFFF4F4F5),
+                                                          fontSize: 12,
+                                                          fontWeight: FontWeight.w600,
+                                                        ),
+                                                      ),
+                                                      if (when.isNotEmpty) ...[
+                                                        const SizedBox(height: 2),
+                                                        Text(
+                                                          when,
+                                                          style: const TextStyle(
+                                                            color: Color(0xFFA1A1AA),
+                                                            fontSize: 11,
+                                                            fontWeight: FontWeight.w500,
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ],
+                                                  ),
+                                                );
+                                              }),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                      const SizedBox(height: 20),
                                       _buildLabel('Email Address'),
                                       const SizedBox(height: 8),
                                       TextFormField(
@@ -694,7 +913,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                       width: double.infinity,
                                       height: 52,
                                       child: ElevatedButton(
-                                        onPressed: (_isLoading || _isLookingUp)
+                                        onPressed: (_isLoading || _isLookingUp || _isParsingSchedule)
                                             ? null
                                             : () {
                                                 if (_rosterMatch == null) {
@@ -712,7 +931,7 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                           ),
                                           elevation: 0,
                                         ),
-                                        child: (_isLoading || _isLookingUp)
+                                        child: (_isLoading || _isLookingUp || _isParsingSchedule)
                                             ? const SizedBox(
                                                 width: 22,
                                                 height: 22,

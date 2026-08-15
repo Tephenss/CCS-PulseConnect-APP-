@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'dart:convert';
@@ -64,11 +65,14 @@ class _StudentTicketViewState extends State<StudentTicketView>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _liveAttendance = _attendanceFromTicket(widget.ticket);
+    _seminarAttendance = _seedSeminarRows(widget.ticket);
     _loadDownloadedState();
     _loadSeminarAttendance();
     unawaited(_refreshAttendanceLive(force: true));
     _bindAttendanceRealtime();
-    _attendancePollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+    // Realtime is primary; poll quietly as backup (was 4s — burned Free egress).
+    _attendancePollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (!mounted) return;
       unawaited(_refreshAttendanceLive());
     });
   }
@@ -83,7 +87,19 @@ class _StudentTicketViewState extends State<StudentTicketView>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached) {
+      _attendancePollTimer?.cancel();
+      _attendancePollTimer = null;
+      return;
+    }
     if (state == AppLifecycleState.resumed) {
+      _attendancePollTimer?.cancel();
+      _attendancePollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+        if (!mounted) return;
+        unawaited(_refreshAttendanceLive());
+      });
       unawaited(_refreshAttendanceLive(force: true));
     }
   }
@@ -121,7 +137,7 @@ class _StudentTicketViewState extends State<StudentTicketView>
     final now = DateTime.now();
     if (!force &&
         _lastAttendanceRefreshAt != null &&
-        now.difference(_lastAttendanceRefreshAt!) < const Duration(seconds: 2)) {
+        now.difference(_lastAttendanceRefreshAt!) < const Duration(seconds: 8)) {
       return;
     }
     _attendanceRefreshInFlight = true;
@@ -218,6 +234,27 @@ class _StudentTicketViewState extends State<StudentTicketView>
     _attendanceChannel!.subscribe();
   }
 
+  List<Map<String, dynamic>> _seedSeminarRows(Map<String, dynamic> ticket) {
+    final cached = ticket['seminar_attendance'];
+    if (cached is List && cached.isNotEmpty) {
+      return cached
+          .whereType<Map>()
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList();
+    }
+    final event = ticket['events'];
+    if (event is Map) {
+      final sessions = event['sessions'];
+      if (sessions is List && sessions.isNotEmpty) {
+        return sessions
+            .whereType<Map>()
+            .map((row) => Map<String, dynamic>.from(row))
+            .toList();
+      }
+    }
+    return [];
+  }
+
   Future<void> _loadSeminarAttendance() async {
     final eventId = _eventId;
     final registrationId = _registrationId;
@@ -227,14 +264,13 @@ class _StudentTicketViewState extends State<StudentTicketView>
     if (eventId.isEmpty || registrationId.isEmpty) {
       if (mounted) {
         setState(() {
-          _seminarAttendance = [];
           _isLoadingSeminarAttendance = false;
         });
       }
       return;
     }
 
-    if (mounted) {
+    if (mounted && _seminarAttendance.isEmpty) {
       setState(() => _isLoadingSeminarAttendance = true);
     }
     final rows = await _eventService.getTicketSeminarAttendance(
@@ -318,15 +354,11 @@ class _StudentTicketViewState extends State<StudentTicketView>
   Future<void> _downloadTicket(String ticketIdDisplay) async {
     if (_isDownloading) return;
     if (_isAlreadyDownloaded) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Ticket already saved offline.')),
-      );
+      AppSnackBar.info(context, 'Ticket already saved offline.');
       return;
     }
     if (ticketIdDisplay.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Ticket is not available yet.')),
-      );
+      AppSnackBar.warning(context, 'Ticket is not available yet.');
       return;
     }
 
@@ -340,6 +372,18 @@ class _StudentTicketViewState extends State<StudentTicketView>
       currentTicket['local_cached'] = true;
       currentTicket['downloaded_at_local'] = DateTime.now().toIso8601String();
       currentTicket['downloaded_explicit'] = true;
+      if (_seminarAttendance.isNotEmpty) {
+        currentTicket['seminar_attendance'] = _seminarAttendance;
+        final eventMap = currentTicket['events'];
+        if (eventMap is Map) {
+          final patched = Map<String, dynamic>.from(eventMap);
+          patched['sessions'] = _seminarAttendance;
+          patched['event_mode'] = 'seminar_based';
+          patched['uses_sessions'] = true;
+          patched['session_count'] = _seminarAttendance.length;
+          currentTicket['events'] = patched;
+        }
+      }
       final currentKey = _ticketUniqueKey(currentTicket);
 
       final existingRows = prefs.getStringList(storageKey) ?? <String>[];
@@ -372,17 +416,11 @@ class _StudentTicketViewState extends State<StudentTicketView>
       await prefs.setStringList(storageKey, updatedRows.take(150).toList());
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Ticket saved in app. You can open it offline in My Tickets.'),
-        ),
-      );
+      AppSnackBar.success(context, 'Ticket saved in app. You can open it offline in My Tickets.');
       setState(() => _isAlreadyDownloaded = true);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to save ticket offline: $e')),
-      );
+      AppSnackBar.error(context, 'Failed to save ticket offline: $e');
     } finally {
       if (mounted) {
         setState(() => _isDownloading = false);
@@ -454,6 +492,7 @@ class _StudentTicketViewState extends State<StudentTicketView>
     final eventType = event['event_type'] as String? ?? '';
     final graceTime = event['grace_time']?.toString() ?? '';
     final isSeminarBased = _isSeminarBasedEvent(event);
+    final seminarRows = _seminarRowsForDisplay(event);
     final ticketData = ticket['tickets'];
     final ticketId = ticketData is List && ticketData.isNotEmpty
         ? ticketData[0]['id']?.toString() ?? ''
@@ -612,7 +651,10 @@ class _StudentTicketViewState extends State<StudentTicketView>
                                             border: Border.all(color: const Color(0xFFD4A843), width: 1.5),
                                             borderRadius: BorderRadius.circular(20),
                                           ),
-                                          child: const Text('EVENT PASS', style: TextStyle(color: Color(0xFFD4A843), fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 1.2)),
+                                          child: Text(
+                                            isSeminarBased ? 'SEMINAR PASS' : 'EVENT PASS',
+                                            style: const TextStyle(color: Color(0xFFD4A843), fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 1.2),
+                                          ),
                                         ),
                                       ],
                                     ),
@@ -632,7 +674,10 @@ class _StudentTicketViewState extends State<StudentTicketView>
                                     ),
                                     const SizedBox(height: 8),
                                     Text(
-                                      'CCS Exclusive Event'.toUpperCase(),
+                                      _ticketSubtitle(
+                                        isSeminarBased: isSeminarBased,
+                                        seminarCount: seminarRows.length,
+                                      ),
                                       style: TextStyle(
                                         color: const Color(0xFFD4A843).withValues(alpha: 0.8),
                                         fontSize: 12,
@@ -643,14 +688,142 @@ class _StudentTicketViewState extends State<StudentTicketView>
                                     
                                     const SizedBox(height: 36),
                                     
-                                    Row(
-                                      children: [
-                                        Expanded(child: _buildTicketField('DATE', startDate != null ? DateFormat('MMM dd, yyyy').format(startDate) : 'TBA')),
-                                        Expanded(child: _buildTicketField('TIME', timeString)),
-                                      ],
-                                    ),
+                                    if (isMultiDayEvent(startDate, endDate)) ...[
+                                      _buildTicketField(
+                                        'START',
+                                        '${DateFormat('MMM dd, yyyy').format(startDate!)} · ${DateFormat('hh:mm a').format(startDate)}',
+                                      ),
+                                      const SizedBox(height: 16),
+                                      _buildTicketField(
+                                        'END',
+                                        '${DateFormat('MMM dd, yyyy').format(endDate!)} · ${DateFormat('hh:mm a').format(endDate)}',
+                                      ),
+                                    ] else ...[
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: _buildTicketField(
+                                              'DATE',
+                                              startDate != null
+                                                  ? DateFormat('MMM dd, yyyy').format(startDate)
+                                                  : 'TBA',
+                                            ),
+                                          ),
+                                          Expanded(
+                                            child: _buildTicketField('TIME', timeString),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
                                     const SizedBox(height: 24),
                                     _buildTicketField('VENUE', location),
+                                    if (isSeminarBased && seminarRows.isNotEmpty) ...[
+                                      const SizedBox(height: 24),
+                                      Text(
+                                        'SEMINARS',
+                                        style: TextStyle(
+                                          color: Colors.white.withValues(alpha: 0.5),
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                          letterSpacing: 1.5,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 10),
+                                      ...seminarRows.asMap().entries.map((entry) {
+                                        final row = entry.value;
+                                        final seminarTitle =
+                                            (row['title']?.toString() ?? '').trim().isNotEmpty
+                                                ? row['title'].toString().trim()
+                                                : 'Seminar ${entry.key + 1}';
+                                        final topic = (row['topic']?.toString() ?? '').trim();
+                                        final showTopic = topic.isNotEmpty &&
+                                            topic.toLowerCase() != seminarTitle.toLowerCase();
+                                        final room = (row['location']?.toString() ?? '').trim();
+                                        final showRoom = room.isNotEmpty &&
+                                            room.toLowerCase() != location.trim().toLowerCase();
+                                        return Padding(
+                                          padding: EdgeInsets.only(
+                                            bottom: entry.key == seminarRows.length - 1 ? 0 : 12,
+                                          ),
+                                          child: Row(
+                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                            children: [
+                                              Container(
+                                                width: 22,
+                                                height: 22,
+                                                alignment: Alignment.center,
+                                                decoration: BoxDecoration(
+                                                  color: const Color(0xFFD4A843).withValues(alpha: 0.18),
+                                                  borderRadius: BorderRadius.circular(6),
+                                                  border: Border.all(
+                                                    color: const Color(0xFFD4A843).withValues(alpha: 0.55),
+                                                  ),
+                                                ),
+                                                child: Text(
+                                                  '${entry.key + 1}',
+                                                  style: const TextStyle(
+                                                    color: Color(0xFFD4A843),
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.w800,
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(width: 10),
+                                              Expanded(
+                                                child: Column(
+                                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                                  children: [
+                                                    Text(
+                                                      seminarTitle,
+                                                      style: const TextStyle(
+                                                        color: Colors.white,
+                                                        fontSize: 14,
+                                                        fontWeight: FontWeight.w800,
+                                                        height: 1.25,
+                                                      ),
+                                                    ),
+                                                    if (showTopic) ...[
+                                                      const SizedBox(height: 2),
+                                                      Text(
+                                                        topic,
+                                                        style: TextStyle(
+                                                          color: Colors.white.withValues(alpha: 0.72),
+                                                          fontSize: 12,
+                                                          fontWeight: FontWeight.w600,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                    const SizedBox(height: 3),
+                                                    Text(
+                                                      _formatSeminarWindow(
+                                                        row['start_at']?.toString(),
+                                                        row['end_at']?.toString(),
+                                                      ),
+                                                      style: TextStyle(
+                                                        color: const Color(0xFFD4A843).withValues(alpha: 0.9),
+                                                        fontSize: 12,
+                                                        fontWeight: FontWeight.w700,
+                                                      ),
+                                                    ),
+                                                    if (showRoom) ...[
+                                                      const SizedBox(height: 2),
+                                                      Text(
+                                                        room,
+                                                        style: TextStyle(
+                                                          color: Colors.white.withValues(alpha: 0.7),
+                                                          fontSize: 11,
+                                                          fontWeight: FontWeight.w600,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ],
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                      }),
+                                    ],
                                   ],
                                 ),
                               ),
@@ -903,6 +1076,43 @@ class _StudentTicketViewState extends State<StudentTicketView>
         ),
       ),
     );
+  }
+
+  List<Map<String, dynamic>> _seminarRowsForDisplay(Map<String, dynamic> event) {
+    if (_seminarAttendance.isNotEmpty) return _seminarAttendance;
+    final embedded = event['sessions'];
+    if (embedded is List && embedded.isNotEmpty) {
+      return embedded
+          .whereType<Map>()
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList();
+    }
+    return const [];
+  }
+
+  String _ticketSubtitle({
+    required bool isSeminarBased,
+    required int seminarCount,
+  }) {
+    if (!isSeminarBased) return 'CCS EXCLUSIVE EVENT';
+    if (seminarCount <= 0) return 'SEMINAR-BASED EVENT';
+    if (seminarCount == 1) return 'SEMINAR-BASED · 1 SEMINAR';
+    return 'SEMINAR-BASED · $seminarCount SEMINARS';
+  }
+
+  String _formatSeminarWindow(String? startRaw, String? endRaw) {
+    final start = parseStoredEventDateTime(startRaw);
+    final end = parseStoredEventDateTime(endRaw);
+    if (start == null) return 'Schedule TBA';
+    final date = DateFormat('MMM dd, yyyy').format(start);
+    final startTime = DateFormat('hh:mm a').format(start);
+    if (end == null) return '$date · $startTime';
+    final sameDay = start.year == end.year &&
+        start.month == end.month &&
+        start.day == end.day;
+    final endTime = DateFormat('hh:mm a').format(end);
+    if (sameDay) return '$date · $startTime – $endTime';
+    return '$date $startTime – ${DateFormat('MMM dd, yyyy hh:mm a').format(end)}';
   }
 
   Widget _buildTicketField(String label, String value) {

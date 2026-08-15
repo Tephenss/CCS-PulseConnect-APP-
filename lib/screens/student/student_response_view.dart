@@ -50,14 +50,66 @@ class _StudentResponseViewState extends State<StudentResponseView> {
   }
 
   Widget _buildRatingDisplay(int rating) {
-    return Row(
-      children: List.generate(5, (index) {
-        return Icon(
-          index < rating ? Icons.star_rounded : Icons.star_border_rounded,
-          color: const Color(0xFFD4A843),
-          size: 26,
-        );
-      }),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: List.generate(5, (index) {
+            final score = index + 1;
+            final selected = rating == score;
+            return Expanded(
+              child: Container(
+                margin: EdgeInsets.only(right: index == 4 ? 0 : 6),
+                height: 42,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: selected
+                      ? const Color(0xFF9F1239)
+                      : Colors.white,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: selected
+                        ? const Color(0xFF9F1239)
+                        : const Color(0xFFD4D4D8),
+                  ),
+                ),
+                child: Text(
+                  '$score',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    color: selected
+                        ? Colors.white
+                        : const Color(0xFF3F3F46),
+                  ),
+                ),
+              ),
+            );
+          }),
+        ),
+        const SizedBox(height: 6),
+        const Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'Poor',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF71717A),
+              ),
+            ),
+            Text(
+              'Outstanding',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF71717A),
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 

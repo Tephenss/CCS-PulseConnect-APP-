@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../main.dart';
@@ -204,53 +205,7 @@ class PushNotificationService {
         onDidReceiveNotificationResponse: (NotificationResponse response) {
           final payload = response.payload?.trim() ?? '';
           if (payload.isEmpty) return;
-          unawaited(() async {
-            if (_isCertificatePayload(payload)) {
-              _openCertificatesScreen();
-              return;
-            }
-            if (_isProposalRequirementsPayload(payload)) {
-              final eventId = _proposalRequirementsEventId(payload);
-              if (eventId.isNotEmpty) {
-                final event = await _eventService.getEventById(eventId);
-                if (event != null) {
-                  PulseConnectApp.navigatorKey.currentState?.push(
-                    MaterialPageRoute(
-                      builder: (context) =>
-                          TeacherProposalRequirementsPage(event: event),
-                    ),
-                  );
-                  return;
-                }
-              }
-            }
-
-            // Local notifications (especially assignment-related) only carry
-            // the eventId as payload. Decide the destination based on the
-            // current user's role to avoid opening student-only pages.
-            final user = await _authService.getCurrentUser();
-            final role =
-                (user?['role']?.toString() ?? '').trim().toLowerCase();
-
-            if (role == 'teacher') {
-              final event = await _eventService.getEventById(payload);
-              if (event != null) {
-                PulseConnectApp.navigatorKey.currentState?.push(
-                  MaterialPageRoute(
-                    builder: (context) => TeacherEventManage(event: event),
-                  ),
-                );
-                return;
-              }
-            }
-
-            // Default fallback for students (or if teacher event fetch fails)
-            PulseConnectApp.navigatorKey.currentState?.push(
-              AppPageRoute(
-                builder: (context) => StudentEventDetails(eventId: payload),
-              ),
-            );
-          }());
+          unawaited(_handleLocalNotificationPayload(payload));
         },
       );
 
@@ -366,9 +321,13 @@ class PushNotificationService {
       _firebaseMessaging.onTokenRefresh.listen((_) async {
         if (await _hasLoggedInUser()) {
           await updateToken();
-        } else {
-          await unregisterCurrentToken();
+          return;
         }
+        // Daily OTP gate: keep yesterday's DB mapping until relogin.
+        if (await AuthService.shouldKeepFcmToken()) {
+          return;
+        }
+        await unregisterCurrentToken();
       });
     }
   }
@@ -519,12 +478,81 @@ class PushNotificationService {
     return (prefs.getString('user_id') ?? '').trim().isNotEmpty;
   }
 
+  Future<bool> _shouldDeferPushTap() async {
+    final user = await _authService.getCurrentUser();
+    return user == null || AuthService.requiresDailyEmailVerification(user);
+  }
+
+  Future<void> _stashPendingTapData(Map<String, String> data) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      AuthService.pendingFcmTapKey,
+      jsonEncode({'data': data}),
+    );
+  }
+
+  /// After login + OTP, open the notification the user tapped while logged out.
+  Future<void> consumePendingTap() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(AuthService.pendingFcmTapKey);
+    if (raw == null || raw.isEmpty) return;
+    await prefs.remove(AuthService.pendingFcmTapKey);
+    if (await _shouldDeferPushTap()) {
+      await prefs.setString(AuthService.pendingFcmTapKey, raw);
+      return;
+    }
+    Map<String, dynamic> decoded;
+    try {
+      decoded = jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return;
+    }
+    final dataRaw = decoded['data'];
+    if (dataRaw is! Map) return;
+    final data = <String, String>{};
+    dataRaw.forEach((key, value) {
+      data[key.toString()] = value?.toString() ?? '';
+    });
+    await _routePushData(data);
+  }
+
+  Future<void> _handleLocalNotificationPayload(String payload) async {
+    final Map<String, String> data;
+    if (_isCertificatePayload(payload)) {
+      data = {'route': 'certificates'};
+    } else if (_isProposalRequirementsPayload(payload)) {
+      data = {
+        'type': 'proposal_requirements_requested',
+        'event_id': _proposalRequirementsEventId(payload),
+      };
+    } else {
+      data = {'event_id': payload};
+    }
+    if (await _shouldDeferPushTap()) {
+      await _stashPendingTapData(data);
+      return;
+    }
+    await _routePushData(data);
+  }
+
   /// Navigate to a specific event if the notification contains an event_id.
   /// Teachers are routed to TeacherEventManage, students to StudentEventDetails.
   Future<void> _handleNotificationClick(RemoteMessage message) async {
-    await _cacheRegistrationApprovalIfNeeded(message.data);
-    final type = (message.data['type']?.toString() ?? '').trim().toLowerCase();
-    final tappedEventId = (message.data['event_id']?.toString() ?? '').trim();
+    final data = <String, String>{};
+    message.data.forEach((key, value) {
+      data[key] = value.toString();
+    });
+    if (await _shouldDeferPushTap()) {
+      await _stashPendingTapData(data);
+      return;
+    }
+    await _routePushData(data);
+  }
+
+  Future<void> _routePushData(Map<String, String> data) async {
+    await _cacheRegistrationApprovalIfNeeded(data);
+    final type = (data['type'] ?? '').trim().toLowerCase();
+    final tappedEventId = (data['event_id'] ?? '').trim();
     // Tapping a push from tray means the underlying data already changed —
     // refresh in-app state immediately when returning to the app.
     if ((type == 'student_requirements_approved' ||
@@ -542,14 +570,14 @@ class PushNotificationService {
       );
     }
 
-    final route = (message.data['route']?.toString() ?? '').trim().toLowerCase();
+    final route = (data['route'] ?? '').trim().toLowerCase();
     if (route == 'certificates') {
       _openCertificatesScreen();
       return;
     }
 
-    String? eventId = message.data['event_id'];
-    if (eventId != null && eventId.isNotEmpty) {
+    final eventId = (data['event_id'] ?? '').trim();
+    if (eventId.isNotEmpty) {
       debugPrint('[FCM] Tapped notification for event_id: $eventId');
 
       try {

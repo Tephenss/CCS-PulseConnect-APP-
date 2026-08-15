@@ -18,7 +18,8 @@ if (keystorePropertiesFile.exists()) {
 android {
     namespace = "com.ccspulseconnect.pulse_connect_app"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    // NDK r28+ aligns native .so files for Google Play 16 KB page sizes.
+    ndkVersion = "28.2.13676358"
 
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
@@ -37,6 +38,23 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON")
+            }
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+            // Bundled ML Kit barcode natives are 4 KB-aligned and fail Play 16 KB checks.
+            excludes += listOf(
+                "**/libbarhopper*.so",
+                "**/libimage_processing_util_jni.so",
+                "**/libxeno_native.so",
+            )
+        }
     }
 
     signingConfigs {

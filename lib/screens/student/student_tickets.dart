@@ -151,6 +151,20 @@ class _StudentTicketsState extends State<StudentTickets>
     }
   }
 
+  String _ticketTypeLabel(Map<String, dynamic> event) {
+    if (usesEventSessions(event)) {
+      final embedded = event['sessions'];
+      final embeddedCount = embedded is List ? embedded.length : 0;
+      final count = int.tryParse(event['session_count']?.toString() ?? '') ??
+          embeddedCount;
+      if (count == 1) return 'SEMINAR';
+      if (count > 1) return '$count SEMINARS';
+      return 'SEMINAR-BASED';
+    }
+    final type = (event['event_type']?.toString() ?? 'Event').trim();
+    return type.isEmpty ? 'EVENT' : type.toUpperCase();
+  }
+
   bool _isTicketActive(Map<String, dynamic> ticket) {
     final now = DateTime.now().toUtc().add(kManilaOffset);
     final event = ticket['events'] as Map<String, dynamic>? ?? {};
@@ -407,7 +421,7 @@ class _StudentTicketsState extends State<StudentTickets>
     final startAt = event['start_at'] as String?;
     final endAt = event['end_at'] as String?;
     final location = event['location'] as String? ?? 'No Venue';
-    final eventType = event['event_type'] as String? ?? 'Event';
+    final eventType = _ticketTypeLabel(event);
     final isLocalCached = ticket['local_cached'] == true;
     final ticketData = ticket['tickets'];
     final ticketId = ticketData is List && ticketData.isNotEmpty
@@ -580,34 +594,42 @@ class _StudentTicketsState extends State<StudentTickets>
                                   color: Colors.white,
                                 ),
                                 const SizedBox(width: 8),
-                                Column(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      startDate != null
-                                          ? DateFormat(
-                                              'MMM dd, yyyy',
-                                            ).format(startDate)
-                                          : 'TBA',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    ),
-                                    if (startDate != null && endDate != null)
+                                Flexible(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
                                       Text(
-                                        '${DateFormat('hh:mm a').format(startDate)} - ${DateFormat('hh:mm a').format(endDate)}',
-                                        style: TextStyle(
-                                          color: Colors.white.withValues(
-                                            alpha: 0.8,
-                                          ),
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w600,
+                                        formatCompactDateRange(
+                                          startDate,
+                                          endDate,
                                         ),
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w800,
+                                          height: 1.2,
+                                        ),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
                                       ),
-                                  ],
+                                      if (startDate != null && endDate != null)
+                                        Text(
+                                          isMultiDayEvent(startDate, endDate)
+                                              ? '${DateFormat('hh:mm a').format(startDate)} → ${DateFormat('hh:mm a').format(endDate)}'
+                                              : '${DateFormat('hh:mm a').format(startDate)} - ${DateFormat('hh:mm a').format(endDate)}',
+                                          style: TextStyle(
+                                            color: Colors.white.withValues(
+                                              alpha: 0.8,
+                                            ),
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                    ],
+                                  ),
                                 ),
                               ],
                             ),

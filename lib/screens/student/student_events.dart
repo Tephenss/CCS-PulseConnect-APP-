@@ -274,7 +274,37 @@ class _StudentEventsState extends State<StudentEvents>
 
   void _applyFilters() {
     _filteredActive = _filterList(_activeEvents);
-    _filteredExpired = _filterList(_expiredEvents);
+    _filteredExpired = _sortedExpiredEvaluations(_filterList(_expiredEvents));
+  }
+
+  List<Map<String, dynamic>> _sortedExpiredEvaluations(
+    List<Map<String, dynamic>> events,
+  ) {
+    final sorted = List<Map<String, dynamic>>.from(events);
+    DateTime? endOf(Map<String, dynamic> event) {
+      return DateTime.tryParse(
+        event['effective_end_at']?.toString() ??
+            event['end_at']?.toString() ??
+            event['start_at']?.toString() ??
+            '',
+      );
+    }
+
+    sorted.sort((a, b) {
+      final aId = a['id']?.toString() ?? '';
+      final bId = b['id']?.toString() ?? '';
+      final aDone = aId.isNotEmpty && (_expiredEvaluated[aId] ?? false);
+      final bDone = bId.isNotEmpty && (_expiredEvaluated[bId] ?? false);
+      if (aDone != bDone) return aDone ? 1 : -1;
+
+      final aEnd = endOf(a);
+      final bEnd = endOf(b);
+      if (aEnd == null && bEnd == null) return 0;
+      if (aEnd == null) return 1;
+      if (bEnd == null) return -1;
+      return bEnd.compareTo(aEnd);
+    });
+    return sorted;
   }
 
   Future<void> _openExpiredEvaluation(Map<String, dynamic> event) async {
@@ -285,7 +315,7 @@ class _StudentEventsState extends State<StudentEvents>
     if (hasEvaluated) {
       await Navigator.push(
         context,
-        MaterialPageRoute(
+        AppPageRoute(
           builder: (_) =>
               StudentResponseView(eventId: eventId, studentId: _userId),
         ),
@@ -295,7 +325,7 @@ class _StudentEventsState extends State<StudentEvents>
 
     final success = await Navigator.push(
       context,
-      MaterialPageRoute(
+      AppPageRoute(
         builder: (_) =>
             StudentEventEvaluationScreen(eventId: eventId, studentId: _userId),
       ),
@@ -315,6 +345,7 @@ class _StudentEventsState extends State<StudentEvents>
       if (mounted) {
         setState(() {
           _expiredEvaluated[eventId] = markedComplete;
+          _applyFilters();
         });
       }
       await _loadEvents(showLoader: false, forceFresh: true);

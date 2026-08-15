@@ -63,7 +63,7 @@ class _StaggeredEntranceState extends State<StaggeredEntrance>
       begin: widget.initialScale,
       end: 1.0,
     ).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeOutBack),
+      CurvedAnimation(parent: _controller, curve: Curves.easeOutCubic),
     );
 
     if (enableMotion) {

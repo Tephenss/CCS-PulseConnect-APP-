@@ -62,18 +62,34 @@ String buildSessionDisplayName(Map<String, dynamic> session) {
   return 'Seminar';
 }
 
-String formatDateRange(DateTime? start, DateTime? end) {
-  if (start == null) return 'TBA';
-  if (end == null) return DateFormat('MMMM dd, yyyy').format(start);
-
-  final isMultiDay = start.year != end.year ||
+bool isMultiDayEvent(DateTime? start, DateTime? end) {
+  if (start == null || end == null) return false;
+  return start.year != end.year ||
       start.month != end.month ||
       start.day != end.day;
+}
 
-  if (isMultiDay) {
-    return '${DateFormat('MMMM dd, yyyy').format(start)} - ${DateFormat('MMMM dd, yyyy').format(end)}';
+String formatDateRange(DateTime? start, DateTime? end) {
+  if (start == null) return 'TBA';
+  if (end == null || !isMultiDayEvent(start, end)) {
+    return DateFormat('MMMM dd, yyyy').format(start);
   }
-  return DateFormat('MMMM dd, yyyy').format(start);
+  return '${DateFormat('MMMM dd, yyyy').format(start)} - ${DateFormat('MMMM dd, yyyy').format(end)}';
+}
+
+/// Compact range for ticket cards, e.g. `Aug 17 – 18, 2026`.
+String formatCompactDateRange(DateTime? start, DateTime? end) {
+  if (start == null) return 'TBA';
+  if (end == null || !isMultiDayEvent(start, end)) {
+    return DateFormat('MMM dd, yyyy').format(start);
+  }
+  if (start.year == end.year && start.month == end.month) {
+    return '${DateFormat('MMM dd').format(start)} – ${DateFormat('dd, yyyy').format(end)}';
+  }
+  if (start.year == end.year) {
+    return '${DateFormat('MMM dd').format(start)} – ${DateFormat('MMM dd, yyyy').format(end)}';
+  }
+  return '${DateFormat('MMM dd, yyyy').format(start)} – ${DateFormat('MMM dd, yyyy').format(end)}';
 }
 
 String formatTimeRange(DateTime? start, DateTime? end) {

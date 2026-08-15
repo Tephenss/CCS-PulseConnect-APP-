@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image_cropper/image_cropper.dart';
@@ -62,7 +63,12 @@ class _TeacherProfileState extends State<TeacherProfile> {
 
   Future<void> _pickProfilePic() async {
     try {
-      final xfile = await _picker.pickImage(source: ImageSource.gallery);
+      final xfile = await _picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 75,
+      );
       if (xfile == null) return;
 
       // Crop the selected image
@@ -90,29 +96,15 @@ class _TeacherProfileState extends State<TeacherProfile> {
         if (res['ok']) {
           final warning = res['warning']?.toString();
           if (widget.onUpdate != null) widget.onUpdate!();
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                (warning != null && warning.isNotEmpty)
-                    ? warning
-                    : 'Profile picture cloud-synced!',
-              ),
-              backgroundColor:
-                  (warning != null && warning.isNotEmpty) ? Colors.orange : TeacherThemeUtils.primary,
-            ),
-          );
+          AppSnackBar.info(context, (warning != null && warning.isNotEmpty) ? warning : 'Profile picture cloud-synced!');
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(res['error'] ?? 'Upload failed'), backgroundColor: Colors.red),
-          );
+          AppSnackBar.error(context, res['error'] ?? 'Upload failed');
         }
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isUploading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: ${e.toString()}'), backgroundColor: Colors.red),
-        );
+        AppSnackBar.error(context, 'Error: ${e.toString()}');
       }
     }
   }
@@ -120,10 +112,10 @@ class _TeacherProfileState extends State<TeacherProfile> {
   Future<CroppedFile?> _cropImage(String filePath) async {
     return await ImageCropper().cropImage(
       sourcePath: filePath,
-      maxWidth: 512,
-      maxHeight: 512,
+      maxWidth: 384,
+      maxHeight: 384,
       aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1), // Square for circular avatar
-      compressQuality: 90,
+      compressQuality: 72,
       uiSettings: [
         AndroidUiSettings(
           toolbarTitle: 'Edit Profle Picture',
@@ -637,7 +629,7 @@ class _TeacherProfileState extends State<TeacherProfile> {
             if (!startedLiveUpdates) {
               startedLiveUpdates = true;
               unawaited(refreshSheet());
-              statusTicker = Timer.periodic(const Duration(seconds: 3), (_) {
+              statusTicker = Timer.periodic(const Duration(seconds: 12), (_) {
                 unawaited(refreshSheet());
               });
             }
@@ -830,12 +822,7 @@ class _TeacherProfileState extends State<TeacherProfile> {
     } catch (_) {
       if (!mounted) return;
       setState(() => _isLoggingOut = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Failed to sign out. Please try again.'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      AppSnackBar.error(context, 'Failed to sign out. Please try again.');
     }
   }
 

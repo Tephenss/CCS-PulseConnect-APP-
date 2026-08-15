@@ -5,9 +5,6 @@ class Env {
   
   static const String supabaseAnonKey = 'YOUR_SUPABASE_ANON_KEY';
 
-  // Gemini API key used by AI Enhance Description in mobile app.
-  static const String geminiApiKey = 'YOUR_GEMINI_API_KEY';
-
   // Hosted PHP backend (no trailing slash).
   static const String mobilePushApiBaseUrl = 'https://ccspulseconnect.com';
 

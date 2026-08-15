@@ -115,10 +115,27 @@ class OfflineSyncService {
 
   bool _isCheckedInStatus(String status) {
     final normalized = status.trim().toLowerCase();
+    if (normalized == 'absent') return false;
     return normalized == 'scanned' ||
         normalized == 'present' ||
         normalized == 'late' ||
         normalized == 'early';
+  }
+
+  bool _isOfflineCheckOutMode(Map<String, dynamic> effectiveContext) {
+    final topMode =
+        (effectiveContext['scan_mode']?.toString() ?? '').trim().toLowerCase();
+    if (topMode == 'check_out') return true;
+    final contextMap = effectiveContext['context'] is Map
+        ? Map<String, dynamic>.from(effectiveContext['context'] as Map)
+        : <String, dynamic>{};
+    final nestedMode =
+        (contextMap['scan_mode']?.toString() ?? '').trim().toLowerCase();
+    if (nestedMode == 'check_out') return true;
+    final message =
+        '${effectiveContext['message'] ?? ''} ${contextMap['message'] ?? ''}'
+            .toLowerCase();
+    return message.contains('time-out') || message.contains('early time-out');
   }
 
   bool _looksLikeTransientError(Map<String, dynamic> response) {
@@ -1494,6 +1511,22 @@ class OfflineSyncService {
       alreadyCheckedIn = sessionPresence[activeSessionId] == true || pendingSync;
     } else {
       alreadyCheckedIn = _isCheckedInStatus(attendanceStatus) || pendingSync;
+    }
+    if (_isOfflineCheckOutMode(effectiveContext) &&
+        !alreadyCheckedIn &&
+        attendanceStatus != 'pending') {
+      return {
+        'ok': false,
+        'status': 'absent_no_time_in',
+        'error':
+            'Cannot time out — this student has no time-in (marked absent).',
+        'participant_name': payload['participant_name'],
+        'participant_photo_url': payload['participant_photo_url'],
+        'participant_photo_local_path': payload['participant_photo_local_path'],
+        'participant_student_id': payload['participant_student_id'],
+        'participant_student_no':
+            payload['participant_student_no'] ?? payload['participant_student_id'],
+      };
     }
     if (alreadyCheckedIn) {
       return {

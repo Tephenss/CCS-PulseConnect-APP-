@@ -5,8 +5,10 @@ import '../../services/auth_service.dart';
 import 'forgot_password_screen.dart';
 import '../../services/push_notification_service.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/app_snackbar.dart';
 import '../../main.dart';
 import '../../utils/teacher_theme_utils.dart';
+import '../../utils/app_page_routes.dart';
 
 class LoginScreen extends StatefulWidget {
   final String role;
@@ -72,44 +74,11 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     required int syncedCount,
     required int reconciledCount,
   }) {
-    final messenger = PulseConnectApp.scaffoldMessengerKey.currentState;
-    if (messenger == null) return;
-
-    final snackBars = <SnackBar>[
-      if (restoredCount > 0)
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: const Color(0xFF0EA5E9),
-          content: Text(
-            'Restored $restoredCount offline scan${restoredCount == 1 ? '' : 's'} from backup.',
-          ),
-        ),
-      if (syncedCount > 0)
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: const Color(0xFF047857),
-          content: Text(
-            '$syncedCount queued scan${syncedCount == 1 ? '' : 's'} synced successfully.',
-          ),
-        ),
-      if (reconciledCount > 0)
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: const Color(0xFFD97706),
-          content: Text(
-            '$reconciledCount restored scan${reconciledCount == 1 ? '' : 's'} already existed and were reconciled.',
-          ),
-        ),
-    ];
-
-    if (snackBars.isEmpty) return;
-
-    unawaited(() async {
-      for (final snackBar in snackBars) {
-        messenger.clearSnackBars();
-        await messenger.showSnackBar(snackBar).closed;
-      }
-    }());
+    final ctx = PulseConnectApp.navigatorKey.currentContext;
+    if (ctx == null) return;
+    if (restoredCount > 0) AppSnackBar.info(ctx, 'Restored $restoredCount offline scan${restoredCount == 1 ? '' : 's'} from backup.');
+    if (syncedCount > 0) AppSnackBar.success(ctx, '$syncedCount queued scan${syncedCount == 1 ? '' : 's'} synced successfully.');
+    if (reconciledCount > 0) AppSnackBar.warning(ctx, '$reconciledCount restored scan${reconciledCount == 1 ? '' : 's'} already existed and were reconciled.');
   }
 
   Future<void> _handleLogin() async {
@@ -668,7 +637,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
                                         onPressed: () {
                                           Navigator.push(
                                             context,
-                                            MaterialPageRoute(builder: (_) => ForgotPasswordScreen(role: widget.role)),
+                                            AppPageRoute(builder: (_) => ForgotPasswordScreen(role: widget.role)),
                                           );
                                         },
                                         style: TextButton.styleFrom(

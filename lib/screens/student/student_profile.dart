@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:image_cropper/image_cropper.dart';
@@ -15,7 +16,9 @@ import '../../widgets/performance_mode_sheet.dart';
 import '../welcome_screen.dart';
 import '../auth/change_password_screen.dart';
 import 'student_certificates.dart';
+import 'student_class_schedule_screen.dart';
 import '../../utils/course_theme_utils.dart';
+import '../../utils/app_page_routes.dart';
 
 class StudentProfile extends StatefulWidget {
   final Map<String, dynamic>? user;
@@ -70,6 +73,9 @@ class _StudentProfileState extends State<StudentProfile> {
     try {
       final XFile? pickedFile = await _picker.pickImage(
         source: source,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 75,
       );
 
       if (pickedFile == null) return;
@@ -99,29 +105,15 @@ class _StudentProfileState extends State<StudentProfile> {
         if (res['ok']) {
           final warning = res['warning']?.toString();
           if (widget.onUpdate != null) widget.onUpdate!();
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                (warning != null && warning.isNotEmpty)
-                    ? warning
-                    : 'Profile picture cloud-synced!',
-              ),
-              backgroundColor:
-                  (warning != null && warning.isNotEmpty) ? Colors.orange : Colors.green,
-            ),
-          );
+          AppSnackBar.info(context, (warning != null && warning.isNotEmpty) ? warning : 'Profile picture cloud-synced!');
         } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(res['error'] ?? 'Upload failed'), backgroundColor: Colors.red),
-          );
+            AppSnackBar.error(context, res['error'] ?? 'Upload failed');
         }
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isUploading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error: ${e.toString()}'), backgroundColor: Colors.red),
-        );
+        AppSnackBar.error(context, 'Error: ${e.toString()}');
       }
     }
   }
@@ -129,10 +121,10 @@ class _StudentProfileState extends State<StudentProfile> {
   Future<CroppedFile?> _cropImage(String filePath) async {
     return await ImageCropper().cropImage(
       sourcePath: filePath,
-      maxWidth: 512,
-      maxHeight: 512,
+      maxWidth: 384,
+      maxHeight: 384,
       aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1), // Square for circular avatar
-      compressQuality: 90,
+      compressQuality: 72,
       uiSettings: [
         AndroidUiSettings(
           toolbarTitle: 'Edit Profle Picture',
@@ -699,7 +691,7 @@ class _StudentProfileState extends State<StudentProfile> {
             if (!startedLiveUpdates) {
               startedLiveUpdates = true;
               unawaited(refreshSheet());
-              statusTicker = Timer.periodic(const Duration(seconds: 3), (_) {
+              statusTicker = Timer.periodic(const Duration(seconds: 12), (_) {
                 unawaited(refreshSheet());
               });
             }
@@ -891,12 +883,7 @@ class _StudentProfileState extends State<StudentProfile> {
     } catch (_) {
       if (!mounted) return;
       setState(() => _isLoggingOut = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Failed to sign out. Please try again.'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      AppSnackBar.error(context, 'Failed to sign out. Please try again.');
     }
   }
 
@@ -1112,7 +1099,7 @@ class _StudentProfileState extends State<StudentProfile> {
                     icon: Icons.workspace_premium_rounded,
                     title: 'My Certificates',
                     subtitle: 'View your earned achievements',
-                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const StudentCertificates())),
+                    onTap: () => Navigator.push(context, AppPageRoute(builder: (_) => const StudentCertificates())),
                   ),
                   
                   const SizedBox(height: 16),
@@ -1121,7 +1108,17 @@ class _StudentProfileState extends State<StudentProfile> {
                     icon: Icons.lock_person_rounded,
                     title: 'Security',
                     subtitle: 'Manage your password and auth',
-                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ChangePasswordScreen())),
+                    onTap: () => Navigator.push(context, AppPageRoute(builder: (_) => const ChangePasswordScreen())),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildMenuCard(
+                    icon: Icons.calendar_month_rounded,
+                    title: 'Update class schedule',
+                    subtitle: 'Update your Schedule',
+                    onTap: () => Navigator.push(
+                      context,
+                      AppPageRoute(builder: (_) => const StudentClassScheduleScreen()),
+                    ),
                   ),
                   const SizedBox(height: 16),
                   _buildMenuCard(

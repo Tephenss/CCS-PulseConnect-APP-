@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
+
+import '../../services/event_service.dart';
+import '../../services/mobile_backend_service.dart';
+import '../../utils/teacher_theme_utils.dart';
+import '../../widgets/app_snackbar.dart';
 import '../../widgets/custom_loader.dart';
 import '../../widgets/safe_circle_avatar.dart';
-import '../../utils/teacher_theme_utils.dart';
 
 class TeacherSectionStudents extends StatefulWidget {
   final String sectionId;
@@ -36,23 +40,43 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
 
   Future<void> _fetchStudents() async {
     try {
-      // users table is locked from anon (048). Do not probe — it floods
-      // Postgres ERROR. Section roster needs a PHP BFF endpoint next.
-      final List<Map<String, dynamic>> studentList = [];
-
-      if (mounted) {
-        setState(() {
-          _students = studentList;
-          _isLoading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to load students: $e'), backgroundColor: Colors.red),
+      if (!MobileBackendService.isConfigured) {
+        throw Exception(
+          'Hosted backend is not configured. Student lists load through the server.',
         );
       }
+
+      final res = await MobileBackendService().getTeacherBlockStudentsSecure(
+        sectionId: widget.sectionId,
+      );
+      if (res['ok'] != true) {
+        throw Exception(res['error']?.toString() ?? 'Failed to load students.');
+      }
+
+      final rows = res['students'] is List
+          ? List<Map<String, dynamic>>.from(
+              (res['students'] as List).whereType<Map>().map(
+                (row) => Map<String, dynamic>.from(row),
+              ),
+            )
+          : <Map<String, dynamic>>[];
+
+      final eventService = EventService();
+      for (final student in rows) {
+        final photo = (student['photo_url']?.toString() ?? '').trim();
+        if (photo.isEmpty) continue;
+        student['photo_url'] = await eventService.resolveAvatarDisplayUrl(photo);
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _students = rows;
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+      AppSnackBar.error(context, 'Failed to load students: $e');
     }
   }
   @override
@@ -87,7 +111,7 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  'Showing all students registered in ${widget.sectionName}.',
+                  'Showing students with PulseConnect accounts in ${widget.sectionName}.',
                   style: TextStyle(color: Colors.white.withValues(alpha: 0.8), fontSize: 14),
                 ),
                 const SizedBox(height: 20),
@@ -97,7 +121,7 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                   onChanged: (val) => setState(() => _searchQuery = val),
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
-                    hintText: 'Search by name...',
+                    hintText: 'Search by name, student no, or email...',
                     hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.6)),
                     prefixIcon: Icon(Icons.search_rounded, color: Colors.white.withValues(alpha: 0.7)),
                     filled: true,
@@ -118,9 +142,16 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
               color: TeacherThemeUtils.primary,
               child: Builder(
                 builder: (context) {
+                  final query = _searchQuery.trim().toLowerCase();
                   final filteredStudents = _students.where((s) {
-                    final name = (s['name'] as String).toLowerCase();
-                    return name.contains(_searchQuery.toLowerCase());
+                    if (query.isEmpty) return true;
+                    final name = (s['name']?.toString() ?? '').toLowerCase();
+                    final studentNo =
+                        (s['student_id']?.toString() ?? '').toLowerCase();
+                    final email = (s['email']?.toString() ?? '').toLowerCase();
+                    return name.contains(query) ||
+                        studentNo.contains(query) ||
+                        email.contains(query);
                   }).toList();
 
                   if (_isLoading) {
@@ -154,7 +185,7 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                                 const SizedBox(height: 8),
                                 Text(
                                   _students.isEmpty
-                                      ? 'No students have registered for this section.'
+                                      ? 'No students have created an account in this block yet.'
                                       : 'No student matches your search.',
                                   style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
                                   textAlign: TextAlign.center,
@@ -173,7 +204,8 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                     itemCount: filteredStudents.length,
                     itemBuilder: (context, index) {
                       final student = filteredStudents[index];
-                      final photoUrl = student['photo_url'] as String?;
+                      final name = (student['name']?.toString() ?? '').trim();
+                      final photoUrl = (student['photo_url']?.toString() ?? '').trim();
 
                       return Container(
                         margin: const EdgeInsets.only(bottom: 16),
@@ -193,8 +225,9 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                           children: [
                             SafeCircleAvatar(
                               size: 52,
-                              imagePathOrUrl: photoUrl,
-                              fallbackText: student['name'][0].toUpperCase(),
+                              imagePathOrUrl: photoUrl.isEmpty ? null : photoUrl,
+                              fallbackText: (name.isNotEmpty ? name[0] : 'S')
+                                  .toUpperCase(),
                               backgroundColor: TeacherThemeUtils.primary.withValues(
                                 alpha: 0.1,
                               ),
@@ -211,7 +244,7 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    student['name'],
+                                    name.isEmpty ? 'Student' : name,
                                     style: const TextStyle(
                                       fontWeight: FontWeight.w800,
                                       fontSize: 16,
@@ -224,7 +257,9 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                                       const Icon(Icons.badge_rounded, size: 14, color: Colors.grey),
                                       const SizedBox(width: 4),
                                       Text(
-                                        student['student_id'] ?? 'No ID',
+                                        (student['student_id']?.toString() ?? '').trim().isEmpty
+                                            ? 'No ID'
+                                            : student['student_id'].toString(),
                                         style: TextStyle(
                                           fontWeight: FontWeight.w700,
                                           fontSize: 12,
@@ -235,7 +270,7 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                                   ),
                                   const SizedBox(height: 2),
                                   Text(
-                                    student['email'],
+                                    (student['email']?.toString() ?? '').trim(),
                                     style: TextStyle(
                                       fontWeight: FontWeight.w500,
                                       fontSize: 12,

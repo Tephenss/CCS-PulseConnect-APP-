@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../services/auth_service.dart';
@@ -47,6 +48,8 @@ class _StudentHomeState extends State<StudentHome>
   List<Map<String, dynamic>> _calendarEvents = [];
   int _currentIndex = 0;
   StudentScanMode? _activeScanMode;
+  bool _scanVisited = false;
+  DateTime? _lastScanModeSwitchAt;
   bool _scanMenuOpen = false;
   late final AnimationController _scanMenuController;
   late final Animation<double> _scanMenuAnimation;
@@ -148,6 +151,13 @@ class _StudentHomeState extends State<StudentHome>
 
   void _switchScanMode() {
     if (_activeScanMode == null) return;
+    final now = DateTime.now();
+    if (_lastScanModeSwitchAt != null &&
+        now.difference(_lastScanModeSwitchAt!) <
+            const Duration(milliseconds: 700)) {
+      return;
+    }
+    _lastScanModeSwitchAt = now;
     setState(() {
       _activeScanMode = _activeScanMode == StudentScanMode.assist
           ? StudentScanMode.takeAttendance
@@ -159,6 +169,7 @@ class _StudentHomeState extends State<StudentHome>
     _closeScanMenu();
     setState(() {
       _activeScanMode = mode;
+      _scanVisited = true;
       _currentIndex = 2;
     });
   }
@@ -166,7 +177,6 @@ class _StudentHomeState extends State<StudentHome>
   void _closeScanner() {
     setState(() {
       _currentIndex = 0;
-      _activeScanMode = null;
       _scanMenuOpen = false;
     });
     _scanMenuController.value = 0;
@@ -255,7 +265,7 @@ class _StudentHomeState extends State<StudentHome>
   void _startAbsenceScopeRefreshTicker() {
     _absenceScopeRefreshTimer?.cancel();
     _absenceScopeRefreshTimer = Timer.periodic(
-      const Duration(seconds: 45),
+      const Duration(seconds: 90),
       (_) => _refreshAbsenceScopesSilently(),
     );
   }
@@ -320,7 +330,10 @@ class _StudentHomeState extends State<StudentHome>
 
     try {
       unawaited(_refreshUnreadCount());
-      final result = await showNotificationsModal(context);
+      final result = await showNotificationsModal(
+        context,
+        isTeacherTheme: false,
+      );
       if (!mounted) return;
       if (result is int) {
         _ensureTabMounted(result);
@@ -387,7 +400,7 @@ class _StudentHomeState extends State<StudentHome>
     _scannerAccessChannel!.subscribe();
 
     _scannerAccessGuardTimer = Timer.periodic(
-      const Duration(seconds: 45),
+      const Duration(seconds: 75),
       (_) {
         // Only refresh roster while Scan tab is visible.
         if (!mounted || _currentIndex != 2) return;
@@ -673,15 +686,42 @@ class _StudentHomeState extends State<StudentHome>
     return DateFormat('MMM dd, yyyy - h:mm a').format(parsed);
   }
 
+  String _scopeLockReason(Map<String, dynamic> scope) {
+    return (scope['lock_reason']?.toString() ?? 'absent').trim().toLowerCase();
+  }
+
+  bool _isMissedTimeoutScope(Map<String, dynamic> scope) {
+    return _scopeLockReason(scope) == 'missed_timeout';
+  }
+
+  String _scopeReasonBadge(Map<String, dynamic> scope) {
+    return _isMissedTimeoutScope(scope) ? 'No time-out' : 'No time-in';
+  }
+
+  String _scopeLockMessage(Map<String, dynamic> scope) {
+    final custom = (scope['lock_message']?.toString() ?? '').trim();
+    if (custom.isNotEmpty) return custom;
+    final scopeType = (scope['scope_type']?.toString() ?? 'event').toLowerCase();
+    if (_isMissedTimeoutScope(scope)) {
+      return scopeType == 'session'
+          ? 'You timed in to this seminar but did not time out. Submit your reason to continue.'
+          : 'You timed in but did not time out for this event. Submit your reason to continue.';
+    }
+    return scopeType == 'session'
+        ? 'You did not time in for this seminar. Submit your reason to continue.'
+        : 'You did not time in for this event. Submit your reason to continue.';
+  }
+
   String _scopeSummaryLabel(Map<String, dynamic> scope) {
     final scopeType = (scope['scope_type']?.toString() ?? 'event').toLowerCase();
     final eventTitle = (scope['event_title']?.toString() ?? 'Event').trim();
+    final badge = _scopeReasonBadge(scope);
     if (scopeType == 'session') {
       final sessionTitle =
           (scope['session_title']?.toString() ?? 'Seminar').trim();
-      return '$eventTitle - $sessionTitle';
+      return '$eventTitle - $sessionTitle ($badge)';
     }
-    return eventTitle;
+    return '$eventTitle ($badge)';
   }
 
   String _scopeWindowLabel(Map<String, dynamic> scope) {
@@ -704,12 +744,7 @@ class _StudentHomeState extends State<StudentHome>
     } catch (_) {
       if (!mounted) return;
       setState(() => _isGateLoggingOut = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Failed to sign out. Please try again.'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      AppSnackBar.error(context, 'Failed to sign out. Please try again.');
     }
   }
 
@@ -796,7 +831,10 @@ class _StudentHomeState extends State<StudentHome>
     final studentId = _user?['id']?.toString() ?? '';
     final eventId = scope['event_id']?.toString() ?? '';
     final sessionId = scope['session_id']?.toString();
-    final reason = _absenceReasonController.text.trim();
+    final typedReason = _absenceReasonController.text.trim();
+    final reason = _isMissedTimeoutScope(scope)
+        ? '[No time-out] $typedReason'
+        : '[No time-in] $typedReason';
 
     if (studentId.isEmpty || eventId.isEmpty) {
       setState(() {
@@ -804,7 +842,7 @@ class _StudentHomeState extends State<StudentHome>
       });
       return;
     }
-    if (reason.isEmpty) {
+    if (typedReason.isEmpty) {
       setState(() {
         _absenceReasonError = 'Please enter your reason before submitting.';
       });
@@ -837,9 +875,7 @@ class _StudentHomeState extends State<StudentHome>
         _isSubmittingAbsenceReason = false;
         _absenceReasonError = null;
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Reason submitted successfully.')),
-      );
+      AppSnackBar.success(context, 'Reason submitted successfully.');
       return;
     }
 
@@ -852,9 +888,8 @@ class _StudentHomeState extends State<StudentHome>
 
   @override
   Widget build(BuildContext context) {
-    // Note: Tab 2 (Index 2) is Scan — built only while selected so the camera
-    // does not stay open. Other tabs stay alive (IndexedStack) to preserve
-    // cached lists and avoid full-screen reload spinners.
+    // Scan stays mounted after first open (camera paused while inactive),
+    // matching teacher home so returning does not full-reload.
     final bool needsSection = _user != null && _user!['section_id'] == null;
     final bool needsAbsenceReason =
         _user != null && _pendingAbsenceScopes.isNotEmpty;
@@ -872,10 +907,9 @@ class _StudentHomeState extends State<StudentHome>
                     _eventsTabMounted
                         ? const StudentEvents()
                         : const SizedBox.shrink(),
-                    // Keep scan out of the keep-alive stack until opened.
-                    _currentIndex == 2 && _activeScanMode != null
+                    _scanVisited && _activeScanMode != null
                         ? StudentScanScreen(
-                            key: ValueKey(_activeScanMode),
+                            isActive: _currentIndex == 2,
                             initialMode: _activeScanMode!,
                             onClose: _closeScanner,
                           )
@@ -1048,13 +1082,11 @@ class _StudentHomeState extends State<StudentHome>
       return const Center(child: PulseConnectLoader());
     }
 
-    final scopeType =
-        (selectedScope['scope_type']?.toString() ?? 'event').toLowerCase();
+    final missedTimeout = _isMissedTimeoutScope(selectedScope);
     final scopeWindow = _scopeWindowLabel(selectedScope);
     final pendingCount = _pendingAbsenceScopes.length;
-    final helperText = scopeType == 'session'
-        ? 'You missed the seminar scan window. Submit your reason to continue.'
-        : 'You missed the event scan window. Submit your reason to continue.';
+    final helperText = _scopeLockMessage(selectedScope);
+    final windowCaption = missedTimeout ? 'Time-out window' : 'Scan window';
 
     return Container(
       width: double.infinity,
@@ -1117,7 +1149,7 @@ class _StudentHomeState extends State<StudentHome>
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Scan window: $scopeWindow',
+                        '$windowCaption: $scopeWindow',
                         style: const TextStyle(
                           color: Color(0xFFA1A1AA),
                           fontSize: 12,
@@ -1126,7 +1158,7 @@ class _StudentHomeState extends State<StudentHome>
                       if (pendingCount > 1) ...[
                         const SizedBox(height: 8),
                         Text(
-                          '$pendingCount pending absence records.',
+                          '$pendingCount pending follow-up records.',
                           style: const TextStyle(
                             color: Color(0xFFEAB308),
                             fontSize: 12,
@@ -1173,7 +1205,9 @@ class _StudentHomeState extends State<StudentHome>
                   maxLines: 6,
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
-                    hintText: 'Explain why you missed the scan window...',
+                    hintText: missedTimeout
+                        ? 'Explain why you did not time out...'
+                        : 'Explain why you missed the scan window...',
                     hintStyle: const TextStyle(color: Color(0xFF71717A)),
                     filled: true,
                     fillColor: const Color(0xFF1C1C22),
@@ -1793,40 +1827,62 @@ class _StudentHomeState extends State<StudentHome>
                           // Notification Bell Only - Logout is in Profile
                           Container(
                             margin: const EdgeInsets.only(left: 12),
+                            width: 48,
+                            height: 48,
                             decoration: BoxDecoration(
-                              color: Colors.white.withValues(alpha: 0.1),
+                              color: Colors.white.withValues(alpha: 0.10),
                               borderRadius: BorderRadius.circular(14),
                             ),
                             child: Stack(
+                              clipBehavior: Clip.none,
                               children: [
-                                IconButton(
-                                  icon: const Icon(Icons.notifications_none_rounded, color: Colors.white),
-                                  onPressed: _isOpeningNotifications ? null : _openNotificationsModal,
+                                Positioned.fill(
+                                  child: IconButton(
+                                    padding: const EdgeInsets.all(10),
+                                    splashRadius: 22,
+                                    icon: const Icon(
+                                      Icons.notifications_none_rounded,
+                                      color: Colors.white,
+                                    ),
+                                    onPressed: _isOpeningNotifications
+                                        ? null
+                                        : _openNotificationsModal,
+                                  ),
                                 ),
                                 if (_unreadCount > 0)
                                   Positioned(
-                                    top: 8,
-                                    right: 10,
+                                    top: -4,
+                                    right: -4,
                                     child: IgnorePointer(
                                       child: Container(
-                                        padding: const EdgeInsets.all(4),
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 5,
+                                          vertical: 2,
+                                        ),
                                         decoration: BoxDecoration(
                                           color: const Color(0xFFEF4444),
-                                          shape: BoxShape.circle,
+                                          borderRadius: BorderRadius.circular(
+                                            999,
+                                          ),
                                           border: Border.all(
-                                            color: _studentChrome(context),
+                                            color: _studentDark(context),
                                             width: 1.5,
                                           ),
                                         ),
-                                        constraints: const BoxConstraints(minWidth: 18, minHeight: 18),
-                                        child: Center(
-                                          child: Text(
-                                            _unreadCount > 9 ? '9+' : _unreadCount.toString(),
-                                            style: const TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 10,
-                                              fontWeight: FontWeight.w800,
-                                            ),
+                                        constraints: const BoxConstraints(
+                                          minWidth: 18,
+                                          minHeight: 18,
+                                        ),
+                                        child: Text(
+                                          _unreadCount > 99
+                                              ? '99+'
+                                              : _unreadCount.toString(),
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w800,
+                                            height: 1.2,
                                           ),
                                         ),
                                       ),

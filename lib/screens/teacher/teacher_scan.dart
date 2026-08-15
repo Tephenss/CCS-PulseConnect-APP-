@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -14,6 +15,7 @@ import '../../services/event_live_service.dart';
 import '../../services/event_service.dart';
 import '../../services/offline_sync_service.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/scan_attendance_live_indicator.dart';
 import '../../utils/teacher_theme_utils.dart';
 
 class TeacherScanScreen extends StatefulWidget {
@@ -40,6 +42,10 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
 
   Map<String, dynamic>? _scanContext;
   String _selectedEventTitle = '';
+  double? _attendancePercent;
+  int? _attendancePresent;
+  int? _attendanceTotal;
+  bool _attendanceStatsLoading = false;
 
   bool _isOffline = false;
   int _pendingSyncCount = 0;
@@ -61,6 +67,9 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
   String _lastVerifiedParticipantPhotoLocalPath = '';
   String _lastVerifiedStatusLabel = 'Present';
   DateTime? _lastVerifiedAt;
+  /// Bumped whenever overlay identity changes so late avatar hydrates cannot
+  /// re-apply a previous student's photo onto the next scan.
+  int _verifiedOverlayEpoch = 0;
   static const Duration _sameCodeCooldown = Duration(seconds: 5);
   static const Duration _scanSoundCooldown = Duration(milliseconds: 120);
   static const Duration _resumeAfterSuccess = Duration(milliseconds: 2200);
@@ -236,6 +245,22 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         _statusColor = Colors.orange.shade700;
         _rememberVerifiedParticipant(res, statusLabel: 'Already in');
         _playFailedScanSound();
+      } else if (status == 'absent_no_time_in' ||
+          (res['error']?.toString() ?? '')
+              .toLowerCase()
+              .contains('no time-in')) {
+        final participantName =
+            (res['participant_name']?.toString() ?? '').trim();
+        _scanStatus = participantName.isNotEmpty
+            ? '$participantName — Absent (no time-in)'
+            : _normalizeScannerMessage(
+                res['error']?.toString(),
+                fallback:
+                    'Cannot time out — this student has no time-in (marked absent).',
+              );
+        _statusColor = Colors.red.shade700;
+        _rememberVerifiedParticipant(res, statusLabel: 'Absent');
+        _playFailedScanSound();
       } else if (status == 'wrong_event' || status == 'forbidden') {
         _scanStatus = _normalizeScannerMessage(
           res['error']?.toString(),
@@ -292,9 +317,11 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       }
       _hasScanResult = true;
       _manualPause = false;
+      _bumpAttendanceAfterSuccessfulScan(res);
     });
 
     if (!_isOffline) {
+      unawaited(_refreshAttendanceStats());
       // Snapshot refresh only — do not drain the offline queue here.
       // Syncing after every online scan flashes the Sync banner even when
       // the check-in already succeeded online.
@@ -511,11 +538,13 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     _contextRefreshTimer?.cancel();
     if (_teacherId.isEmpty || !widget.isActive) return;
     _contextRefreshTimer = Timer.periodic(
-      const Duration(seconds: 8),
+      // Backup to realtime — keep quiet enough for Free-plan egress.
+      const Duration(seconds: 20),
       (_) {
         if (!widget.isActive) return;
         _enforceLocalOfflineWindowGuard();
         unawaited(_refreshScanContext(silent: true));
+        unawaited(_refreshAttendanceStats());
         if (!_isOffline && _pendingSyncCount > 0 && !_isSyncing) {
           unawaited(_syncQueueIfNeeded(showSnack: false));
         }
@@ -684,12 +713,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           _statusColor = Colors.grey.shade700;
           _hasScanResult = false;
           _scanContext = null;
-          _lastVerifiedParticipantName = '';
-          _lastVerifiedParticipantStudentNo = '';
-          _lastVerifiedParticipantPhotoUrl = '';
-          _lastVerifiedParticipantPhotoLocalPath = '';
-          _lastVerifiedStatusLabel = 'Present';
-          _lastVerifiedAt = null;
+          _clearVerifiedParticipantOverlay();
           _isLoading = true;
         });
       }
@@ -706,7 +730,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           }
         }
         if (!startOffline || !bootstrappedFromCache) {
-          await _refreshScanContext();
+        await _refreshScanContext();
         }
         if (!_isOffline && _pendingSyncCount > 0) {
           unawaited(_syncQueueIfNeeded(showSnack: false));
@@ -725,12 +749,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           _scanStatus = 'Unable to identify your teacher account.';
           _statusColor = Colors.red.shade700;
           _hasScanResult = false;
-          _lastVerifiedParticipantName = '';
-          _lastVerifiedParticipantStudentNo = '';
-          _lastVerifiedParticipantPhotoUrl = '';
-          _lastVerifiedParticipantPhotoLocalPath = '';
-          _lastVerifiedStatusLabel = 'Present';
-          _lastVerifiedAt = null;
+          _clearVerifiedParticipantOverlay();
         });
       }
     } catch (_) {
@@ -754,12 +773,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           _scanStatus = _scannerClosedLabel;
           _statusColor = Colors.red.shade700;
           _hasScanResult = false;
-          _lastVerifiedParticipantName = '';
-          _lastVerifiedParticipantStudentNo = '';
-          _lastVerifiedParticipantPhotoUrl = '';
-          _lastVerifiedParticipantPhotoLocalPath = '';
-          _lastVerifiedStatusLabel = 'Present';
-          _lastVerifiedAt = null;
+          _clearVerifiedParticipantOverlay();
           _isLoading = false;
         });
       }
@@ -933,7 +947,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           } else if (!_manualPause && widget.isActive && !_isProcessingScan) {
             // Keep accepts armed — otherwise UI can say "Ready" while
             // _isScanning stayed false and onDetect is ignored.
-            _isScanning = true;
+          _isScanning = true;
           }
         } else if (scannerEnabled && !_manualPause) {
           _isScanning = _cameraShouldRun(scannerEnabled: true);
@@ -968,6 +982,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       if (result['ok'] == true &&
           normalizedStatus != 'no_assignment' &&
           normalizedStatus != 'error') {
+        unawaited(_refreshAttendanceStats());
         if (silent) {
           unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
         } else {
@@ -986,7 +1001,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           : false;
       if (!mounted) return;
       if (!usedCached) {
-        setState(() {
+      setState(() {
           _scanContext = {
             'ok': true,
             'status': 'no_assignment',
@@ -999,16 +1014,16 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
             'assignments': 0,
           };
           _selectedEventTitle = '';
-          if (!_hasScanResult) {
+        if (!_hasScanResult) {
             _scanStatus =
                 _isOffline
                     ? 'Offline scanner data is not ready yet on this device.'
                     : 'Unable to verify scanner access right now.';
-            _statusColor = Colors.red.shade700;
-          }
-          _isScanning = false;
+          _statusColor = Colors.red.shade700;
+        }
+        _isScanning = false;
           _manualPause = false;
-        });
+      });
       }
       unawaited(_refreshOfflineReadiness());
     } finally {
@@ -1349,6 +1364,107 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     return eventId.isEmpty ? null : eventId;
   }
 
+  String? _activeScannerSessionId() {
+    final payload = _activeOfflineValidationContext();
+    if (payload == null) return null;
+    final context = payload['context'];
+    final contextMap = context is Map<String, dynamic>
+        ? context
+        : (context is Map ? Map<String, dynamic>.from(context) : null);
+    final sessionRaw = contextMap?['session'];
+    final sessionMap = sessionRaw is Map<String, dynamic>
+        ? sessionRaw
+        : (sessionRaw is Map ? Map<String, dynamic>.from(sessionRaw) : null);
+    final sessionId = (sessionMap?['id']?.toString() ?? '').trim();
+    return sessionId.isEmpty ? null : sessionId;
+  }
+
+  String _activeScannerScanMode() {
+    final payload = _activeOfflineValidationContext();
+    final context = payload?['context'];
+    final contextMap = context is Map<String, dynamic>
+        ? context
+        : (context is Map ? Map<String, dynamic>.from(context) : null);
+    final mode = (contextMap?['scan_mode']?.toString() ?? '')
+        .trim()
+        .toLowerCase();
+    return mode == 'check_out' ? 'check_out' : 'check_in';
+  }
+
+  void _clearAttendanceStats() {
+    _attendancePercent = null;
+    _attendancePresent = null;
+    _attendanceTotal = null;
+  }
+
+  void _bumpAttendanceAfterSuccessfulScan(Map<String, dynamic> res) {
+    if (_isOffline) return;
+    final status = (res['status']?.toString() ?? '').toLowerCase();
+    final action = (res['action']?.toString() ?? '').toLowerCase();
+    if (res['ok'] != true) return;
+    if (status == 'queued_offline') {
+      return;
+    }
+    final isCheckOutMode = _activeScannerScanMode() == 'check_out';
+    final isCheckOutSuccess = status == 'checked_out' || action == 'check_out';
+    if (isCheckOutMode != isCheckOutSuccess) return;
+    if (!isCheckOutMode &&
+        (status == 'already_checked_in' || status == 'used')) {
+      return;
+    }
+    final total = _attendanceTotal;
+    final present = _attendancePresent;
+    if (total == null || present == null || total <= 0 || present >= total) {
+      return;
+    }
+    final next = present + 1;
+    _attendancePresent = next;
+    _attendancePercent = (next / total) * 100;
+  }
+
+  Future<void> _refreshAttendanceStats() async {
+    if (!mounted || _isOffline) {
+      if (mounted && _attendancePercent != null) {
+        setState(_clearAttendanceStats);
+      }
+      return;
+    }
+    final eventId = (_activeScannerEventId() ?? '').trim();
+    if (eventId.isEmpty) {
+      if (_attendancePercent != null && mounted) {
+        setState(_clearAttendanceStats);
+      }
+      return;
+    }
+    if (_attendanceStatsLoading) return;
+    _attendanceStatsLoading = true;
+    final requestedMode = _activeScannerScanMode();
+    try {
+      final res = await _eventService.getScanAttendanceStats(
+        eventId: eventId,
+        sessionId: _activeScannerSessionId(),
+        mode: requestedMode,
+      );
+      if (!mounted || _isOffline) return;
+      if (_activeScannerScanMode() != requestedMode) {
+        setState(_clearAttendanceStats);
+        return;
+      }
+      if (res == null) return;
+      final present = int.tryParse(res['present']?.toString() ?? '') ?? 0;
+      final total = int.tryParse(res['total']?.toString() ?? '') ?? 0;
+      final percent = double.tryParse(res['percent']?.toString() ?? '') ??
+          (total > 0 ? (present / total) * 100 : 0);
+      setState(() {
+        _attendancePresent = present;
+        _attendanceTotal = total;
+        _attendancePercent = percent;
+      });
+    } finally {
+      _attendanceStatsLoading = false;
+    }
+  }
+
   Future<void> _refreshPendingSyncCount() async {
     if (_teacherId.trim().isEmpty) return;
     final count = await _offlineSyncService.pendingQueueCount(
@@ -1402,9 +1518,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         if (conflictResolved > 0) '$conflictResolved conflict-resolved',
         if (rejected > 0) '$rejected rejected',
       ].join(', ');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Offline sync update: $details.')),
-      );
+      AppSnackBar.info(context, 'Offline sync update: $details.');
     }
   }
 
@@ -1421,7 +1535,10 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       final isOffline = _resultsAreOffline(results);
       if (!mounted) return;
       final wasOffline = _isOffline;
-      setState(() => _isOffline = isOffline);
+      setState(() {
+        _isOffline = isOffline;
+        if (isOffline) _clearAttendanceStats();
+      });
       if (isOffline) {
         await _sealCurrentContextForOfflineTransition();
         if (_applyCurrentContextOfflineTransition()) {
@@ -1432,17 +1549,19 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           unawaited(_refreshOfflineReadiness());
           return;
         }
-        await _refreshScanContext(silent: true);
+      await _refreshScanContext(silent: true);
         unawaited(_refreshOfflineReadiness());
         return;
       }
       if (wasOffline || _pendingSyncCount > 0) {
         await _syncQueueIfNeeded(showSnack: true);
         await _refreshScanContext(silent: true);
+        unawaited(_refreshAttendanceStats());
         unawaited(
           _refreshOfflineReadiness(refreshSnapshot: true),
         );
       } else {
+        unawaited(_refreshAttendanceStats());
         unawaited(_refreshOfflineReadiness());
       }
     });
@@ -1514,7 +1633,12 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     final display = barcode.displayValue?.trim();
     if (display != null && display.isNotEmpty) return display;
 
-    final bytes = barcode.rawBytes;
+    final bytes = switch (barcode.rawDecodedBytes) {
+      DecodedBarcodeBytes(:final bytes) => bytes,
+      DecodedVisionBarcodeBytes(:final bytes, :final rawBytes) =>
+        bytes ?? rawBytes,
+      null => null,
+    };
     if (bytes != null && bytes.isNotEmpty) {
       try {
         final decoded = String.fromCharCodes(bytes).trim();
@@ -1544,22 +1668,23 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         return;
       }
 
-      final now = DateTime.now();
-      if (_lastScannedCode == normalized &&
-          _lastScannedAt != null &&
-          now.difference(_lastScannedAt!) < _sameCodeCooldown) {
-        return;
-      }
+        final now = DateTime.now();
+        if (_lastScannedCode == normalized &&
+            _lastScannedAt != null &&
+            now.difference(_lastScannedAt!) < _sameCodeCooldown) {
+          return;
+        }
 
-      _lastScannedCode = normalized;
-      _lastScannedAt = now;
+        _lastScannedCode = normalized;
+        _lastScannedAt = now;
 
-      setState(() {
+        setState(() {
         _isProcessingScan = true;
         _scanStatus = 'Checking in...';
-        _statusColor = const Color(0xFFD4A843);
-        _hasScanResult = false;
-      });
+          _statusColor = const Color(0xFFD4A843);
+          _hasScanResult = false;
+          _clearVerifiedParticipantOverlay();
+        });
 
       try {
         final res = _isOffline
@@ -1570,8 +1695,8 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
                 activeContextOverride: _activeOfflineValidationContext(),
               )
             : await _eventService.checkInParticipantAsTeacher(
-                normalized,
-                _teacherId,
+            normalized,
+            _teacherId,
                 expectedEventId: _activeScannerEventId(),
               );
 
@@ -1583,8 +1708,8 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         if (!mounted) return;
         setState(() {
           _scanStatus = 'Scan failed. Try again.';
-          _statusColor = Colors.red.shade700;
-          _hasScanResult = true;
+                _statusColor = Colors.red.shade700;
+              _hasScanResult = true;
           _isProcessingScan = false;
         });
         _playFailedScanSound();
@@ -1845,6 +1970,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
   }
 
   void _clearVerifiedParticipantOverlay() {
+    _verifiedOverlayEpoch++;
     _lastVerifiedParticipantName = '';
     _lastVerifiedParticipantStudentNo = '';
     _lastVerifiedParticipantPhotoUrl = '';
@@ -1915,9 +2041,9 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         actionPart = 'Timed in';
       }
       if (namePart.isNotEmpty && actionPart.isNotEmpty) {
-        return Column(
+    return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      children: [
             Text(
               namePart,
               softWrap: true,
@@ -1963,19 +2089,17 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     );
   }
 
-  Future<void> _hydrateVerifiedParticipantPhoto(String rawPhotoUrl) async {
+  Future<void> _hydrateVerifiedParticipantPhoto(
+    String rawPhotoUrl, {
+    required int epoch,
+  }) async {
     final raw = rawPhotoUrl.trim();
     if (raw.isEmpty) return;
     final signed = await _eventService.resolveAvatarDisplayUrl(raw);
     if (!mounted || signed.isEmpty) return;
-    // Only apply if overlay still refers to this participant photo source.
-    final current = _lastVerifiedParticipantPhotoUrl.trim();
-    if (current.isNotEmpty &&
-        current != raw &&
-        current.toLowerCase().startsWith('http')) {
-      return;
-    }
-    if (current == signed) return;
+    // Drop late hydrates from a previous scan / cleared overlay.
+    if (epoch != _verifiedOverlayEpoch) return;
+    if (_lastVerifiedParticipantPhotoUrl == signed) return;
     setState(() => _lastVerifiedParticipantPhotoUrl = signed);
   }
 
@@ -1998,20 +2122,22 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       return;
     }
 
-    _lastVerifiedParticipantName = participantName.isNotEmpty
-        ? participantName
-        : (_lastVerifiedParticipantName.isNotEmpty
-              ? _lastVerifiedParticipantName
-              : 'Verified Student');
-    if (participantStudentNo.isNotEmpty) {
-      _lastVerifiedParticipantStudentNo = participantStudentNo;
-    }
+    // New participant identity — bump epoch so in-flight avatar resolves for
+    // the previous student cannot paint onto this card.
+    _verifiedOverlayEpoch++;
+    _lastVerifiedParticipantName =
+        participantName.isNotEmpty ? participantName : 'Verified Student';
+    _lastVerifiedParticipantStudentNo = participantStudentNo;
+    // Always replace photo sources (never keep the previous student's avatar).
+    _lastVerifiedParticipantPhotoUrl = participantPhotoUrl;
+    _lastVerifiedParticipantPhotoLocalPath = participantPhotoLocalPath;
     if (participantPhotoUrl.isNotEmpty) {
-      _lastVerifiedParticipantPhotoUrl = participantPhotoUrl;
-      unawaited(_hydrateVerifiedParticipantPhoto(participantPhotoUrl));
-    }
-    if (participantPhotoLocalPath.isNotEmpty) {
-      _lastVerifiedParticipantPhotoLocalPath = participantPhotoLocalPath;
+      unawaited(
+        _hydrateVerifiedParticipantPhoto(
+          participantPhotoUrl,
+          epoch: _verifiedOverlayEpoch,
+        ),
+      );
     }
     _lastVerifiedStatusLabel =
         statusLabel.trim().isEmpty ? 'Present' : statusLabel.trim();
@@ -2100,7 +2226,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     return Container(
       width: avatarSize,
       height: avatarSize,
-      decoration: BoxDecoration(
+                  decoration: BoxDecoration(
         shape: BoxShape.circle,
         border: Border.all(color: Colors.black.withValues(alpha: 0.22), width: 1.2),
       ),
@@ -2158,21 +2284,21 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         ? const SizedBox.shrink(key: ValueKey('verified-empty'))
         : Container(
             key: ValueKey(
-              '${overlayLabel}_${statusLabel}_${_lastVerifiedAt?.millisecondsSinceEpoch ?? 0}',
+              '${overlayLabel}_${statusLabel}_${_lastVerifiedAt?.millisecondsSinceEpoch ?? 0}_${photoLocalPath}_$photoUrl',
             ),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             decoration: BoxDecoration(
               color: Colors.black.withValues(alpha: 0.72),
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: Colors.white.withValues(alpha: 0.2)),
-              boxShadow: [
-                BoxShadow(
+                    boxShadow: [
+                      BoxShadow(
                   color: Colors.black.withValues(alpha: 0.26),
                   blurRadius: 8,
                   offset: const Offset(0, 3),
-                ),
-              ],
-            ),
+                      ),
+                    ],
+                  ),
             child: Row(
               children: [
                 _buildVerifiedParticipantAvatar(
@@ -2283,39 +2409,39 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           key: const ValueKey('teacher_live_scanner'),
           controller: _scannerController,
           fit: BoxFit.cover,
-          onDetect: _handleDetect,
-          errorBuilder: (context, error, child) {
+                              onDetect: _handleDetect,
+                              errorBuilder: (context, error) {
             return ColoredBox(
-              color: Colors.black,
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
+                                  color: Colors.black,
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(20),
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
                     const Icon(
                       Icons.error_outline_rounded,
                       color: Colors.white,
                       size: 30,
                     ),
-                    const SizedBox(height: 10),
-                    const Text(
-                      'Camera unavailable',
+                                        const SizedBox(height: 10),
+                                        const Text(
+                                          'Camera unavailable',
                       style: TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.w700,
                       ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      'Allow camera permission in app settings, then try again.',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.grey.shade300, fontSize: 12),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
+                                        ),
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          'Allow camera permission in app settings, then try again.',
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(color: Colors.grey.shade300, fontSize: 12),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
         ),
         IgnorePointer(
           child: AnimatedOpacity(
@@ -2342,17 +2468,18 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
             builder: (context, constraints) {
               final width = constraints.maxWidth;
               final height = constraints.maxHeight;
-              // Bleed padding slightly wider under PNG bezel so zero white gaps or lines show.
+              // Keep preview under the PNG bezel without extra zoom (scale
+              // made the live feed look bent / fisheye).
               final cameraPadding = EdgeInsets.fromLTRB(
-                width * 0.125,
-                height * 0.175,
-                width * 0.125,
-                height * 0.145,
+                width * 0.11,
+                height * 0.155,
+                width * 0.11,
+                height * 0.13,
               );
 
               return Stack(
                 fit: StackFit.expand,
-                children: [
+                                children: [
                   Positioned.fill(
                     child: Padding(
                       padding: cameraPadding,
@@ -2364,10 +2491,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
                             fit: StackFit.expand,
                             children: [
                               Positioned.fill(
-                                child: Transform.scale(
-                                  scale: 1.15,
-                                  child: _buildCameraSurface(),
-                                ),
+                                child: _buildCameraSurface(),
                               ),
                               Positioned(
                                 top: 8,
@@ -2376,13 +2500,13 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
                                 child: IgnorePointer(
                                   child: _buildLastVerifiedOverlay(),
                                 ),
+                                  ),
+                                ],
                               ),
-                            ],
-                          ),
-                        ),
-                      ),
+                            ),
                     ),
                   ),
+                ),
                   Positioned.fill(
                     child: IgnorePointer(
                       child: Image.asset(
@@ -2413,6 +2537,18 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           title: 'QR Scanner',
           subtitle: eventTitle,
         ),
+        if (!_isOffline && _attendancePercent != null) ...[
+          const SizedBox(height: 10),
+          ScanAttendanceLiveIndicator(
+            percent: _attendancePercent!,
+            accent: TeacherThemeUtils.primary,
+            present: _attendancePresent,
+            total: _attendanceTotal,
+            label: _activeScannerScanMode() == 'check_out'
+                ? 'Timed Out'
+                : 'Attendance',
+          ),
+        ],
         if (_showOfflineReadinessIndicator) ...[
           const SizedBox(height: 10),
           _buildOfflineReadinessCard(),

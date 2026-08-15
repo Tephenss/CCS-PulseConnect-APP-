@@ -3,8 +3,8 @@ import '../main.dart';
 import 'auth/login_screen.dart';
 import 'auth/register_screen.dart';
 import '../widgets/shiny_text.dart';
-import '../services/device_performance_service.dart';
 import '../utils/teacher_theme_utils.dart';
+import '../utils/app_page_routes.dart';
 
 class WelcomeScreen extends StatefulWidget {
   const WelcomeScreen({super.key});
@@ -41,8 +41,8 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       duration: const Duration(seconds: 12),
     );
 
-    _syncPerformanceAnimationState();
-    DevicePerformance.instance.addListener(_syncPerformanceAnimationState);
+    _collisionController.repeat();
+    _gradientController.repeat(reverse: true);
 
     // Ensure global app theme matches the default selected role on screen open.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -51,27 +51,8 @@ class _WelcomeScreenState extends State<WelcomeScreen>
     });
   }
 
-  void _syncPerformanceAnimationState() {
-    if (!mounted) return;
-    if (DevicePerformance.instance.enableDecorativeMotion) {
-      if (!_collisionController.isAnimating) _collisionController.repeat();
-      if (!_gradientController.isAnimating) {
-        _gradientController.repeat(reverse: true);
-      }
-    } else {
-      // Low/medium devices stop the loop — but t=0 has ccsOpacity=0, so the
-      // logo vanished. Hold on a mid-cycle frame where CCS is fully visible.
-      _collisionController.stop();
-      _collisionController.value = 0.40;
-      _gradientController.stop();
-      _gradientController.value = 0.5;
-    }
-    if (mounted) setState(() {});
-  }
-
   @override
   void dispose() {
-    DevicePerformance.instance.removeListener(_syncPerformanceAnimationState);
     _collisionController.dispose();
     _gradientController.dispose();
     super.dispose();
@@ -551,6 +532,7 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                         speed: 2.2,
                         fontWeight: FontWeight.w900,
                         textAlign: TextAlign.center,
+                        ignorePerformanceMode: true,
                       ),
 
                       SizedBox(height: size.height * 0.04),
@@ -696,33 +678,8 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                               onTap: () {
                                 Navigator.push(
                                   context,
-                                  PageRouteBuilder(
-                                    pageBuilder:
-                                        (
-                                          context,
-                                          animation,
-                                          secondaryAnimation,
-                                        ) => const RegisterScreen(),
-                                    transitionDuration: const Duration(
-                                      milliseconds: 400,
-                                    ),
-                                    reverseTransitionDuration: const Duration(
-                                      milliseconds: 400,
-                                    ),
-                                    opaque: true,
-                                    barrierColor: const Color(0xFF09090B),
-                                    transitionsBuilder:
-                                        (
-                                          context,
-                                          animation,
-                                          secondaryAnimation,
-                                          child,
-                                        ) {
-                                          return FadeTransition(
-                                            opacity: animation,
-                                            child: child,
-                                          );
-                                        },
+                                  AppPageRoute(
+                                    builder: (_) => const RegisterScreen(),
                                   ),
                                 );
                               },

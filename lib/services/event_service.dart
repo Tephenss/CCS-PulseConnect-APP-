@@ -28,6 +28,10 @@ class EventService {
   static final Map<String, _CachedStudentRequirements> _studentRequirementsCache =
       {};
   static final Map<String, _ListCacheEntry> _listCache = {};
+  /// Signed avatar URLs (private bucket) — cuts repeat BFF/storage egress.
+  static final Map<String, _CachedSignedAvatar> _signedAvatarCache = {};
+  static final Map<String, Future<String>> _signedAvatarInFlight = {};
+  static const Duration _signedAvatarTtl = Duration(hours: 6);
   /// In-memory Fabric canvas_state by template key (survives reopen in-session).
   static final Map<String, Map<String, dynamic>> _canvasStateCache = {};
   static const Duration _certCanvasTtl = Duration(hours: 6);
@@ -391,10 +395,30 @@ class EventService {
 
   bool _isCheckedInStatus(dynamic rawStatus) {
     final status = (rawStatus?.toString() ?? '').toLowerCase();
+    if (status == 'absent') return false;
     return status == 'scanned' ||
         status == 'present' ||
         status == 'late' ||
         status == 'early';
+  }
+
+  bool _attendanceHasValidTimeIn(Map<String, dynamic>? row) {
+    if (row == null || row.isEmpty) return false;
+    final status = (row['status']?.toString() ?? '').trim().toLowerCase();
+    if (status == 'absent') return false;
+    if ((row['check_in_at']?.toString().trim().isNotEmpty ?? false)) {
+      return true;
+    }
+    return _isCheckedInStatus(status);
+  }
+
+  bool _isCheckOutScanMode(Map<String, dynamic>? contextMap) {
+    final scanMode = (contextMap?['scan_mode']?.toString() ?? '')
+        .trim()
+        .toLowerCase();
+    if (scanMode == 'check_out') return true;
+    final message = (contextMap?['message']?.toString() ?? '').toLowerCase();
+    return message.contains('time-out') || message.contains('early time-out');
   }
 
   bool _looksLikeUuid(String raw) {
@@ -414,11 +438,30 @@ class EventService {
   }
 
   bool _attendanceRecordCountsAsPresent(Map<String, dynamic>? row) {
+    return _attendanceHasValidTimeIn(row);
+  }
+
+  bool _attendanceHasCheckOut(Map<String, dynamic>? row) {
     if (row == null || row.isEmpty) return false;
-    if ((row['check_in_at']?.toString().trim().isNotEmpty ?? false)) {
-      return true;
+    return (row['check_out_at']?.toString().trim().isNotEmpty ?? false);
+  }
+
+  DateTime? _asUtcDate(dynamic raw) {
+    if (raw is DateTime) return raw.toUtc();
+    return _toUtcDate(raw);
+  }
+
+  DateTime? _checkOutWindowClosesAt({
+    required dynamic endRaw,
+    required dynamic earlyOutEnabledAt,
+  }) {
+    final enabledAt = _asUtcDate(earlyOutEnabledAt);
+    if (enabledAt != null) {
+      return enabledAt.add(const Duration(hours: 1));
     }
-    return _isCheckedInStatus(row['status']);
+    final endAt = _asUtcDate(endRaw);
+    if (endAt == null) return null;
+    return endAt.add(const Duration(hours: 1));
   }
 
   String _normalizedScanTimestampIso(
@@ -596,37 +639,62 @@ class EventService {
     final raw = rawPhotoUrl.trim();
     if (raw.isEmpty) return '';
 
-    final avatarPath = _extractAvatarStoragePath(raw);
-    if (avatarPath.isEmpty) return raw;
-
-    // Private avatars bucket — sign via PHP BFF (service role).
-    if (MobileBackendService.isConfigured) {
-      try {
-        final token = await MobileBackendService.getSessionToken();
-        if (token != null && token.isNotEmpty) {
-          final res = await MobileBackendService().createSignedStorageUrl(
-            bucket: 'avatars',
-            path: avatarPath,
-            expiresIn: 60 * 60 * 12,
-          );
-          final signed = (res['signed_url']?.toString() ?? '').trim();
-          if (res['ok'] == true && signed.isNotEmpty) {
-            return signed;
-          }
-        }
-      } catch (_) {}
+    final lower = raw.toLowerCase();
+    if (lower.startsWith('data:')) {
+      return raw;
     }
 
-    try {
-      final signed = await _supabase.storage
-          .from('avatars')
-          .createSignedUrl(avatarPath, 60 * 60 * 24);
-      if (signed.trim().isNotEmpty) {
-        return signed.trim();
-      }
-    } catch (_) {}
+    final avatarPath = _extractAvatarStoragePath(raw);
+    if (avatarPath.isEmpty) {
+      // Non-storage URL (or already usable) — no BFF sign needed.
+      return raw;
+    }
 
-    return raw;
+    final cacheKey = avatarPath;
+    final cached = _signedAvatarCache[cacheKey];
+    if (cached != null &&
+        DateTime.now().toUtc().difference(cached.cachedAtUtc) <
+            _signedAvatarTtl &&
+        cached.url.trim().isNotEmpty) {
+      return cached.url;
+    }
+
+    final inFlight = _signedAvatarInFlight[cacheKey];
+    if (inFlight != null) {
+      return inFlight;
+    }
+
+    final future = () async {
+      // Private avatars bucket — sign via PHP BFF only (anon sign/info returns 400).
+      if (MobileBackendService.isConfigured) {
+        try {
+          final token = await MobileBackendService.getSessionToken();
+          if (token != null && token.isNotEmpty) {
+            final res = await MobileBackendService().createSignedStorageUrl(
+              bucket: 'avatars',
+              path: avatarPath,
+              expiresIn: 60 * 60 * 12,
+            );
+            final signed = (res['signed_url']?.toString() ?? '').trim();
+            if (res['ok'] == true && signed.isNotEmpty) {
+              _signedAvatarCache[cacheKey] = _CachedSignedAvatar(
+                url: signed,
+                cachedAtUtc: DateTime.now().toUtc(),
+              );
+              return signed;
+            }
+          }
+        } catch (_) {}
+      }
+      return raw;
+    }();
+
+    _signedAvatarInFlight[cacheKey] = future;
+    try {
+      return await future;
+    } finally {
+      _signedAvatarInFlight.remove(cacheKey);
+    }
   }
 
   /// Public wrapper for scanner overlays (private bucket paths need signing).
@@ -1441,6 +1509,7 @@ class EventService {
     required String participantPhotoUrl,
     required String participantStudentId,
     required bool dryRun,
+    bool isCheckOutMode = false,
   }) async {
     final effectiveScanAtIso = _normalizedScanTimestampIso(
       scannedAtIso,
@@ -1489,6 +1558,18 @@ class EventService {
         if (existing.isNotEmpty) {
           final attendance = Map<String, dynamic>.from(existing.first);
           final alreadyCheckedIn = _attendanceRecordCountsAsPresent(attendance);
+          if (isCheckOutMode && !alreadyCheckedIn) {
+            return {
+              'ok': false,
+              'error':
+                  'Cannot time out — this student has no time-in (marked absent).',
+              'status': 'absent_no_time_in',
+              'participant_name': participantName,
+              'participant_photo_url': participantPhotoUrl,
+              'participant_student_id': participantStudentId,
+              'action': 'check_out',
+            };
+          }
           if (alreadyCheckedIn) {
             if (!dryRun &&
                 _shouldApplyIncomingCheckIn(
@@ -1559,6 +1640,19 @@ class EventService {
             };
           }
           return successResponse();
+        }
+
+        if (isCheckOutMode) {
+          return {
+            'ok': false,
+            'error':
+                'Cannot time out — this student has no time-in (marked absent).',
+            'status': 'absent_no_time_in',
+            'participant_name': participantName,
+            'participant_photo_url': participantPhotoUrl,
+            'participant_student_id': participantStudentId,
+            'action': 'check_out',
+          };
         }
 
         if (dryRun) {
@@ -3144,6 +3238,28 @@ class EventService {
 
   final _mobileBackend = MobileBackendService();
 
+  /// Live scanner attendance % (BFF counts only). Online teacher/assist use.
+  Future<Map<String, dynamic>?> getScanAttendanceStats({
+    required String eventId,
+    String? sessionId,
+    String mode = 'check_in',
+  }) async {
+    if (eventId.trim().isEmpty || !MobileBackendService.isConfigured) {
+      return null;
+    }
+    try {
+      final res = await _mobileBackend.getScanAttendanceStats(
+        eventId: eventId,
+        sessionId: sessionId,
+        mode: mode,
+      );
+      if (res['ok'] != true) return null;
+      return res;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<Map<String, dynamic>?> getRegistrationSnapshot(String eventId) async {
     return _fetchRegistrationSnapshot(eventId);
   }
@@ -4352,6 +4468,10 @@ class EventService {
       return {
         'id': sessionId,
         'title': _sessionDisplayName(sessionMap),
+        'topic': (sessionMap['topic']?.toString() ?? '').trim(),
+        'location': (sessionMap['location']?.toString() ?? '').trim(),
+        'start_at': sessionMap['start_at']?.toString() ?? '',
+        'end_at': sessionMap['end_at']?.toString() ?? '',
         'check_in_at': checkInBySession[sessionId] ?? '',
         'check_out_at': checkOutBySession[sessionId] ?? '',
       };
@@ -5258,12 +5378,20 @@ class EventService {
           a['closes_at']?.toString() ?? '',
         ),
       );
+      final closedCtx = closed.first;
+      final eventRaw = closedCtx['event'];
+      final eventEnd = eventRaw is Map
+          ? _toUtcDate(eventRaw['end_at'])
+          : null;
+      final eventEnded = eventEnd != null && !nowUtc.isBefore(eventEnd);
       return {
         'ok': true,
         'status': 'closed',
         'scanner_enabled': false,
-        'message': 'Assigned scanner event has already ended.',
-        'context': closed.first,
+        'message': eventEnded
+            ? 'Assigned scanner event has already ended.'
+            : 'Scanning Closed',
+        'context': closedCtx,
         'assignments': events.length,
         'server_time': nowUtc.toIso8601String(),
       };
@@ -5954,6 +6082,17 @@ class EventService {
       }
 
       return roster;
+    }
+
+    // Prefer BFF roster (teacher + assigned student scanner). Anon PostgREST
+    // returns empty after lockdown, which used to skip the fallback.
+    if (MobileBackendService.isConfigured) {
+      try {
+        final participants = await getEventParticipants(eventId);
+        return buildFromParticipants(participants);
+      } catch (_) {
+        return <Map<String, dynamic>>[];
+      }
     }
 
     try {
@@ -7078,6 +7217,7 @@ class EventService {
           participantPhotoUrl: participantPhotoUrl,
           participantStudentId: participantStudentId,
           dryRun: dryRun,
+          isCheckOutMode: _isCheckOutScanMode(contextMap),
         );
       }
 
@@ -7095,9 +7235,19 @@ class EventService {
       }
 
       final attendance = Map<String, dynamic>.from(attendanceRows.first);
-      final alreadyCheckedIn =
-          _isCheckedInStatus(attendance['status']) ||
-          (attendance['check_in_at']?.toString().trim().isNotEmpty ?? false);
+      final alreadyCheckedIn = _attendanceHasValidTimeIn(attendance);
+      if (_isCheckOutScanMode(contextMap) && !alreadyCheckedIn) {
+        return {
+          'ok': false,
+          'error':
+              'Cannot time out — this student has no time-in (marked absent).',
+          'status': 'absent_no_time_in',
+          'participant_name': participantName,
+          'participant_photo_url': participantPhotoUrl,
+          'participant_student_id': participantStudentId,
+          'action': 'check_out',
+        };
+      }
       if (alreadyCheckedIn) {
         if (!dryRun &&
             _shouldApplyIncomingCheckIn(
@@ -7373,6 +7523,7 @@ class EventService {
           participantPhotoUrl: participantPhotoUrl,
           participantStudentId: participantStudentId,
           dryRun: dryRun,
+          isCheckOutMode: _isCheckOutScanMode(contextMap),
         );
       }
 
@@ -7390,9 +7541,19 @@ class EventService {
       }
 
       final attendance = Map<String, dynamic>.from(attendanceRows.first);
-      final alreadyCheckedIn =
-          _isCheckedInStatus(attendance['status']) ||
-          (attendance['check_in_at']?.toString().trim().isNotEmpty ?? false);
+      final alreadyCheckedIn = _attendanceHasValidTimeIn(attendance);
+      if (_isCheckOutScanMode(contextMap) && !alreadyCheckedIn) {
+        return {
+          'ok': false,
+          'error':
+              'Cannot time out — this student has no time-in (marked absent).',
+          'status': 'absent_no_time_in',
+          'participant_name': participantName,
+          'participant_photo_url': participantPhotoUrl,
+          'participant_student_id': participantStudentId,
+          'action': 'check_out',
+        };
+      }
       if (alreadyCheckedIn) {
         if (!dryRun &&
             _shouldApplyIncomingCheckIn(
@@ -7576,7 +7737,19 @@ class EventService {
       }
 
       final attendance = existingParams[0];
-      final isCheckedIn = _isCheckedInStatus(attendance['status']);
+      final isCheckedIn = _attendanceHasValidTimeIn(
+        Map<String, dynamic>.from(attendance as Map),
+      );
+      final attendanceStatus =
+          (attendance['status']?.toString() ?? '').trim().toLowerCase();
+      if (attendanceStatus == 'absent') {
+        return {
+          'ok': false,
+          'error':
+              'Cannot time out — this student has no time-in (marked absent).',
+          'status': 'absent_no_time_in',
+        };
+      }
 
       // 2. Get event info via ticket -> registration -> event
       Map<String, dynamic>? eventData;
@@ -8469,6 +8642,10 @@ class EventService {
     final visible = visibleResults.whereType<Map<String, dynamic>>().toList();
 
     visible.sort((a, b) {
+      final aDone = a['evaluation_complete'] == true;
+      final bDone = b['evaluation_complete'] == true;
+      if (aDone != bDone) return aDone ? 1 : -1;
+
       final aEnd = DateTime.tryParse(
         a['effective_end_at']?.toString() ?? a['end_at']?.toString() ?? '',
       );
@@ -8540,7 +8717,7 @@ class EventService {
       final events = await _supabase
           .from('events')
           .select(
-            'id,title,start_at,end_at,status,location,event_mode,event_structure',
+            'id,title,start_at,end_at,status,location,event_mode,event_structure,grace_time,early_out_enabled_at',
           )
           .inFilter('id', eventIds);
       for (final raw in List<Map<String, dynamic>>.from(events)) {
@@ -8572,17 +8749,44 @@ class EventService {
   Future<({Map<String, Map<String, dynamic>> map, bool resolved})>
   _loadStudentAbsenceReasonMap(String studentId) async {
     final mapped = <String, Map<String, dynamic>>{};
+    final sid = studentId.trim();
+    if (sid.isEmpty) {
+      return (map: mapped, resolved: true);
+    }
 
     try {
-      final rows = await _supabase
-          .from('attendance_absence_reasons')
-          .select(
-            'id,event_id,session_id,reason_text,review_status,admin_note,submitted_at,reviewed_at',
-          )
-          .eq('student_id', studentId)
-          .order('submitted_at', ascending: false);
+      List<Map<String, dynamic>> rows = const [];
+      if (MobileBackendService.isConfigured) {
+        final res = await _mobileBackend.secureRead(
+          table: 'attendance_absence_reasons',
+          select:
+              'id,event_id,session_id,reason_text,review_status,admin_note,submitted_at,reviewed_at',
+          filters: {'student_id': sid},
+          limit: 200,
+        );
+        if (res['ok'] != true) {
+          return (map: mapped, resolved: false);
+        }
+        if (res['rows'] is List) {
+          rows = List<Map<String, dynamic>>.from(
+            (res['rows'] as List).map(
+              (e) => Map<String, dynamic>.from(e as Map),
+            ),
+          );
+        }
+      } else {
+        rows = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('attendance_absence_reasons')
+              .select(
+                'id,event_id,session_id,reason_text,review_status,admin_note,submitted_at,reviewed_at',
+              )
+              .eq('student_id', sid)
+              .order('submitted_at', ascending: false),
+        );
+      }
 
-      for (final item in List<Map<String, dynamic>>.from(rows)) {
+      for (final item in rows) {
         final eventId = item['event_id']?.toString() ?? '';
         if (eventId.isEmpty) continue;
         final sessionId = item['session_id']?.toString() ?? '';
@@ -8679,8 +8883,10 @@ class EventService {
       if (sessions.isNotEmpty) {
         final presentBySession = <String, bool>{};
         final absentBySession = <String, bool>{};
+        final checkedOutBySession = <String, bool>{};
         var loadedFromSnapshot = false;
         var attendanceStateResolved = false;
+        var checkOutStateResolved = false;
 
         // Primary read path: server-side snapshot RPC (same source used by web-aligned fetch).
         try {
@@ -8707,6 +8913,12 @@ class EventService {
                 'absent') {
               absentBySession[sid] = true;
             }
+            if (_attendanceHasCheckOut(row)) {
+              checkedOutBySession[sid] = true;
+              checkOutStateResolved = true;
+            } else if (row.containsKey('check_out_at')) {
+              checkOutStateResolved = true;
+            }
           }
           loadedFromSnapshot = true;
           attendanceStateResolved = true;
@@ -8714,15 +8926,30 @@ class EventService {
           // Fallback to direct table reads for deployments without RPC.
         }
 
-        if (!loadedFromSnapshot &&
+        if ((!loadedFromSnapshot || !checkOutStateResolved) &&
             await _supportsEventSessionAttendanceTable()) {
           try {
-            final attendanceRows = await _supabase
-                .from('event_session_attendance')
-                .select('session_id,status,check_in_at')
-                .eq('registration_id', registrationId);
+            var sessionSelect = 'session_id,status,check_in_at,check_out_at';
+            List<Map<String, dynamic>> attendanceRows = const [];
+            try {
+              attendanceRows = List<Map<String, dynamic>>.from(
+                await _supabase
+                    .from('event_session_attendance')
+                    .select(sessionSelect)
+                    .eq('registration_id', registrationId),
+              );
+              checkOutStateResolved = true;
+            } catch (_) {
+              sessionSelect = 'session_id,status,check_in_at';
+              attendanceRows = List<Map<String, dynamic>>.from(
+                await _supabase
+                    .from('event_session_attendance')
+                    .select(sessionSelect)
+                    .eq('registration_id', registrationId),
+              );
+            }
             final mergedRows = <Map<String, dynamic>>[
-              ...List<Map<String, dynamic>>.from(attendanceRows),
+              ...attendanceRows,
             ];
 
             // Fallback for legacy rows where registration_id may be missing
@@ -8731,7 +8958,7 @@ class EventService {
             if (ticketId.isNotEmpty) {
               final byTicketRows = await _supabase
                   .from('event_session_attendance')
-                  .select('session_id,status,check_in_at')
+                  .select(sessionSelect)
                   .eq('ticket_id', ticketId);
               mergedRows.addAll(List<Map<String, dynamic>>.from(byTicketRows));
             }
@@ -8745,6 +8972,9 @@ class EventService {
                   'absent') {
                 absentBySession[sid] = true;
               }
+              if (_attendanceHasCheckOut(row)) {
+                checkedOutBySession[sid] = true;
+              }
             }
             attendanceStateResolved = true;
           } catch (_) {
@@ -8755,12 +8985,28 @@ class EventService {
         final supportsSessionId = await _supportsAttendanceColumn('session_id');
         if (supportsSessionId && ticketId.isNotEmpty) {
           try {
-            final attendanceRows = await _supabase
-                .from('attendance')
-                .select('session_id,status,check_in_at')
-                .eq('ticket_id', ticketId)
-                .not('session_id', 'is', null);
-            for (final row in List<Map<String, dynamic>>.from(attendanceRows)) {
+            var attendanceSelect = 'session_id,status,check_in_at,check_out_at';
+            List<Map<String, dynamic>> attendanceRows = const [];
+            try {
+              attendanceRows = List<Map<String, dynamic>>.from(
+                await _supabase
+                    .from('attendance')
+                    .select(attendanceSelect)
+                    .eq('ticket_id', ticketId)
+                    .not('session_id', 'is', null),
+              );
+              checkOutStateResolved = true;
+            } catch (_) {
+              attendanceSelect = 'session_id,status,check_in_at';
+              attendanceRows = List<Map<String, dynamic>>.from(
+                await _supabase
+                    .from('attendance')
+                    .select(attendanceSelect)
+                    .eq('ticket_id', ticketId)
+                    .not('session_id', 'is', null),
+              );
+            }
+            for (final row in attendanceRows) {
               final sid = row['session_id']?.toString() ?? '';
               if (sid.isEmpty) continue;
               if (_attendanceRecordCountsAsPresent(row)) {
@@ -8768,6 +9014,9 @@ class EventService {
               } else if ((row['status']?.toString().toLowerCase() ?? '') ==
                   'absent') {
                 absentBySession[sid] = true;
+              }
+              if (_attendanceHasCheckOut(row)) {
+                checkedOutBySession[sid] = true;
               }
             }
             attendanceStateResolved = true;
@@ -8823,15 +9072,27 @@ class EventService {
           continue;
         }
 
-        // Seminar-based lock should trigger once seminar scan windows are done.
-        // Using event.end_at here can delay lock incorrectly when admins set a
-        // much later end time than actual seminar attendance windows.
-        final lockAt =
+        // Absence lock: after all seminar time-in windows close.
+        // Timeout lock: only after ALL seminars (incl. time-out windows) are done.
+        final timeInLockAt =
             latestWindowClose ??
             latestSessionEnd ??
             _toUtcDate(event['end_at']);
-        if (lockAt != null && !nowUtc.isAfter(lockAt)) {
-          continue;
+
+        DateTime? latestTimeoutClose;
+        for (final meta in sessionMeta) {
+          final session = Map<String, dynamic>.from(
+            meta['session'] as Map<String, dynamic>,
+          );
+          final timeoutClose = _checkOutWindowClosesAt(
+            endRaw: meta['end_at'] ?? session['end_at'],
+            earlyOutEnabledAt: session['early_out_enabled_at'],
+          );
+          if (timeoutClose == null) continue;
+          if (latestTimeoutClose == null ||
+              timeoutClose.isAfter(latestTimeoutClose)) {
+            latestTimeoutClose = timeoutClose;
+          }
         }
 
         final hasAnyPresent = sessionMeta.any((meta) {
@@ -8840,91 +9101,136 @@ class EventService {
           return presentBySession[sid] == true;
         });
 
-        final missedSessions = <Map<String, dynamic>>[];
-        for (final meta in sessionMeta) {
-          final sid = meta['session_id']?.toString() ?? '';
-          if (sid.isEmpty) continue;
-          final closesAt = meta['closes_at'] as DateTime;
-          if (!nowUtc.isAfter(closesAt)) continue;
-          if (presentBySession[sid] == true) continue;
-          // Align with web participant behavior:
-          // once a session window is closed and student has no present record,
-          // treat it as missed/absent for lock purposes (even if explicit absent
-          // row has not been materialized yet).
-          missedSessions.add(meta);
+        final missedTimeInSessions = <Map<String, dynamic>>[];
+        if (timeInLockAt != null && nowUtc.isAfter(timeInLockAt)) {
+          for (final meta in sessionMeta) {
+            final sid = meta['session_id']?.toString() ?? '';
+            if (sid.isEmpty) continue;
+            final closesAt = meta['closes_at'] as DateTime;
+            if (!nowUtc.isAfter(closesAt)) continue;
+            if (presentBySession[sid] == true) continue;
+            missedTimeInSessions.add(meta);
+          }
         }
 
-        if (missedSessions.isEmpty) {
-          continue;
-        }
-
-        if (!hasAnyPresent) {
-          // If student attended none of the seminars, show one event-level lock item.
+        if (missedTimeInSessions.isNotEmpty && !hasAnyPresent) {
           final scopeKey = _absenceScopeKey(eventId);
-          if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
-            continue;
+          if (!reasonMap.containsKey(scopeKey) && !seenKeys.contains(scopeKey)) {
+            seenKeys.add(scopeKey);
+            final windowOpensAt =
+                earliestSessionStart ?? _toUtcDate(event['start_at']) ?? nowUtc;
+            final windowClosesAt =
+                latestWindowClose ??
+                timeInLockAt ??
+                windowOpensAt.add(const Duration(minutes: 30));
+            pending.add({
+              'scope_key': scopeKey,
+              'scope_type': 'event',
+              'lock_reason': 'absent',
+              'lock_message':
+                  'You did not time in for this event. Submit your reason to continue.',
+              'event_id': eventId,
+              'event_title': eventTitle,
+              'event_location': eventLocation,
+              'event_start_at': event['start_at'],
+              'event_end_at': event['end_at'],
+              'session_id': null,
+              'session_title': null,
+              'session_start_at': null,
+              'session_end_at': null,
+              'window_minutes': 30,
+              'window_opens_at': windowOpensAt.toIso8601String(),
+              'window_closes_at': windowClosesAt.toIso8601String(),
+            });
           }
-          seenKeys.add(scopeKey);
-
-          final windowOpensAt =
-              earliestSessionStart ?? _toUtcDate(event['start_at']) ?? nowUtc;
-          final windowClosesAt =
-              latestWindowClose ??
-              lockAt ??
-              windowOpensAt.add(const Duration(minutes: 30));
-
-          pending.add({
-            'scope_key': scopeKey,
-            'scope_type': 'event',
-            'event_id': eventId,
-            'event_title': eventTitle,
-            'event_location': eventLocation,
-            'event_start_at': event['start_at'],
-            'event_end_at': event['end_at'],
-            'session_id': null,
-            'session_title': null,
-            'session_start_at': null,
-            'session_end_at': null,
-            'window_minutes': 30,
-            'window_opens_at': windowOpensAt.toIso8601String(),
-            'window_closes_at': windowClosesAt.toIso8601String(),
-          });
-          continue;
+        } else {
+          for (final meta in missedTimeInSessions) {
+            final sessionId = meta['session_id']?.toString() ?? '';
+            if (sessionId.isEmpty) continue;
+            final scopeKey = _absenceScopeKey(eventId, sessionId: sessionId);
+            if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
+              continue;
+            }
+            seenKeys.add(scopeKey);
+            final session = Map<String, dynamic>.from(
+              meta['session'] as Map<String, dynamic>,
+            );
+            final startAt = meta['start_at'] as DateTime;
+            final closesAt = meta['closes_at'] as DateTime;
+            final windowMinutes = meta['window_minutes'] as int;
+            final sessionTitle = _sessionDisplayName(session);
+            pending.add({
+              'scope_key': scopeKey,
+              'scope_type': 'session',
+              'lock_reason': 'absent',
+              'lock_message':
+                  'You did not time in for $sessionTitle. Submit your reason to continue.',
+              'event_id': eventId,
+              'event_title': eventTitle,
+              'event_location': eventLocation,
+              'event_start_at': event['start_at'],
+              'event_end_at': event['end_at'],
+              'session_id': sessionId,
+              'session_title': sessionTitle,
+              'session_start_at': session['start_at'],
+              'session_end_at': session['end_at'],
+              'window_minutes': windowMinutes,
+              'window_opens_at': startAt.toIso8601String(),
+              'window_closes_at': closesAt.toIso8601String(),
+            });
+          }
         }
 
-        for (final meta in missedSessions) {
-          final sessionId = meta['session_id']?.toString() ?? '';
-          if (sessionId.isEmpty) continue;
+        // Missed time-out: wait until every seminar time-out window has closed.
+        final timeoutReady =
+            checkOutStateResolved &&
+            latestTimeoutClose != null &&
+            nowUtc.isAfter(latestTimeoutClose);
+        if (timeoutReady) {
+          for (final meta in sessionMeta) {
+            final sessionId = meta['session_id']?.toString() ?? '';
+            if (sessionId.isEmpty) continue;
+            if (presentBySession[sessionId] != true) continue;
+            if (checkedOutBySession[sessionId] == true) continue;
 
-          final scopeKey = _absenceScopeKey(eventId, sessionId: sessionId);
-          if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
-            continue;
+            final scopeKey = _absenceScopeKey(eventId, sessionId: sessionId);
+            if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
+              continue;
+            }
+            seenKeys.add(scopeKey);
+
+            final session = Map<String, dynamic>.from(
+              meta['session'] as Map<String, dynamic>,
+            );
+            final sessionTitle = _sessionDisplayName(session);
+            final timeoutClose = _checkOutWindowClosesAt(
+              endRaw: meta['end_at'] ?? session['end_at'],
+              earlyOutEnabledAt: session['early_out_enabled_at'],
+            );
+            final timeoutOpen =
+                _asUtcDate(meta['end_at'] ?? session['end_at']) ??
+                (meta['start_at'] as DateTime);
+            pending.add({
+              'scope_key': scopeKey,
+              'scope_type': 'session',
+              'lock_reason': 'missed_timeout',
+              'lock_message':
+                  'You timed in to $sessionTitle but did not time out. Submit your reason to continue.',
+              'event_id': eventId,
+              'event_title': eventTitle,
+              'event_location': eventLocation,
+              'event_start_at': event['start_at'],
+              'event_end_at': event['end_at'],
+              'session_id': sessionId,
+              'session_title': sessionTitle,
+              'session_start_at': session['start_at'],
+              'session_end_at': session['end_at'],
+              'window_minutes': 60,
+              'window_opens_at': timeoutOpen.toIso8601String(),
+              'window_closes_at':
+                  (timeoutClose ?? latestTimeoutClose).toIso8601String(),
+            });
           }
-          seenKeys.add(scopeKey);
-
-          final session = Map<String, dynamic>.from(
-            meta['session'] as Map<String, dynamic>,
-          );
-          final startAt = meta['start_at'] as DateTime;
-          final closesAt = meta['closes_at'] as DateTime;
-          final windowMinutes = meta['window_minutes'] as int;
-
-          pending.add({
-            'scope_key': scopeKey,
-            'scope_type': 'session',
-            'event_id': eventId,
-            'event_title': eventTitle,
-            'event_location': eventLocation,
-            'event_start_at': event['start_at'],
-            'event_end_at': event['end_at'],
-            'session_id': sessionId,
-            'session_title': _sessionDisplayName(session),
-            'session_start_at': session['start_at'],
-            'session_end_at': session['end_at'],
-            'window_minutes': windowMinutes,
-            'window_opens_at': startAt.toIso8601String(),
-            'window_closes_at': closesAt.toIso8601String(),
-          });
         }
 
         continue;
@@ -8942,23 +9248,43 @@ class EventService {
       }
 
       var present = false;
+      var checkedOut = false;
       var attendanceStateResolved = false;
+      var checkOutStateResolved = false;
       if (ticketId.isNotEmpty) {
         try {
           final attendanceRows = await _supabase
               .from('attendance')
-              .select('status,check_in_at')
+              .select('status,check_in_at,check_out_at')
               .eq('ticket_id', ticketId)
               .limit(50);
           for (final row in List<Map<String, dynamic>>.from(attendanceRows)) {
             if (_attendanceRecordCountsAsPresent(row)) {
               present = true;
-              break;
+            }
+            if (_attendanceHasCheckOut(row)) {
+              checkedOut = true;
             }
           }
           attendanceStateResolved = true;
+          checkOutStateResolved = true;
         } catch (_) {
-          attendanceStateResolved = false;
+          try {
+            final attendanceRows = await _supabase
+                .from('attendance')
+                .select('status,check_in_at')
+                .eq('ticket_id', ticketId)
+                .limit(50);
+            for (final row in List<Map<String, dynamic>>.from(attendanceRows)) {
+              if (_attendanceRecordCountsAsPresent(row)) {
+                present = true;
+                break;
+              }
+            }
+            attendanceStateResolved = true;
+          } catch (_) {
+            attendanceStateResolved = false;
+          }
         }
       }
 
@@ -8967,12 +9293,50 @@ class EventService {
         continue;
       }
 
-      if (present) continue;
+      if (!present) {
+        // Simple-event lock should align with the rest of the attendance flow:
+        // once the grace window is closed and there is no present record,
+        // treat the registration as missed/absent even if the explicit absent
+        // row has not been materialized yet.
+        final scopeKey = _absenceScopeKey(eventId);
+        if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
+          continue;
+        }
+        seenKeys.add(scopeKey);
 
-      // Simple-event lock should align with the rest of the attendance flow:
-      // once the grace window is closed and there is no present record,
-      // treat the registration as missed/absent even if the explicit absent
-      // row has not been materialized yet.
+        pending.add({
+          'scope_key': scopeKey,
+          'scope_type': 'event',
+          'lock_reason': 'absent',
+          'lock_message':
+              'You did not time in for this event. Submit your reason to continue.',
+          'event_id': eventId,
+          'event_title': eventTitle,
+          'event_location': eventLocation,
+          'event_start_at': event['start_at'],
+          'event_end_at': event['end_at'],
+          'session_id': null,
+          'session_title': null,
+          'session_start_at': null,
+          'session_end_at': null,
+          'window_minutes': 30,
+          'window_opens_at': eventStartAt.toIso8601String(),
+          'window_closes_at': closesAt.toIso8601String(),
+        });
+        continue;
+      }
+
+      if (!checkOutStateResolved || checkedOut) {
+        continue;
+      }
+
+      final timeoutClose = _checkOutWindowClosesAt(
+        endRaw: event['end_at'],
+        earlyOutEnabledAt: event['early_out_enabled_at'],
+      );
+      if (timeoutClose == null || !nowUtc.isAfter(timeoutClose)) {
+        continue;
+      }
 
       final scopeKey = _absenceScopeKey(eventId);
       if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
@@ -8980,9 +9344,13 @@ class EventService {
       }
       seenKeys.add(scopeKey);
 
+      final timeoutOpen = _toUtcDate(event['end_at']) ?? closesAt;
       pending.add({
         'scope_key': scopeKey,
         'scope_type': 'event',
+        'lock_reason': 'missed_timeout',
+        'lock_message':
+            'You timed in but did not time out for this event. Submit your reason to continue.',
         'event_id': eventId,
         'event_title': eventTitle,
         'event_location': eventLocation,
@@ -8992,9 +9360,9 @@ class EventService {
         'session_title': null,
         'session_start_at': null,
         'session_end_at': null,
-        'window_minutes': 30,
-        'window_opens_at': eventStartAt.toIso8601String(),
-        'window_closes_at': closesAt.toIso8601String(),
+        'window_minutes': 60,
+        'window_opens_at': timeoutOpen.toIso8601String(),
+        'window_closes_at': timeoutClose.toIso8601String(),
       });
     }
 
@@ -9028,15 +9396,34 @@ class EventService {
     final nowIso = DateTime.now().toUtc().toIso8601String();
 
     try {
-      final existingRows = await _supabase
-          .from('attendance_absence_reasons')
-          .select('id,session_id')
-          .eq('student_id', studentId)
-          .eq('event_id', eventId)
-          .limit(100);
+      List<Map<String, dynamic>> existingRows = const [];
+      if (MobileBackendService.isConfigured) {
+        final existingRes = await _mobileBackend.secureRead(
+          table: 'attendance_absence_reasons',
+          select: 'id,session_id',
+          filters: {'student_id': studentId, 'event_id': eventId},
+          limit: 100,
+        );
+        if (existingRes['ok'] == true && existingRes['rows'] is List) {
+          existingRows = List<Map<String, dynamic>>.from(
+            (existingRes['rows'] as List).map(
+              (e) => Map<String, dynamic>.from(e as Map),
+            ),
+          );
+        }
+      } else {
+        existingRows = List<Map<String, dynamic>>.from(
+          await _supabase
+              .from('attendance_absence_reasons')
+              .select('id,session_id')
+              .eq('student_id', studentId)
+              .eq('event_id', eventId)
+              .limit(100),
+        );
+      }
 
       String existingId = '';
-      for (final row in List<Map<String, dynamic>>.from(existingRows)) {
+      for (final row in existingRows) {
         final rowSessionId = row['session_id']?.toString() ?? '';
         final isMatch = sid.isEmpty
             ? rowSessionId.isEmpty
@@ -9050,13 +9437,10 @@ class EventService {
       final payload = <String, dynamic>{
         'student_id': studentId,
         'event_id': eventId,
-        'session_id': sid.isEmpty ? null : sid,
         'reason_text': reason,
         'review_status': 'pending',
-        'admin_note': null,
-        'reviewed_at': null,
-        'reviewed_by': null,
         'submitted_at': nowIso,
+        if (sid.isNotEmpty) 'session_id': sid,
       };
 
       if (MobileBackendService.isConfigured) {
@@ -9174,6 +9558,16 @@ class _CachedStudentRequirements {
   const _CachedStudentRequirements({
     required this.items,
     required this.cachedAt,
+  });
+}
+
+class _CachedSignedAvatar {
+  final String url;
+  final DateTime cachedAtUtc;
+
+  const _CachedSignedAvatar({
+    required this.url,
+    required this.cachedAtUtc,
   });
 }
 

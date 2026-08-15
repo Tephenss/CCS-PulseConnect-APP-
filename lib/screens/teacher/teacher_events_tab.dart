@@ -13,6 +13,7 @@ import 'teacher_event_manage.dart';
 import 'teacher_proposal_requirements_page.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/teacher_theme_utils.dart';
+import '../../utils/app_page_routes.dart';
 
 class TeacherEventsTab extends StatefulWidget {
   const TeacherEventsTab({super.key});
@@ -203,7 +204,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
                   onTap: () async {
                     final refresh = await Navigator.push(
                       context,
-                      MaterialPageRoute(
+                      AppPageRoute(
                         builder: (_) => const TeacherCreateEvent(),
                       ),
                     );
@@ -494,7 +495,7 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
         final isProposalFlow = status == 'pending';
         final refresh = await Navigator.push(
           context,
-          MaterialPageRoute(
+          AppPageRoute(
             builder: (_) => isProposalFlow
                 ? TeacherProposalRequirementsPage(event: event)
                 : TeacherEventManage(event: event),

@@ -4,24 +4,31 @@ import '../services/auth_service.dart';
 import '../services/device_performance_service.dart';
 import '../services/event_service.dart';
 import '../services/notification_service.dart';
-import '../screens/student/student_certificates.dart';
-import '../screens/student/student_event_details.dart';
-import '../screens/teacher/teacher_event_manage.dart';
-import '../screens/teacher/teacher_proposal_requirements_page.dart';
 import 'custom_loader.dart';
 import '../utils/teacher_theme_utils.dart';
+import '../utils/notification_navigation.dart';
 import '../utils/app_page_routes.dart';
-
 import '../screens/notifications_page.dart';
 
-Future<int?> showNotificationsModal(BuildContext context) {
+bool _isTeacherChrome(BuildContext context) {
+  final primary = Theme.of(context).colorScheme.primary.toARGB32();
+  return primary == TeacherThemeUtils.primary.toARGB32() ||
+      primary == TeacherThemeUtils.mid.toARGB32() ||
+      primary == TeacherThemeUtils.dark.toARGB32();
+}
+
+Future<int?> showNotificationsModal(
+  BuildContext context, {
+  bool? isTeacherTheme,
+}) {
   if (!context.mounted) {
     return Future<int?>.value(null);
   }
 
+  final teacher = isTeacherTheme ?? _isTeacherChrome(context);
   return Navigator.of(context).push<int>(
     AppPageRoute(
-      builder: (_) => const NotificationsPage(),
+      builder: (_) => NotificationsPage(isTeacherTheme: teacher),
     ),
   );
 }
@@ -63,7 +70,7 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
 
     if (!mounted) return;
     setState(() {
-      _isTeacherTheme = role == 'teacher';
+      _isTeacherTheme = NotificationNavigation.isTeacherRole(role);
       _notifications = notifs;
       _isLoading = false;
     });
@@ -132,8 +139,8 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
                     decoration: BoxDecoration(
                       gradient: LinearGradient(
                         colors: _isTeacherTheme
-                            ? [const Color(0xFF380808), const Color(0xFF6B1515)]
-                            : [const Color(0xFF1C0A0A), const Color(0xFF7F1D1D), const Color(0xFF9A3412)],
+                            ? TeacherThemeUtils.chromeGradient
+                            : const [Color(0xFF1C0A0A), Color(0xFF7F1D1D), Color(0xFF9A3412)],
                         begin: Alignment.topLeft,
                         end: Alignment.bottomRight,
                       ),
@@ -580,95 +587,13 @@ class _NotificationsFloatingModalState extends State<_NotificationsFloatingModal
   }
 
   Future<void> _openNotificationTarget(AppNotification n) async {
-    final role = (await _auth.getCurrentUser())?['role']?.toString().toLowerCase() ?? 'student';
     if (!mounted) return;
-
-    if (n.id.startsWith('cert_')) {
-      Navigator.pop(context);
-      await Future<void>.delayed(const Duration(milliseconds: 120));
-      if (!mounted) return;
-      Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => const StudentCertificates()),
-      );
-      return;
-    }
-
-    final eventId = n.eventId?.trim() ?? '';
-    if (eventId.isEmpty) return;
-
-    Map<String, dynamic>? event;
-    try {
-      event = await _eventService.getEventById(eventId);
-    } catch (_) {
-      event = null;
-    }
-
-    if (role == 'teacher') {
-      if (event != null && mounted) {
-        Navigator.pop(context);
-        await Future<void>.delayed(const Duration(milliseconds: 120));
-        if (!mounted) return;
-        final opensProposalRequirements =
-            n.id.startsWith('proposal_req_') ||
-            n.id.startsWith('proposal_under_review_');
-        if (opensProposalRequirements) {
-          Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => TeacherProposalRequirementsPage(event: event!),
-            ),
-          );
-          return;
-        }
-        Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => TeacherEventManage(event: event!)),
-        );
-        return;
-      }
-    }
-
-    if (role == 'student' && event != null) {
-      final user = await _auth.getCurrentUser();
-      final userId = user?['id']?.toString().trim() ?? '';
-      String? yearLevel;
-      String? courseCode;
-      String? specialization;
-      if (userId.isNotEmpty) {
-        final scope = await _eventService.getStudentTargetScope(userId);
-        yearLevel = scope['yearLevel'];
-        courseCode = scope['courseCode'];
-        specialization = scope['specialization'];
-      } else {
-        yearLevel = await _auth.getStudentYearLevel();
-        courseCode = await _auth.getStudentCourseCode();
-      }
-      final allowed = _eventService.isStudentAllowedForEvent(
-        event,
-        yearLevel: yearLevel,
-        courseCode: courseCode,
-        specialization: specialization,
-      );
-      if (!allowed) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('This event is not available for your course/year level.'),
-          ),
-        );
-        return;
-      }
-    }
-
-    if (!mounted) return;
-    Navigator.pop(context);
-    await Future<void>.delayed(const Duration(milliseconds: 120));
-    if (!mounted) return;
-    Navigator.of(context).push(
-      AppPageRoute(
-        builder: (_) => StudentEventDetails(
-          eventId: eventId,
-          initialEvent: event,
-        ),
-      ),
+    await NotificationNavigation.open(
+      context,
+      n,
+      auth: _auth,
+      eventService: _eventService,
+      popFirst: true,
     );
   }
 }

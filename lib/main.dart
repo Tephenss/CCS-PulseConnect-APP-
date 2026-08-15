@@ -25,16 +25,28 @@ import 'services/notification_service.dart';
 import 'utils/course_theme_utils.dart';
 import 'utils/teacher_theme_utils.dart';
 import 'utils/app_restarter.dart';
+import 'utils/app_page_routes.dart';
+import 'widgets/app_snackbar.dart';
 
-void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  // Never leave Flutter debug outlines on (green widget/size borders).
+void _disableFlutterDebugOutlines() {
+  // Flutter debug paint / inspector draws a neon green-cyan border around the
+  // whole screen. Force it off every time — DevTools can turn it back on.
   debugPaintSizeEnabled = false;
   debugPaintBaselinesEnabled = false;
   debugPaintLayerBordersEnabled = false;
   debugPaintPointersEnabled = false;
   debugRepaintRainbowEnabled = false;
+  debugProfilePaintsEnabled = false;
+  debugProfileLayoutsEnabled = false;
+  debugDisableClipLayers = false;
+  debugDisablePhysicalShapeLayers = false;
+  debugDisableOpacityLayers = false;
+  WidgetsApp.debugShowWidgetInspectorOverride = false;
+}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  _disableFlutterDebugOutlines();
 
   // Detect low/mid/high device + load Performance Mode preference.
   await DevicePerformance.instance.init();
@@ -85,12 +97,12 @@ void main() async {
         ? 'CS'
         : 'IT';
 
-    // Daily OTP reset (12:00 AM Asia/Manila): force logout so the user must
-    // re-login + verify before entering home.
+    // Daily OTP reset (12:00 AM Asia/Manila): clear in-app session so the
+    // user must re-login + verify. Keep FCM token (same phone / same person).
     // Install trust miss is handled at the login gate (not here) so a brief
     // API blip / first-boot does not wipe a still-valid session.
     if (AuthService.requiresDailyEmailVerification(userData)) {
-      await authService.logout();
+      await authService.logout(unregisterPush: false);
       isLoggedIn = false;
       role = 'student';
       studentCourse = 'IT';
@@ -103,9 +115,10 @@ void main() async {
       }
     }
   } else if (firebaseReady) {
-    // Clear orphan device tokens left after OTP/logout so Welcome/Login
-    // screens never receive account pushes.
-    await PushNotificationService().unregisterCurrentToken();
+    // Manual/orphan logout: drop device token. Daily OTP gate keeps it.
+    if (!await AuthService.shouldKeepFcmToken()) {
+      await PushNotificationService().unregisterCurrentToken();
+    }
   }
 
   runApp(
@@ -175,6 +188,7 @@ class PulseConnectAppState extends State<PulseConnectApp>
   @override
   void initState() {
     super.initState();
+    _disableFlutterDebugOutlines();
     WidgetsBinding.instance.addObserver(this);
     _currentRole = widget.userRole;
     _currentStudentCourse = widget.studentCourse;
@@ -296,7 +310,7 @@ class PulseConnectAppState extends State<PulseConnectApp>
       }
       if (AuthService.isAuthFlowBusy || AuthService.isOtpGateActive) return;
 
-      await _authService.logout();
+      await _authService.logout(unregisterPush: false);
       if (!mounted) return;
       setState(() {
         _enteredApp = false;
@@ -417,6 +431,11 @@ class PulseConnectAppState extends State<PulseConnectApp>
           ? const TeacherHome()
           : const StudentHome(),
     );
+    unawaited(AuthService.clearFcmKeepFlag());
+    unawaited(PushNotificationService().updateToken());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(PushNotificationService().consumePendingTap());
+    });
   }
 
   Widget _buildRootHome() {
@@ -477,22 +496,13 @@ class PulseConnectAppState extends State<PulseConnectApp>
   void _showConnectivityNotice({required bool offline}) {
     _lastShownConnectivityState = offline;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final messenger = PulseConnectApp.scaffoldMessengerKey.currentState;
-      if (messenger == null) return;
-      messenger.clearSnackBars();
-      messenger.showSnackBar(
-        SnackBar(
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: offline
-              ? const Color(0xFFD97706)
-              : const Color(0xFF047857),
-          content: Text(
-            offline
-                ? 'Offline mode detected. Using the latest synced data on this device.'
-                : 'You are back online. Syncing the latest data now.',
-          ),
-        ),
-      );
+      final ctx = PulseConnectApp.navigatorKey.currentContext;
+      if (ctx == null) return;
+      if (offline) {
+        AppSnackBar.warning(ctx, 'Offline mode detected. Using the latest synced data on this device.', title: 'No Connection');
+      } else {
+        AppSnackBar.success(ctx, 'You are back online. Syncing the latest data now.', title: 'Connected');
+      }
     });
   }
 
@@ -535,6 +545,7 @@ class PulseConnectAppState extends State<PulseConnectApp>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    _disableFlutterDebugOutlines();
     if (state == AppLifecycleState.resumed) {
       NotificationService().resumePolling();
       unawaited(_reconcileConnectivityState());
@@ -616,12 +627,19 @@ class PulseConnectAppState extends State<PulseConnectApp>
       scaffoldMessengerKey: PulseConnectApp.scaffoldMessengerKey,
       title: 'CCS PulseConnect',
       debugShowCheckedModeBanner: false,
+      debugShowMaterialGrid: false,
+      showPerformanceOverlay: false,
+      checkerboardRasterCacheImages: false,
+      checkerboardOffscreenLayers: false,
+      showSemanticsDebugger: false,
       theme: _getTheme(_currentRole, _currentStudentCourse),
       builder: (context, child) {
-        // Seal the root so no theme/seed color can peek through as edge lines.
-        return ColoredBox(
-          color: Colors.white,
-          child: child ?? const SizedBox.shrink(),
+        _disableFlutterDebugOutlines();
+        return ClipRect(
+          child: ColoredBox(
+            color: const Color(0xFF09090B),
+            child: child ?? const SizedBox.shrink(),
+          ),
         );
       },
       home: _buildRootHome(),
@@ -639,6 +657,12 @@ class PulseConnectAppState extends State<PulseConnectApp>
 
     return ThemeData(
       useMaterial3: true,
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: {
+          TargetPlatform.android: AppPageTransitionsBuilder(),
+          TargetPlatform.iOS: AppPageTransitionsBuilder(),
+        },
+      ),
       colorScheme: ColorScheme.fromSeed(
         seedColor: primaryColor,
         primary: primaryColor,
@@ -653,7 +677,14 @@ class PulseConnectAppState extends State<PulseConnectApp>
         surfaceContainerHigh: const Color(0xFFE5E7EB),
         surfaceContainerHighest: const Color(0xFFE5E7EB),
         surfaceTint: Colors.transparent,
+        tertiary: primaryColor,
+        outline: const Color(0xFFE5E7EB),
+        outlineVariant: const Color(0xFFE5E7EB),
       ),
+      focusColor: Colors.transparent,
+      hoverColor: primaryColor.withValues(alpha: 0.04),
+      highlightColor: primaryColor.withValues(alpha: 0.08),
+      splashColor: primaryColor.withValues(alpha: 0.12),
       textTheme: GoogleFonts.interTextTheme(),
       scaffoldBackgroundColor: Colors.white,
       appBarTheme: AppBarTheme(

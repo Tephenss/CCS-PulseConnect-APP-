@@ -126,8 +126,8 @@ class DevicePerformance extends ChangeNotifier {
   int? get ramMb => _ramMb;
 
   bool get enableShine => _tier == PerformanceTier.high;
-  // Welcome logo collision + other decorative loops: on for balanced & high.
-  // Battery Saver keeps a static mid-frame logo (see welcome_screen.dart).
+  // Decorative loops elsewhere (tickets, splash, etc.). Welcome page 1
+  // always animates regardless of tier.
   bool get enableDecorativeMotion => _tier != PerformanceTier.low;
   bool get enableHeavyShadows => _tier == PerformanceTier.high;
   bool get enableShadows => _tier != PerformanceTier.low;

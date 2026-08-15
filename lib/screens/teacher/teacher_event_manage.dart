@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -19,7 +20,9 @@ import '../../services/mobile_backend_service.dart';
 import '../../services/offline_sync_service.dart';
 import '../../services/device_performance_service.dart';
 import '../../services/scan_ingress_signal_service.dart';
+import '../../services/event_live_service.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/safe_circle_avatar.dart';
 import '../../widgets/shiny_text.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/teacher_theme_utils.dart';
@@ -55,7 +58,7 @@ class TeacherEventManage extends StatefulWidget {
 }
 
 class _TeacherEventManageState extends State<TeacherEventManage>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   static final Map<String, _TeacherManageSnapshot> _manageCache = {};
   static const Duration _manageUiTtl = Duration(minutes: 3);
 
@@ -77,6 +80,8 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   bool _isApprovalPhase = false;
   RealtimeChannel? _attendanceChannel;
   Timer? _participantsRefreshDebounce;
+  Timer? _rosterLivePollTimer;
+  StreamSubscription<String>? _eventLiveSubscription;
   Set<String> _eventSessionIds = <String>{};
   bool _usingCachedParticipants = false;
   int _pendingOfflineParticipantCount = 0;
@@ -93,6 +98,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   bool _isRefreshingEvent = false;
   bool _isLoadingRoster = false;
   bool _rosterLoaded = false;
+  final Map<String, String> _signedAvatarCache = {};
   int? _lastScanIngressRevision;
   bool _scanIngressListenerBound = false;
   final GlobalKey _eventQrKey = GlobalKey();
@@ -101,6 +107,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _event = Map<String, dynamic>.from(widget.event);
     final status = (_event['status']?.toString() ?? 'pending')
         .toLowerCase();
@@ -116,11 +123,14 @@ class _TeacherEventManageState extends State<TeacherEventManage>
       _isLoadingRoster = true;
     }
     _loadData();
+    _bindEventManageRealtime();
+    _bindEventLiveListener();
+    _startRosterLivePoll();
     if (!_isApprovalPhase) {
       _bindScanIngressListener();
     }
     unawaited(_refreshEarlyOutStatus());
-    _earlyOutTick = Timer.periodic(const Duration(seconds: 15), (_) {
+    _earlyOutTick = Timer.periodic(const Duration(seconds: 30), (_) {
       unawaited(_refreshEarlyOutStatus(silent: true));
     });
   }
@@ -235,8 +245,10 @@ class _TeacherEventManageState extends State<TeacherEventManage>
         }
       });
       if (nextOffline) {
+        _rosterLivePollTimer?.cancel();
         unawaited(_persistCurrentSnapshotToCache());
       } else {
+        _startRosterLivePoll();
         unawaited(_loadData());
       }
     });
@@ -553,9 +565,11 @@ class _TeacherEventManageState extends State<TeacherEventManage>
       final offlineParticipants = List<Map<String, dynamic>>.from(
         cachedData['offline_participants'] as List,
       );
-      final mergedParticipants = _mergeParticipantSources(
-        baseParticipants: participants,
-        offlineParticipants: offlineParticipants,
+      final mergedParticipants = await _withSignedParticipantPhotos(
+        _mergeParticipantSources(
+          baseParticipants: participants,
+          offlineParticipants: offlineParticipants,
+        ),
       );
       final eventSessionIds = eventSessions
           .map((s) => s['id']?.toString() ?? '')
@@ -590,11 +604,15 @@ class _TeacherEventManageState extends State<TeacherEventManage>
               .where(_participantHasPendingSync)
               .length;
           _usingCachedParticipants = offlineParticipants.isNotEmpty;
+          _event = {
+            ..._event,
+            'registered_count': _joinedParticipantCount,
+          };
         });
         _storeManageSnapshot();
         unawaited(_refreshEarlyOutStatus());
       }
-      _bindAttendanceRealtime();
+      _bindEventManageRealtime();
     } catch (_) {
       if (mounted) {
         final fallbackParticipants = List<Map<String, dynamic>>.from(
@@ -656,10 +674,51 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     }
   }
 
-  void _scheduleParticipantsRefresh() {
+  void _scheduleParticipantsRefresh({bool includeEventDetails = true}) {
     _participantsRefreshDebounce?.cancel();
-    _participantsRefreshDebounce = Timer(const Duration(milliseconds: 500), () {
+    _participantsRefreshDebounce = Timer(const Duration(milliseconds: 700), () {
       unawaited(_refreshParticipantsOnly());
+      if (!includeEventDetails) return;
+      final eventId =
+          (_event['id'] ?? widget.event['id'])?.toString().trim() ?? '';
+      if (eventId.isNotEmpty) {
+        unawaited(_refreshEventDetails(eventId, forceFresh: true));
+      }
+    });
+  }
+
+  bool _isManageLiveReason(String reason) {
+    final core = reason.startsWith('offline:')
+        ? reason.substring('offline:'.length)
+        : reason;
+    return core == 'registrations' ||
+        core.startsWith('registrations') ||
+        core == 'tickets' ||
+        core.startsWith('tickets') ||
+        core == 'attendance' ||
+        core.startsWith('attendance') ||
+        core == 'events' ||
+        core.startsWith('events') ||
+        core.startsWith('push') ||
+        core.contains('event_session_attendance');
+  }
+
+  void _bindEventLiveListener() {
+    _eventLiveSubscription?.cancel();
+    _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
+      if (!mounted) return;
+      if (!_isManageLiveReason(reason)) return;
+      _scheduleParticipantsRefresh();
+    });
+  }
+
+  void _startRosterLivePoll() {
+    _rosterLivePollTimer?.cancel();
+    if (_isOfflineMode) return;
+    // Realtime already drives updates; this is a quiet safety net only.
+    _rosterLivePollTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!mounted || _isOfflineMode) return;
+      _scheduleParticipantsRefresh(includeEventDetails: false);
     });
   }
 
@@ -690,9 +749,11 @@ class _TeacherEventManageState extends State<TeacherEventManage>
               isTeacher: true,
               eventId: eventId,
             );
-      final mergedParticipants = _mergeParticipantSources(
-        baseParticipants: participants,
-        offlineParticipants: offlineParticipants,
+      final mergedParticipants = await _withSignedParticipantPhotos(
+        _mergeParticipantSources(
+          baseParticipants: participants,
+          offlineParticipants: offlineParticipants,
+        ),
       );
       await _appCacheService.saveJsonList(
         _participantsCacheKey(eventId),
@@ -705,7 +766,12 @@ class _TeacherEventManageState extends State<TeacherEventManage>
             .where(_participantHasPendingSync)
             .length;
         _usingCachedParticipants = offlineParticipants.isNotEmpty;
+        _event = {
+          ..._event,
+          'registered_count': _joinedParticipantCount,
+        };
       });
+      _storeManageSnapshot();
     } catch (_) {
       final cachedData = await _loadCachedEventData(
         eventId: eventId,
@@ -751,20 +817,19 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     );
   }
 
-  void _bindAttendanceRealtime() {
+  void _bindEventManageRealtime() {
     final eventId = widget.event['id']?.toString() ?? '';
     if (eventId.isEmpty) return;
     if (_attendanceChannel != null) return;
 
     final supabase = Supabase.instance.client;
-    final channelName = 'public:event_manage_attendance:$eventId';
+    final channelName = 'public:event_manage_live:$eventId';
     _attendanceChannel = supabase.channel(channelName);
 
-    void handlePayload(PostgresChangePayload payload) {
+    void handleAttendancePayload(PostgresChangePayload payload) {
       if (_eventSessionIds.isNotEmpty) {
         final sid = _payloadSessionId(payload);
-        if (sid.isEmpty) return;
-        if (!_eventSessionIds.contains(sid)) return;
+        if (sid.isNotEmpty && !_eventSessionIds.contains(sid)) return;
       }
       _scheduleParticipantsRefresh();
     }
@@ -772,23 +837,45 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     _attendanceChannel!.onPostgresChanges(
       event: PostgresChangeEvent.all,
       schema: 'public',
+      table: 'event_registrations',
+      filter: PostgresChangeFilter(
+        type: PostgresChangeFilterType.eq,
+        column: 'event_id',
+        value: eventId,
+      ),
+      callback: (_) => _scheduleParticipantsRefresh(),
+    );
+
+    _attendanceChannel!.onPostgresChanges(
+      event: PostgresChangeEvent.all,
+      schema: 'public',
       table: 'event_session_attendance',
-      callback: handlePayload,
+      callback: handleAttendancePayload,
     );
 
     _attendanceChannel!.onPostgresChanges(
       event: PostgresChangeEvent.all,
       schema: 'public',
       table: 'attendance',
-      callback: handlePayload,
+      callback: (_) => _scheduleParticipantsRefresh(),
     );
 
     _attendanceChannel!.subscribe();
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted && !_isOfflineMode) {
+      _scheduleParticipantsRefresh();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _participantsRefreshDebounce?.cancel();
+    _rosterLivePollTimer?.cancel();
+    _eventLiveSubscription?.cancel();
     _earlyOutTick?.cancel();
     _connectivitySubscription?.cancel();
     _attendanceChannel?.unsubscribe();
@@ -803,6 +890,109 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   }
 
   // â”€â”€â”€ Helper: extract student name â”€â”€â”€
+  int get _joinedParticipantCount {
+    final keys = <String>{};
+    final uuidRe = RegExp(
+      r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$',
+    );
+    for (final p in _participants) {
+      final users = p['users'];
+      final userMap = users is Map ? Map<String, dynamic>.from(users) : null;
+      final studentUuid = (p['student_id']?.toString() ?? '').trim();
+      final userUuid = (userMap?['id']?.toString() ?? '').trim();
+      final studentNo = (userMap?['student_id']?.toString() ?? '').trim();
+      final regId = (p['id']?.toString() ?? '').trim();
+      final key = (studentUuid.isNotEmpty && uuidRe.hasMatch(studentUuid))
+          ? 's:$studentUuid'
+          : (userUuid.isNotEmpty && uuidRe.hasMatch(userUuid)
+                ? 'u:$userUuid'
+                : (regId.isNotEmpty
+                      ? 'r:$regId'
+                      : (studentNo.isNotEmpty && !studentNo.contains('@')
+                            ? 'n:$studentNo'
+                            : '')));
+      if (key.isEmpty) {
+        if (p['offline_pending'] == true) continue;
+        final name = _getName(p).trim().toLowerCase();
+        if (name.isEmpty) continue;
+        keys.add('name:$name');
+        continue;
+      }
+      keys.add(key);
+    }
+    return keys.length;
+  }
+
+  String _getStudentId(Map<String, dynamic> p) {
+    final direct = (p['participant_student_no']?.toString() ??
+            p['participant_student_id']?.toString() ??
+            p['student_no']?.toString() ??
+            '')
+        .trim();
+    if (direct.isNotEmpty && !direct.contains('@')) return direct;
+
+    final users = p['users'];
+    if (users is Map) {
+      final sid = (users['student_id']?.toString() ?? '').trim();
+      if (sid.isNotEmpty && !sid.contains('@')) return sid;
+      final idNum = (users['id_number']?.toString() ?? '').trim();
+      if (idNum.isNotEmpty && !idNum.contains('@')) return idNum;
+    }
+
+    final fallback = (p['student_id']?.toString() ?? '').trim();
+    if (fallback.isNotEmpty &&
+        !fallback.contains('@') &&
+        !RegExp(
+          r'^[0-9a-fA-F-]{36}$',
+        ).hasMatch(fallback)) {
+      return fallback;
+    }
+    return '';
+  }
+
+  String _participantPhotoRaw(Map<String, dynamic> p) {
+    final users = p['users'];
+    if (users is Map) {
+      final fromUser = (users['photo_url']?.toString() ?? '').trim();
+      if (fromUser.isNotEmpty) return fromUser;
+    }
+    final direct = (p['photo_url']?.toString() ??
+            p['participant_photo_url']?.toString() ??
+            '')
+        .trim();
+    return direct;
+  }
+
+  Future<List<Map<String, dynamic>>> _withSignedParticipantPhotos(
+    List<Map<String, dynamic>> rows,
+  ) async {
+    final out = <Map<String, dynamic>>[];
+    for (final row in rows) {
+      final next = Map<String, dynamic>.from(row);
+      final raw = _participantPhotoRaw(next);
+      if (raw.isEmpty) {
+        out.add(next);
+        continue;
+      }
+      final cached = _signedAvatarCache[raw];
+      final signed = (cached != null && cached.isNotEmpty)
+          ? cached
+          : await _eventService.resolveAvatarDisplayUrl(raw);
+      if (signed.isNotEmpty) {
+        _signedAvatarCache[raw] = signed;
+        next['photo_url'] = signed;
+        final users = next['users'];
+        if (users is Map) {
+          final user = Map<String, dynamic>.from(users);
+          user['photo_url'] = signed;
+          next['users'] = user;
+        }
+      }
+      out.add(next);
+    }
+    return out;
+  }
+
   String _getName(Map<String, dynamic> p) {
     final displayName = (p['display_name']?.toString() ?? '').trim();
     if (displayName.isNotEmpty) return displayName;
@@ -1310,7 +1500,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
       case 'present':
         return const Color(0xFF065F46);
       case 'absent':
-        return const Color(0xFF92400E);
+        return const Color(0xFF991B1B);
       default:
         return const Color(0xFF4B5563);
     }
@@ -1321,7 +1511,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
       case 'present':
         return const Color(0xFFD1FAE5);
       case 'absent':
-        return const Color(0xFFFEF3C7);
+        return const Color(0xFFFEE2E2);
       default:
         return const Color(0xFFF3F4F6);
     }
@@ -1333,13 +1523,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   ) async {
     if (!_canManageAssistants || _currentTeacherId.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Only assigned teachers can manage assistants for this event.',
-            ),
-          ),
-        );
+        AppSnackBar.error(context, 'Only assigned teachers can manage assistants for this event.');
       }
       return;
     }
@@ -1358,13 +1542,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     if (result['ok'] != true) {
       setState(() => assistant['allow_scan'] = oldVal);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              result['error'] ?? 'Failed to update assistant access.',
-            ),
-          ),
-        );
+        AppSnackBar.error(context, result['error'] ?? 'Failed to update assistant access.');
       }
     }
   }
@@ -1374,26 +1552,14 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     if (eventId.isEmpty) return;
     if (!_canManageAssistants || _currentTeacherId.isEmpty) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Only assigned teachers can add assistants for this event.',
-          ),
-        ),
-      );
+      AppSnackBar.error(context, 'Only assigned teachers can add assistants for this event.');
       return;
     }
 
     final baseCandidates = _buildAssistantCandidates();
     if (baseCandidates.isEmpty) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'No eligible participants available for assistant assignment.',
-          ),
-        ),
-      );
+      AppSnackBar.warning(context, 'No eligible participants available for assistant assignment.');
       return;
     }
 
@@ -1509,9 +1675,6 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                                     ? null
                                     : () async {
                                         if (sid.isEmpty) return;
-                                        final messenger = ScaffoldMessenger.of(
-                                          context,
-                                        );
                                         final navigator = Navigator.of(
                                           listContext,
                                         );
@@ -1539,22 +1702,9 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                                           }
                                           await _loadData(true);
                                           if (!mounted) return;
-                                          messenger.showSnackBar(
-                                            SnackBar(
-                                              content: Text(
-                                                '$name assigned as assistant.',
-                                              ),
-                                            ),
-                                          );
+                                          AppSnackBar.success(context, '$name assigned as assistant.');
                                         } else {
-                                          messenger.showSnackBar(
-                                            SnackBar(
-                                              content: Text(
-                                                res['error'] ??
-                                                    'Failed to assign assistant.',
-                                              ),
-                                            ),
-                                          );
+                                          AppSnackBar.error(context, res['error'] ?? 'Failed to assign assistant.');
                                         }
                                       },
                                 child: Container(
@@ -1980,7 +2130,14 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     return map[val] ?? val;
   }
 
+  bool get _canManageEarlyOut {
+    final creatorId = (_event['created_by']?.toString() ?? '').trim();
+    final me = _currentTeacherId.trim();
+    return me.isNotEmpty && creatorId.isNotEmpty && creatorId == me;
+  }
+
   Future<void> _refreshEarlyOutStatus({bool silent = false}) async {
+    if (!_canManageEarlyOut) return;
     if (!MobileBackendService.isConfigured) return;
     final eventId = (_event['id']?.toString() ?? '').trim();
     if (eventId.isEmpty) return;
@@ -2031,11 +2188,14 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     required bool enabled,
     String? sessionId,
   }) async {
+    if (!_canManageEarlyOut) {
+      if (!mounted) return;
+      AppSnackBar.error(context, 'Only the event creator can enable Early Out.');
+      return;
+    }
     if (!MobileBackendService.isConfigured) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Mobile backend is not configured.')),
-      );
+      AppSnackBar.error(context, 'Mobile backend is not configured.');
       return;
     }
     final eventId = (_event['id']?.toString() ?? '').trim();
@@ -2043,13 +2203,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
 
     if (enabled && !_isWithinEarlyOutSchedule()) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Early Out is available only after the grace period ends.',
-          ),
-        ),
-      );
+      AppSnackBar.warning(context, 'Early Out is available only after the grace period ends.');
       return;
     }
 
@@ -2062,15 +2216,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
       );
       if (!mounted) return;
       if (res['ok'] != true) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              (res['error']?.toString().trim().isNotEmpty ?? false)
-                  ? res['error'].toString()
-                  : 'Failed to update Early Out.',
-            ),
-          ),
-        );
+        AppSnackBar.error(context, (res['error']?.toString().trim().isNotEmpty ?? false) ? res['error'].toString() : 'Failed to update Early Out.');
         return;
       }
       final eo = res['early_out'];
@@ -2251,17 +2397,19 @@ class _TeacherEventManageState extends State<TeacherEventManage>
           target: _getTargetLabel(eventFor),
           graceTime: graceTime,
         ),
-        const SizedBox(height: 12),
-        _buildEarlyOutToggleCard(
-          enabled: _earlyOutEnabled,
-          subtitle: _earlyOutSubtitle({
-            'enabled': _earlyOutEnabled,
-            'expires_at': _earlyOutExpiresAt,
-            'grace_ends_at': _earlyOutGraceEndsAt,
-          }),
-          interactable: _earlyOutEnabled || _isWithinEarlyOutSchedule(),
-          onChanged: (v) => _setEarlyOut(enabled: v),
-        ),
+        if (_canManageEarlyOut) ...[
+          const SizedBox(height: 12),
+          _buildEarlyOutToggleCard(
+            enabled: _earlyOutEnabled,
+            subtitle: _earlyOutSubtitle({
+              'enabled': _earlyOutEnabled,
+              'expires_at': _earlyOutExpiresAt,
+              'grace_ends_at': _earlyOutGraceEndsAt,
+            }),
+            interactable: _earlyOutEnabled || _isWithinEarlyOutSchedule(),
+            onChanged: (v) => _setEarlyOut(enabled: v),
+          ),
+        ],
         if (isSeminarBased) ...[
           const SizedBox(height: 12),
           const Text(
@@ -2451,7 +2599,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
           child: _buildTeacherStatChip(
             Icons.people_rounded,
             _eventService.formatParticipantTotal(
-              _participants.length,
+              _joinedParticipantCount,
               _event['registration_limit'],
             ),
             'Participants',
@@ -2823,13 +2971,10 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     final filtered = _searchQuery.isEmpty
         ? _participants
         : _participants.where((p) {
+            final q = _searchQuery.toLowerCase();
             final name = _getName(p).toLowerCase();
-            final email =
-                ((p['users'] is Map ? p['users']['email'] : null) ?? '')
-                    .toString()
-                    .toLowerCase();
-            return name.contains(_searchQuery.toLowerCase()) ||
-                email.contains(_searchQuery.toLowerCase());
+            final studentId = _getStudentId(p).toLowerCase();
+            return name.contains(q) || studentId.contains(q);
           }).toList();
 
     final isSeminarBased = _isSeminarBasedEvent();
@@ -2871,7 +3016,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 child: _buildStatChip(
                   'Joined',
                   _eventService.formatParticipantTotal(
-                    _participants.length,
+                    _joinedParticipantCount,
                     _event['registration_limit'],
                   ),
                   TeacherThemeUtils.primary,
@@ -2917,8 +3062,8 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 child: _buildStatChip(
                   'Absent',
                   '$absentCount',
-                  const Color(0xFFF59E0B),
-                  Icons.pending_actions_rounded,
+                  const Color(0xFFDC2626),
+                  Icons.cancel_rounded,
                 ),
               ),
             ],
@@ -3085,13 +3230,31 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     final hasPendingSync = _participantHasPendingSync(p);
 
     final u = p['users'];
-    final email = (u is Map ? u['email'] : null)?.toString() ?? '';
+    final studentId = _getStudentId(p);
+    final photoUrl = _participantPhotoRaw(p);
     final course = (u is Map ? u['course'] : null)?.toString() ?? '';
     final yearLevel = (u is Map ? u['year_level'] : null)?.toString() ?? '';
-    final levelText = [
-      if (yearLevel.isNotEmpty) yearLevel,
-      if (course.isNotEmpty) course,
-    ].join(' | ');
+    String sectionName = '';
+    if (u is Map) {
+      sectionName = (u['section_name']?.toString() ?? '').trim();
+      if (sectionName.isEmpty) {
+        final sections = u['sections'];
+        if (sections is Map) {
+          sectionName = (sections['name']?.toString() ?? '').trim();
+        }
+      }
+    }
+    final sectionHasYear =
+        RegExp(r'[1-4]').hasMatch(sectionName) &&
+        !RegExp(r'irreg', caseSensitive: false).hasMatch(sectionName);
+    final levelParts = <String>[];
+    if (sectionName.isNotEmpty) levelParts.add(sectionName);
+    if (yearLevel.isNotEmpty && (sectionName.isEmpty || !sectionHasYear)) {
+      levelParts.add(yearLevel);
+    } else if (course.isNotEmpty && sectionName.isEmpty && yearLevel.isEmpty) {
+      levelParts.add(course);
+    }
+    final levelText = levelParts.join(' • ');
 
     Color statusColor;
     Color statusBg;
@@ -3108,10 +3271,10 @@ class _TeacherEventManageState extends State<TeacherEventManage>
         statusIcon = Icons.check_circle_rounded;
         break;
       case 'absent':
-        statusColor = const Color(0xFFF59E0B); // beautiful amber-500
-        statusBg = const Color(0xFFFEF3C7);
+        statusColor = const Color(0xFFDC2626);
+        statusBg = const Color(0xFFFEE2E2);
         statusLabel = 'Absent';
-        statusIcon = Icons.warning_amber_rounded;
+        statusIcon = Icons.cancel_rounded;
         break;
       default:
         statusColor = Colors.grey.shade600;
@@ -3147,17 +3310,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
         child: Row(
           children: [
             Container(
-              width: 48,
-              height: 48,
               decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    avatarColor,
-                    avatarColor.withValues(alpha: 0.8),
-                  ],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
                 shape: BoxShape.circle,
                 boxShadow: [
                   BoxShadow(
@@ -3167,14 +3320,16 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                   ),
                 ],
               ),
-              child: Center(
-                child: Text(
-                  initials,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w800,
-                    fontSize: 16,
-                  ),
+              child: SafeCircleAvatar(
+                size: 48,
+                imagePathOrUrl: photoUrl.isEmpty ? null : photoUrl,
+                fallbackText: initials,
+                backgroundColor: avatarColor,
+                textColor: Colors.white,
+                textStyle: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 16,
                 ),
               ),
             ),
@@ -3191,9 +3346,9 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                       color: Color(0xFF111827),
                     ),
                   ),
-                  if (email.isNotEmpty)
+                  if (studentId.isNotEmpty)
                     Text(
-                      email,
+                      studentId,
                       style: const TextStyle(
                         color: Color(0xFF6B7280),
                         fontSize: 12,
@@ -3797,12 +3952,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
         await Gal.putImageBytes(bytes, name: fileName);
 
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('QR code saved to gallery.'),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
+          AppSnackBar.success(context, 'QR code saved to gallery.');
         }
         return;
       } on MissingPluginException {
@@ -3817,25 +3967,12 @@ class _TeacherEventManageState extends State<TeacherEventManage>
           ),
         );
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Gallery plugin needs a full app restart. Shared QR instead — stop the app and rebuild to save directly to gallery.',
-              ),
-              behavior: SnackBarBehavior.floating,
-              duration: Duration(seconds: 5),
-            ),
-          );
+          AppSnackBar.info(context, 'Gallery plugin needs a full app restart. Shared QR instead — stop the app and rebuild to save directly to gallery.');
         }
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Could not save QR: $e'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+        AppSnackBar.error(context, 'Could not save QR: $e');
       }
     } finally {
       if (mounted) {

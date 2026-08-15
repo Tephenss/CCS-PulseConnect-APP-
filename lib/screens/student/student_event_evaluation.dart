@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import '../../services/event_service.dart';
 import '../../widgets/custom_loader.dart';
 
@@ -90,14 +91,10 @@ class _StudentEventEvaluationScreenState
         final questionId = question['id']?.toString() ?? '';
         final value = _answers[_answerKey(scopeId, questionId)];
         if (value == null || value.toString().trim().isEmpty) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                'Please answer all required questions in ${section['title'] ?? 'this section'}.',
-              ),
-            ),
-          );
+          final sectionTitle = section['title']?.toString() ?? 'this section';
+          AppSnackBar.warning(context, 'Please answer all required questions in $sectionTitle.');
           return;
+
         }
       }
     }
@@ -126,9 +123,7 @@ class _StudentEventEvaluationScreenState
     }
 
     if (payload.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please provide at least one answer before submitting.')),
-      );
+      AppSnackBar.warning(context, 'Please provide at least one answer before submitting.');
       return;
     }
 
@@ -179,15 +174,96 @@ class _StudentEventEvaluationScreenState
         message =
             'Evaluation submitted successfully.';
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(message)),
-      );
+      AppSnackBar.success(context, message);
       Navigator.pop(context, true);
       return;
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(result['error']?.toString() ?? 'Submission failed.')),
+    AppSnackBar.error(context, result['error']?.toString() ?? 'Submission failed.');
+  }
+
+  static const List<MapEntry<int, String>> _ratingScaleLabels = [
+    MapEntry(5, 'Outstanding'),
+    MapEntry(4, 'Very Satisfactory'),
+    MapEntry(3, 'Satisfactory'),
+    MapEntry(2, 'Unsatisfactory'),
+    MapEntry(1, 'Poor'),
+  ];
+
+  Widget _buildRatingScaleIndicator() {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFFBFB),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE7D0D4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'INDICATORS',
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+              letterSpacing: 1.2,
+              color: Color(0xFF9F1239),
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Please rate the activity as it was conducted using the 5-point scale below (5 being the highest and 1 the lowest). Choose the number which corresponds to your evaluation. Your honest assessment will help improve future activities.',
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.45,
+              fontWeight: FontWeight.w500,
+              color: Color(0xFF52525B),
+            ),
+          ),
+          const SizedBox(height: 14),
+          ..._ratingScaleLabels.map((entry) {
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    width: 22,
+                    child: Text(
+                      '${entry.key}',
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF18181B),
+                      ),
+                    ),
+                  ),
+                  const Text(
+                    '—  ',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF71717A),
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      entry.value,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF3F3F46),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }),
+        ],
+      ),
     );
   }
 
@@ -198,24 +274,79 @@ class _StudentEventEvaluationScreenState
         ) ??
         0;
 
-    return Wrap(
-      spacing: 2,
-      runSpacing: 2,
-      children: List.generate(5, (index) {
-        final starIndex = index + 1;
-        return IconButton(
-          onPressed: () {
-            setState(() {
-              _answers[_answerKey(scopeId, questionId)] = starIndex.toString();
-            });
-          },
-          icon: Icon(
-            starIndex <= value ? Icons.star_rounded : Icons.star_border_rounded,
-            color: const Color(0xFFD4A843),
-            size: 34,
-          ),
-        );
-      }),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: List.generate(5, (index) {
+            final score = index + 1;
+            final selected = value == score;
+            return Expanded(
+              child: Padding(
+                padding: EdgeInsets.only(right: index == 4 ? 0 : 6),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () {
+                    setState(() {
+                      _answers[_answerKey(scopeId, questionId)] =
+                          score.toString();
+                    });
+                  },
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    height: 46,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? const Color(0xFF9F1239)
+                          : Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: selected
+                            ? const Color(0xFF9F1239)
+                            : const Color(0xFFD4D4D8),
+                        width: selected ? 1.5 : 1,
+                      ),
+                    ),
+                    child: Text(
+                      '$score',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: selected
+                            ? Colors.white
+                            : const Color(0xFF3F3F46),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }),
+        ),
+        const SizedBox(height: 8),
+        const Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              '1 Poor',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF71717A),
+              ),
+            ),
+            Text(
+              '5 Outstanding',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF71717A),
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -246,6 +377,9 @@ class _StudentEventEvaluationScreenState
             .map((row) => Map<String, dynamic>.from(row))
             .toList() ??
         <Map<String, dynamic>>[];
+    final hasRatingQuestions = questions.any(
+      (q) => (q['field_type']?.toString() ?? '') == 'rating',
+    );
 
     return Container(
       padding: const EdgeInsets.all(20),
@@ -282,6 +416,7 @@ class _StudentEventEvaluationScreenState
             ),
           ),
           const SizedBox(height: 18),
+          if (hasRatingQuestions) _buildRatingScaleIndicator(),
           ...questions.map((question) {
             final fieldType = question['field_type']?.toString() ?? 'text';
             return Container(

@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -370,12 +371,7 @@ class _StudentRegistrationRequirementsPageState
       }
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Resuming your file upload…'),
-          duration: Duration(seconds: 2),
-        ),
-      );
+      AppSnackBar.info(context, 'Resuming your file upload…');
       await _uploadPickedFile(
         requirement: requirement,
         fileName: pending.name,
@@ -444,20 +440,12 @@ class _StudentRegistrationRequirementsPageState
     } on PlatformException catch (error) {
       if (!mounted) return;
       final message = (error.message ?? error.code).trim();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            message.isEmpty ? 'Unable to open file picker.' : message,
-          ),
-        ),
-      );
+      AppSnackBar.error(context, message.isEmpty ? 'Unable to open file picker.' : message);
       await _clearPendingPickMemory();
       return;
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Unable to open file picker: $error')),
-      );
+      AppSnackBar.error(context, 'Unable to open file picker: $error');
       await _clearPendingPickMemory();
       return;
     } finally {
@@ -491,13 +479,7 @@ class _StudentRegistrationRequirementsPageState
     if (!_allowedExtensions.contains(extension)) {
       await _clearPendingPickMemory();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Unsupported file. Use PDF, DOC, DOCX, JPG, PNG, or WEBP.',
-          ),
-        ),
-      );
+      AppSnackBar.error(context, 'Unsupported file. Use PDF, DOC, DOCX, JPG, PNG, or WEBP.');
       return;
     }
 
@@ -507,9 +489,7 @@ class _StudentRegistrationRequirementsPageState
     if (!hasPath && !hasBytes) {
       await _clearPendingPickMemory();
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Unable to read the selected file.')),
-      );
+      AppSnackBar.error(context, 'Unable to read the selected file.');
       return;
     }
 
@@ -519,9 +499,7 @@ class _StudentRegistrationRequirementsPageState
       if (size > 15 * 1024 * 1024) {
         await _clearPendingPickMemory();
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('File is too large. Max 15 MB.')),
-        );
+        AppSnackBar.error(context, 'File is too large. Max 15 MB.');
         return;
       }
     }
@@ -553,14 +531,10 @@ class _StudentRegistrationRequirementsPageState
       await _clearPendingPickMemory();
       if (!mounted) return;
       _applyUploadedDocument(requirementId, upload, fileName);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Document uploaded successfully.')),
-      );
+      AppSnackBar.success(context, 'Document uploaded successfully.');
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Upload failed: $error')),
-      );
+      AppSnackBar.error(context, 'Upload failed: $error');
     } finally {
       if (mounted) {
         setState(() {
@@ -596,15 +570,7 @@ class _StudentRegistrationRequirementsPageState
             ? 'Your documents were approved. You may now register.'
             : 'Your documents are under review. Registration will open after approval.';
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            _status == 'approved'
-                ? 'Documents already approved.'
-                : 'Documents submitted for review. You can register after approval.',
-          ),
-        ),
-      );
+      AppSnackBar.success(context, _status == 'approved' ? 'Documents already approved.' : 'Documents submitted for review. You can register after approval.');
       Navigator.pop(context, true);
     } catch (error) {
       if (!mounted) return;
@@ -619,19 +585,11 @@ class _StudentRegistrationRequirementsPageState
           _statusMessage =
               'Your documents are under review. Registration will open after approval.';
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Documents are already under review. Waiting for teacher approval.',
-            ),
-          ),
-        );
+        AppSnackBar.info(context, 'Documents are already under review. Waiting for teacher approval.');
         Navigator.pop(context, true);
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(message)),
-      );
+      AppSnackBar.error(context, message);
     } finally {
       if (mounted) {
         setState(() => _isSubmitting = false);

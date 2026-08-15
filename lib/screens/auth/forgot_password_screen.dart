@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import '../../widgets/custom_loader.dart';
 import '../../utils/teacher_theme_utils.dart';
 import '../../services/mobile_backend_service.dart';
@@ -25,6 +26,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
 
   final _formKey = GlobalKey<FormState>();
   bool _isLoading = false;
+  bool _obscureNewPassword = true;
+  bool _obscureConfirmPassword = true;
 
   int _currentStep = 0; // 0 = email, 1 = code, 2 = new password, 3 = success
   String? _verifiedUserId;
@@ -179,19 +182,11 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
   }
 
   void _showError(String msg) {
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg), backgroundColor: const Color(0xFF7F1D1D)),
-      );
-    }
+    if (mounted) AppSnackBar.error(context, msg);
   }
 
   void _showInfo(String msg) {
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg), backgroundColor: const Color(0xFF15803D)),
-      );
-    }
+    if (mounted) AppSnackBar.success(context, msg);
   }
 
   @override
@@ -478,10 +473,18 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
         const SizedBox(height: 10),
         TextFormField(
           controller: _newPasswordController,
-          obscureText: true,
+          obscureText: _obscureNewPassword,
           style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
           cursorColor: _primaryColor,
-          decoration: _inputDecoration('Min. 8 characters', Icons.lock_outline),
+          decoration: _inputDecoration(
+            'Min. 8 characters',
+            Icons.lock_outline,
+            suffixIcon: _passwordVisibilityIcon(
+              obscure: _obscureNewPassword,
+              onToggle: () =>
+                  setState(() => _obscureNewPassword = !_obscureNewPassword),
+            ),
+          ),
           validator: (val) {
             if (val == null || val.isEmpty) return 'New password is required';
             if (val.length < 8) return 'At least 8 characters required';
@@ -500,12 +503,18 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
         const SizedBox(height: 10),
         TextFormField(
           controller: _confirmPasswordController,
-          obscureText: true,
+          obscureText: _obscureConfirmPassword,
           style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
           cursorColor: _primaryColor,
           decoration: _inputDecoration(
             'Confirm your new password',
-            Icons.lock_reset_outlined,
+            Icons.lock_outline,
+            suffixIcon: _passwordVisibilityIcon(
+              obscure: _obscureConfirmPassword,
+              onToggle: () => setState(
+                () => _obscureConfirmPassword = !_obscureConfirmPassword,
+              ),
+            ),
           ),
           validator: (val) {
             if (val == null || val.isEmpty) return 'Please confirm password';
@@ -582,11 +591,30 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
     );
   }
 
-  InputDecoration _inputDecoration(String hint, IconData icon) {
+  Widget _passwordVisibilityIcon({
+    required bool obscure,
+    required VoidCallback onToggle,
+  }) {
+    return IconButton(
+      icon: Icon(
+        obscure ? Icons.visibility_off_outlined : Icons.visibility_outlined,
+        color: const Color(0xFF52525B),
+        size: 20,
+      ),
+      onPressed: onToggle,
+    );
+  }
+
+  InputDecoration _inputDecoration(
+    String hint,
+    IconData icon, {
+    Widget? suffixIcon,
+  }) {
     return InputDecoration(
       hintText: hint,
       hintStyle: const TextStyle(color: Color(0xFF52525B), fontSize: 14),
       prefixIcon: Icon(icon, color: const Color(0xFF52525B), size: 20),
+      suffixIcon: suffixIcon,
       filled: true,
       fillColor: const Color(0xFF1C1C22),
       contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),

@@ -22,6 +22,7 @@ import '../../widgets/pulseconnect_splash_screen.dart';
 import '../../widgets/safe_circle_avatar.dart';
 import '../../widgets/shiny_text.dart';
 import '../../utils/event_time_utils.dart';
+import '../../utils/app_page_routes.dart';
 import 'teacher_event_manage.dart';
 
 class TeacherHome extends StatefulWidget {
@@ -141,7 +142,10 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
 
     try {
       unawaited(_refreshUnreadCount());
-      final result = await showNotificationsModal(context);
+      final result = await showNotificationsModal(
+        context,
+        isTeacherTheme: true,
+      );
       if (!mounted) return;
 
       if (result is int) {
@@ -208,7 +212,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     _scannerAccessChannel!.subscribe();
 
     _scannerAccessGuardTimer = Timer.periodic(
-      const Duration(seconds: 45),
+      const Duration(seconds: 75),
       (_) {
         if (!mounted || _currentIndex != 2) return;
         unawaited(_refreshScannerAccessGuard(actorId));
@@ -471,7 +475,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                               'Events',
                               1,
                             ),
-                            _buildNavItem(Icons.groups_rounded, 'Sections', 3),
+                            _buildNavItem(Icons.groups_rounded, 'Blocks', 3),
                             _buildNavItem(Icons.person_rounded, 'Profile', 4),
                           ],
                         ),
@@ -866,7 +870,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 8),
           Text(
-            'Monitor upcoming events, view attendance logs instantly, and manage your assigned sections efficiently.',
+            'Monitor upcoming events, view attendance logs instantly, and manage your assigned blocks efficiently.',
             textAlign: TextAlign.left,
             style: TextStyle(
               color: Colors.white.withValues(alpha: 0.8),
@@ -1209,7 +1213,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
         onTap: () {
           Navigator.push(
             context,
-            MaterialPageRoute(builder: (_) => TeacherEventManage(event: event)),
+            AppPageRoute(builder: (_) => TeacherEventManage(event: event)),
           );
         },
         child: Container(

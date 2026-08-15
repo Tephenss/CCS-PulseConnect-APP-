@@ -315,6 +315,168 @@ class MobileBackendService {
     );
   }
 
+  Future<Map<String, dynamic>> parseRegistrationFormPdf({
+    required String fileName,
+    String? filePath,
+    List<int>? bytes,
+  }) {
+    return _postPdfMultipart(
+      path: '/api/mobile_schedule_parse.php',
+      fileName: fileName,
+      filePath: filePath,
+      bytes: bytes,
+      withSession: false,
+      timeout: const Duration(seconds: 45),
+    );
+  }
+
+  Future<Map<String, dynamic>> registerUserWithSchedule({
+    required String studentId,
+    required String email,
+    required String password,
+    required String fileName,
+    String? filePath,
+    List<int>? bytes,
+  }) {
+    return _postPdfMultipart(
+      path: '/api/mobile_register_user.php',
+      fileName: fileName,
+      filePath: filePath,
+      bytes: bytes,
+      withSession: false,
+      fields: {
+        'student_id': studentId.trim(),
+        'email': email.trim().toLowerCase(),
+        'password': password,
+      },
+      timeout: const Duration(seconds: 60),
+    );
+  }
+
+  Future<Map<String, dynamic>> fetchClassSchedule() {
+    return post('/api/mobile_schedule_get.php', {});
+  }
+
+  Future<Map<String, dynamic>> uploadClassSchedulePdf({
+    required String fileName,
+    String? filePath,
+    List<int>? bytes,
+  }) {
+    return _postPdfMultipart(
+      path: '/api/mobile_schedule_upload.php',
+      fileName: fileName,
+      filePath: filePath,
+      bytes: bytes,
+      withSession: true,
+      timeout: const Duration(seconds: 90),
+    );
+  }
+
+  Future<Map<String, dynamic>> _postPdfMultipart({
+    required String path,
+    required String fileName,
+    String? filePath,
+    List<int>? bytes,
+    Map<String, String>? fields,
+    bool withSession = true,
+    Duration timeout = const Duration(seconds: 45),
+  }) async {
+    if (!isConfigured) {
+      return {
+        'ok': false,
+        'error':
+            'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
+      };
+    }
+    final diskPath = (filePath ?? '').trim();
+    final hasPath = diskPath.isNotEmpty;
+    final hasBytes = bytes != null && bytes.isNotEmpty;
+    if (!hasPath && !hasBytes) {
+      return {'ok': false, 'error': 'Select your LU registration form PDF.'};
+    }
+
+    final uri = _baseUri!.replace(path: path);
+    final request = http.MultipartRequest('POST', uri);
+    final key = Env.mobilePushApiKey.trim();
+    if (key.isNotEmpty && !key.contains('YOUR_SHARED_KEY')) {
+      request.headers['X-Mobile-Api-Key'] = key;
+    }
+    if (withSession) {
+      final session = await getSessionToken();
+      if (session != null && session.isNotEmpty) {
+        request.headers['Authorization'] = 'Bearer $session';
+        request.headers['X-Mobile-Session'] = session;
+      }
+    }
+    if (fields != null) {
+      request.fields.addAll(fields);
+    }
+    final safeName =
+        fileName.trim().isNotEmpty ? fileName.trim() : 'registration.pdf';
+    if (hasPath) {
+      request.files.add(
+        await http.MultipartFile.fromPath(
+          'schedule_file',
+          diskPath,
+          filename: safeName,
+        ),
+      );
+    } else {
+      request.files.add(
+        http.MultipartFile.fromBytes(
+          'schedule_file',
+          bytes!,
+          filename: safeName,
+        ),
+      );
+    }
+
+    try {
+      final streamed = await request.send().timeout(timeout);
+      final response = await http.Response.fromStream(streamed);
+      final parsed = _tryDecodeJsonResponse(response.body);
+      if (parsed == null) {
+        final status = response.statusCode;
+        final body = response.body.trim().toLowerCase();
+        if (status == 404 || body.contains('not found')) {
+          return {
+            'ok': false,
+            'error':
+                'Schedule upload is not on the server yet. Redeploy the latest PHP files and try again.',
+          };
+        }
+        if (status == 413) {
+          return {
+            'ok': false,
+            'error':
+                'PDF is too large. Use the original LU Form No. 1 file (8 MB max).',
+          };
+        }
+        return {
+          'ok': false,
+          'error':
+              'Could not read the server reply (HTTP $status). Try again, or ask admin if migration 059 is applied.',
+        };
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return {
+          'ok': false,
+          'error': parsed['error']?.toString() ??
+              'Upload failed (HTTP ${response.statusCode}).',
+        };
+      }
+      if (parsed['ok'] != true) {
+        return {
+          'ok': false,
+          'error': parsed['error']?.toString() ?? 'Upload failed.',
+        };
+      }
+      return parsed;
+    } catch (e) {
+      return {'ok': false, 'error': normalizeTransportError(e.toString())};
+    }
+  }
+
   Future<Map<String, dynamic>> verifyPasswordResetCode({
     required String email,
     required String code,
@@ -348,10 +510,19 @@ class MobileBackendService {
   Future<Map<String, dynamic>> verifyEmailCode({
     required String code,
     String? userId,
+    String? deviceKey,
+    String? platform,
+    String? deviceLabel,
   }) {
     final body = <String, dynamic>{'code': code.trim()};
     final id = (userId ?? '').trim();
     if (id.isNotEmpty) body['user_id'] = id;
+    final key = (deviceKey ?? '').trim();
+    if (key.isNotEmpty) body['device_key'] = key;
+    final plat = (platform ?? '').trim();
+    if (plat.isNotEmpty) body['platform'] = plat;
+    final label = (deviceLabel ?? '').trim();
+    if (label.isNotEmpty) body['device_label'] = label;
     return post('/api/mobile_email_verification_verify.php', body);
   }
 
@@ -390,6 +561,15 @@ class MobileBackendService {
     });
   }
 
+  /// Resolve the logged-in user's avatar via PHP (no anon Storage probing).
+  Future<Map<String, dynamic>> resolveOwnAvatar({int expiresIn = 3600}) {
+    return post('/api/mobile_signed_url.php', {
+      'bucket': 'avatars',
+      'find_user_avatar': true,
+      'expires_in': expiresIn.clamp(60, 86400),
+    });
+  }
+
   Future<Map<String, dynamic>> secureWrite(
     String action,
     Map<String, dynamic> payload,
@@ -424,6 +604,31 @@ class MobileBackendService {
     });
   }
 
+  Future<Map<String, dynamic>> getScanAttendanceStats({
+    required String eventId,
+    String? sessionId,
+    String mode = 'check_in',
+  }) {
+    return post('/api/mobile_scan_attendance_stats.php', {
+      'event_id': eventId.trim(),
+      if (sessionId != null && sessionId.trim().isNotEmpty)
+        'session_id': sessionId.trim(),
+      'mode': mode.trim().toLowerCase() == 'check_out'
+          ? 'check_out'
+          : 'check_in',
+    });
+  }
+
+  Future<Map<String, dynamic>> improveEventDescription({
+    required String rawText,
+  }) {
+    return post(
+      '/api/mobile_ai_improve.php',
+      {'raw_text': rawText.trim()},
+      timeout: _emailTimeout,
+    );
+  }
+
   Future<Map<String, dynamic>> setEventEarlyOut({
     required String eventId,
     String? sessionId,
@@ -450,12 +655,30 @@ class MobileBackendService {
     });
   }
 
+  Future<Map<String, dynamic>> sendChangePasswordOtp() {
+    return post(
+      '/api/mobile_change_password.php',
+      {'action': 'send_otp'},
+      timeout: _emailTimeout,
+    );
+  }
+
+  Future<Map<String, dynamic>> verifyChangePasswordOtp({
+    required String code,
+  }) {
+    return post('/api/mobile_change_password.php', {
+      'action': 'verify_otp',
+      'code': code.trim(),
+    });
+  }
+
   Future<Map<String, dynamic>> changePassword({
-    required String currentPassword,
+    required String changeToken,
     required String newPassword,
   }) {
     return post('/api/mobile_change_password.php', {
-      'current_password': currentPassword,
+      'action': 'update',
+      'change_token': changeToken,
       'new_password': newPassword,
     });
   }
@@ -503,6 +726,142 @@ class MobileBackendService {
       'action': 'proposal_submit_review',
       'event_id': eventId,
     });
+  }
+
+  Future<Map<String, dynamic>> uploadAvatarFile({
+    required List<int> bytes,
+    required String fileName,
+  }) async {
+    if (!isConfigured) {
+      return {
+        'ok': false,
+        'error':
+            'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
+      };
+    }
+    if (bytes.isEmpty) {
+      return {'ok': false, 'error': 'Selected image is empty.'};
+    }
+
+    final base = _baseUri!;
+    final uri = base.replace(path: '/api/mobile_avatar_upload.php');
+    final request = http.MultipartRequest('POST', uri);
+
+    final key = Env.mobilePushApiKey.trim();
+    if (key.isNotEmpty && !key.contains('YOUR_SHARED_KEY')) {
+      request.headers['X-Mobile-Api-Key'] = key;
+    }
+    final session = await getSessionToken();
+    if (session != null && session.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $session';
+      request.headers['X-Mobile-Session'] = session;
+    }
+
+    final safeName = fileName.trim().isNotEmpty ? fileName.trim() : 'avatar.jpg';
+    request.files.add(
+      http.MultipartFile.fromBytes(
+        'avatar_file',
+        bytes,
+        filename: safeName,
+      ),
+    );
+
+    try {
+      final streamed =
+          await request.send().timeout(const Duration(seconds: 45));
+      final response = await http.Response.fromStream(streamed);
+      final parsed = _tryDecodeJsonResponse(response.body);
+      if (parsed == null) {
+        return {'ok': false, 'error': 'Invalid server response.'};
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return {
+          'ok': false,
+          'error': parsed['error']?.toString() ??
+              'Upload failed (HTTP ${response.statusCode}).',
+        };
+      }
+      if (parsed['ok'] != true) {
+        return {
+          'ok': false,
+          'error': parsed['error']?.toString() ?? 'Upload failed.',
+        };
+      }
+      return parsed;
+    } catch (e) {
+      return {
+        'ok': false,
+        'error': normalizeTransportError(e.toString()),
+      };
+    }
+  }
+
+  Future<Map<String, dynamic>> uploadEventCoverFile({
+    required String eventId,
+    required List<int> bytes,
+    required String fileName,
+  }) async {
+    if (!isConfigured) {
+      return {
+        'ok': false,
+        'error':
+            'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
+      };
+    }
+    if (bytes.isEmpty) {
+      return {'ok': false, 'error': 'Selected cover image is empty.'};
+    }
+
+    final base = _baseUri!;
+    final uri = base.replace(path: '/api/mobile_event_cover_upload.php');
+    final request = http.MultipartRequest('POST', uri);
+
+    final key = Env.mobilePushApiKey.trim();
+    if (key.isNotEmpty && !key.contains('YOUR_SHARED_KEY')) {
+      request.headers['X-Mobile-Api-Key'] = key;
+    }
+    final session = await getSessionToken();
+    if (session != null && session.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $session';
+      request.headers['X-Mobile-Session'] = session;
+    }
+
+    request.fields['event_id'] = eventId.trim();
+    request.files.add(
+      http.MultipartFile.fromBytes(
+        'cover_file',
+        bytes,
+        filename: fileName,
+      ),
+    );
+
+    try {
+      final streamed = await request.send().timeout(const Duration(seconds: 45));
+      final response = await http.Response.fromStream(streamed);
+      final parsed = _tryDecodeJsonResponse(response.body);
+      if (parsed == null) {
+        return {'ok': false, 'error': 'Invalid server response.'};
+      }
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return {
+          'ok': false,
+          'error': parsed['error']?.toString() ??
+              'Upload failed (HTTP ${response.statusCode}).',
+        };
+      }
+      if (parsed['ok'] != true) {
+        return {
+          'ok': false,
+          'error': parsed['error']?.toString() ?? 'Upload failed.',
+        };
+      }
+      return parsed;
+    } catch (e) {
+      return {
+        'ok': false,
+        'error': normalizeTransportError(e.toString()),
+      };
+    }
   }
 
   Future<Map<String, dynamic>> uploadProposalDocumentFile({
@@ -576,6 +935,18 @@ class MobileBackendService {
 
   Future<Map<String, dynamic>> getMyTicketsSecure() {
     return post('/api/mobile_my_tickets.php', {}, timeout: _registrationTimeout);
+  }
+
+  Future<Map<String, dynamic>> getTeacherBlocksSecure() {
+    return post('/api/mobile_teacher_blocks.php', {});
+  }
+
+  Future<Map<String, dynamic>> getTeacherBlockStudentsSecure({
+    required String sectionId,
+  }) {
+    return post('/api/mobile_teacher_blocks.php', {
+      'section_id': sectionId.trim(),
+    });
   }
 
   Future<Map<String, dynamic>> getEventRosterSecure({

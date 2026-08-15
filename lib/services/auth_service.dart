@@ -425,26 +425,28 @@ class AuthService {
         }
       }
 
-      // Last resort: upload convention is profiles/{userId}.{ext}.
+      // Last resort: PHP BFF looks up profiles/{userId}.{ext} — never probe Storage
+      // from Flutter (anon createSignedUrl / public info returns 400).
       final stillEmpty =
           ((parsed['photo_url'] as String?) ?? '').trim().isEmpty;
       if (stillEmpty && userId.isNotEmpty) {
         try {
-          final guessedPath = await _guessAvatarPath(userId);
-          if (guessedPath != null && guessedPath.isNotEmpty) {
-            final rebuilt = await _resolveAvatarUrl(guessedPath);
-            if (rebuilt != null && rebuilt.isNotEmpty) {
-              final rebuiltWithCache = _withCacheBuster(rebuilt);
-              parsed['photo_url'] = rebuiltWithCache;
+          final resolved = await _resolveOwnAvatarFromServer();
+          final signed = (resolved?['signed_url'] ?? '').trim();
+          final guessedPath = (resolved?['path'] ?? '').trim();
+          if (signed.isNotEmpty) {
+            final rebuiltWithCache = _withCacheBuster(signed);
+            parsed['photo_url'] = rebuiltWithCache;
+            if (guessedPath.isNotEmpty) {
               parsed['photo_path'] = guessedPath;
-              await _saveAvatarCache(
-                prefs,
-                userId,
-                rebuiltWithCache,
-                photoPath: guessedPath,
-              );
-              await prefs.setString('user_data', jsonEncode(parsed));
             }
+            await _saveAvatarCache(
+              prefs,
+              userId,
+              rebuiltWithCache,
+              photoPath: guessedPath.isNotEmpty ? guessedPath : null,
+            );
+            await prefs.setString('user_data', jsonEncode(parsed));
           }
         } catch (_) {}
       }
@@ -638,6 +640,9 @@ class AuthService {
     required String idNumber,
     required String email,
     required String password,
+    String? scheduleFileName,
+    String? scheduleFilePath,
+    List<int>? scheduleBytes,
   }) async {
     try {
       final normalizedEmail = email.toLowerCase().trim();
@@ -651,17 +656,34 @@ class AuthService {
               'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
         };
       }
-
-      final result = await MobileBackendService().registerUser({
-        'student_id': idNumber.trim(),
-        'email': normalizedEmail,
-        'password': password,
-      });
-
-      if (result['ok'] != true) {
+      if ((scheduleFilePath ?? '').trim().isEmpty &&
+          (scheduleBytes == null || scheduleBytes.isEmpty)) {
         return {
           'ok': false,
-          'error': result['error']?.toString() ?? 'Registration failed.',
+          'error': 'Upload your LU registration form PDF to continue.',
+        };
+      }
+
+      final result = await MobileBackendService().registerUserWithSchedule(
+        studentId: idNumber.trim(),
+        email: normalizedEmail,
+        password: password,
+        fileName: (scheduleFileName ?? '').trim().isNotEmpty
+            ? scheduleFileName!.trim()
+            : 'registration.pdf',
+        filePath: scheduleFilePath,
+        bytes: scheduleBytes,
+      );
+
+      if (result['ok'] != true) {
+        var error = result['error']?.toString() ?? 'Registration failed.';
+        if (error.trim().toLowerCase() == 'empty body') {
+          error =
+              'Server register API is outdated. Redeploy api/mobile_register_user.php and includes/mobile_api.php, then try again.';
+        }
+        return {
+          'ok': false,
+          'error': error,
         };
       }
 
@@ -669,11 +691,75 @@ class AuthService {
       final user = userRaw is Map
           ? _stripPassword(Map<String, dynamic>.from(userRaw))
           : null;
-      return {'ok': true, 'user': user};
+      return {'ok': true, 'user': user, 'subjects': result['subjects']};
     } catch (e) {
       return {'ok': false, 'error': 'Registration failed: ${e.toString()}'};
     }
   }
+
+  Future<Map<String, dynamic>> parseRegistrationForm({
+    required String fileName,
+    String? filePath,
+    List<int>? bytes,
+  }) async {
+    try {
+      if (!MobileBackendService.isConfigured) {
+        return {
+          'ok': false,
+          'error':
+              'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
+        };
+      }
+      return await MobileBackendService().parseRegistrationFormPdf(
+        fileName: fileName,
+        filePath: filePath,
+        bytes: bytes,
+      );
+    } catch (e) {
+      return {'ok': false, 'error': 'Could not read that PDF. Please try again.'};
+    }
+  }
+
+  Future<Map<String, dynamic>> fetchClassSchedule() async {
+    try {
+      if (!MobileBackendService.isConfigured) {
+        return {
+          'ok': false,
+          'error':
+              'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
+        };
+      }
+      return await MobileBackendService().fetchClassSchedule();
+    } catch (e) {
+      return {'ok': false, 'error': 'Could not load class schedule.'};
+    }
+  }
+
+  Future<Map<String, dynamic>> uploadClassSchedule({
+    required String fileName,
+    String? filePath,
+    List<int>? bytes,
+  }) async {
+    try {
+      if (!MobileBackendService.isConfigured) {
+        return {
+          'ok': false,
+          'error':
+              'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
+        };
+      }
+      return await MobileBackendService().uploadClassSchedulePdf(
+        fileName: fileName,
+        filePath: filePath,
+        bytes: bytes,
+      );
+    } catch (e) {
+      return {'ok': false, 'error': 'Could not update class schedule.'};
+    }
+  }
+
+  static const fcmKeepAfterDailyLogoutKey = 'fcm_keep_after_daily_logout';
+  static const pendingFcmTapKey = 'pending_fcm_tap';
 
   Future<void> _unregisterDevicePushToken({String? userId}) async {
     try {
@@ -691,12 +777,29 @@ class AuthService {
     }
   }
 
-  // Logout
-  Future<void> logout() async {
+  static Future<bool> shouldKeepFcmToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(fcmKeepAfterDailyLogoutKey) ?? false;
+  }
+
+  static Future<void> clearFcmKeepFlag() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(fcmKeepAfterDailyLogoutKey);
+  }
+
+  /// [unregisterPush]: false for Manila 12:00 AM daily OTP gate (same phone,
+  /// same person — keep FCM mapping so reminders still arrive). True for
+  /// Sign out / account switch.
+  Future<void> logout({bool unregisterPush = true}) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id');
-      await _unregisterDevicePushToken(userId: userId);
+      if (unregisterPush) {
+        await prefs.remove(fcmKeepAfterDailyLogoutKey);
+        await _unregisterDevicePushToken(userId: userId);
+      } else {
+        await prefs.setBool(fcmKeepAfterDailyLogoutKey, true);
+      }
       try {
         await MobileBackendService().logout();
       } catch (_) {
@@ -707,7 +810,9 @@ class AuthService {
     }
     final prefs = await SharedPreferences.getInstance();
     final preservedStringLists = <String, List<String>>{};
+    final preservedStrings = <String, String>{};
     final preservedInts = <String, int>{};
+    final preservedBools = <String, bool>{};
     for (final key in prefs.getKeys()) {
       if (key == 'shown_local_interactive_notifications' ||
           key.startsWith('shown_local_interactive_notifications_') ||
@@ -716,6 +821,18 @@ class AuthService {
         final value = prefs.getStringList(key);
         if (value != null) {
           preservedStringLists[key] = List<String>.from(value);
+        }
+      }
+      if (key == pendingFcmTapKey) {
+        final value = prefs.getString(key);
+        if (value != null) {
+          preservedStrings[key] = value;
+        }
+      }
+      if (key == fcmKeepAfterDailyLogoutKey) {
+        final value = prefs.getBool(key);
+        if (value != null) {
+          preservedBools[key] = value;
         }
       }
       // Keep OTP resend cooldown across logout / back → login so we don't spam.
@@ -730,8 +847,14 @@ class AuthService {
     for (final entry in preservedStringLists.entries) {
       await prefs.setStringList(entry.key, entry.value);
     }
+    for (final entry in preservedStrings.entries) {
+      await prefs.setString(entry.key, entry.value);
+    }
     for (final entry in preservedInts.entries) {
       await prefs.setInt(entry.key, entry.value);
+    }
+    for (final entry in preservedBools.entries) {
+      await prefs.setBool(entry.key, entry.value);
     }
     await OfflineScanStore.instance.clearAll();
     await _offlineBackupService.autoBackupIfConfigured();
@@ -930,7 +1053,9 @@ class AuthService {
 
       try {
         final response = await MobileBackendService().updateProfile({
-          'photo_url': photoUrl,
+          'photo_url': (photoPath != null && photoPath.isNotEmpty)
+              ? photoPath
+              : photoUrl,
         });
         if (response['ok'] != true) {
           warning =
@@ -967,47 +1092,66 @@ class AuthService {
     }
   }
 
-  // Upload Avatar to Supabase Storage
+  // Upload avatar via PHP BFF (private avatars bucket — anon RLS blocks direct upload).
   Future<Map<String, dynamic>> uploadAvatar(File file) async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id');
       if (userId == null) return {'ok': false, 'error': 'Not logged in'};
 
-      final fileExt = file.path.split('.').last;
-      // Use fixed filename (userId) to replace existing photo instead of piling up new files
-      final fileName = '$userId.$fileExt';
-      final filePath = 'profiles/$fileName';
-
-      // 1. Upload to Supabase Storage (Bucket: avatars) with upsert: true
-      await _supabase.storage
-          .from('avatars')
-          .upload(
-            filePath,
-            file,
-            fileOptions: const FileOptions(
-              cacheControl: '0',
-              upsert: true,
-            ), // Set cacheControl to 0
-          );
-
-      // 2. Resolve a usable URL:
-      //    - Prefer public URL if avatar bucket is public/readable.
-      //    - Fallback to signed URL if public read is blocked.
-      final resolvedUrl = await _resolveAvatarUrl(filePath);
-      if (resolvedUrl == null || resolvedUrl.isEmpty) {
+      if (!MobileBackendService.isConfigured) {
         return {
           'ok': false,
-          'error':
-              'Image uploaded to storage, but could not get a readable URL. Check avatars bucket read policy/public access.',
+          'error': 'Hosted backend is not configured.',
         };
       }
 
-      // 3. Add timestamp for cache busting (so app knows it's a new version)
-      final cacheBusterUrl = _withCacheBuster(resolvedUrl);
+      final bytes = await file.readAsBytes();
+      if (bytes.isEmpty) {
+        return {'ok': false, 'error': 'Selected image is empty.'};
+      }
+      if (bytes.length > 5 * 1024 * 1024) {
+        return {'ok': false, 'error': 'Photo must be 5 MB or smaller.'};
+      }
 
-      // 4. Update profile
-      return await updatePhotoUrl(cacheBusterUrl, photoPath: filePath);
+      final fileName = file.uri.pathSegments.isNotEmpty
+          ? file.uri.pathSegments.last
+          : 'avatar.jpg';
+      final res = await MobileBackendService().uploadAvatarFile(
+        bytes: bytes,
+        fileName: fileName,
+      );
+      if (res['ok'] != true) {
+        return {
+          'ok': false,
+          'error': res['error']?.toString() ?? 'Upload failed.',
+        };
+      }
+
+      final filePath = (res['path']?.toString() ?? '').trim();
+      if (filePath.isEmpty) {
+        return {
+          'ok': false,
+          'error': 'Upload succeeded but no avatar path was returned.',
+        };
+      }
+
+      var signed = (res['signed_url']?.toString() ?? '').trim();
+      if (signed.isEmpty) {
+        signed = (await _resolveAvatarUrl(filePath)) ?? '';
+      }
+      if (signed.isEmpty) {
+        return {
+          'ok': false,
+          'error':
+              'Image uploaded, but could not get a readable URL. Try again.',
+        };
+      }
+
+      return await updatePhotoUrl(
+        _withCacheBuster(signed),
+        photoPath: filePath,
+      );
     } catch (e) {
       return {'ok': false, 'error': 'Upload failed: ${e.toString()}'};
     }
@@ -1017,46 +1161,23 @@ class AuthService {
     final path = filePath.trim().replaceFirst(RegExp(r'^/+'), '');
     if (path.isEmpty) return null;
 
-    // Prefer PHP BFF (service role) — avatars bucket is private; anon cannot sign.
-    if (MobileBackendService.isConfigured) {
-      try {
-        final token = await MobileBackendService.getSessionToken();
-        if (token != null && token.isNotEmpty) {
-          final res = await MobileBackendService().createSignedStorageUrl(
-            bucket: 'avatars',
-            path: path,
-            expiresIn: 60 * 60 * 12,
-          );
-          final signed = (res['signed_url']?.toString() ?? '').trim();
-          if (res['ok'] == true && signed.isNotEmpty) {
-            return signed;
-          }
-        }
-      } catch (_) {}
-    }
-
-    final publicUrl = _supabase.storage.from('avatars').getPublicUrl(path);
-    if (await _isUrlReachable(publicUrl)) return publicUrl;
-
+    // PHP BFF only — avatars bucket is private; anon sign/public info returns 400.
+    if (!MobileBackendService.isConfigured) return null;
     try {
-      final signedUrl = await _supabase.storage
-          .from('avatars')
-          .createSignedUrl(path, 60 * 60 * 24);
-      if (signedUrl.isNotEmpty) return signedUrl;
+      final token = await MobileBackendService.getSessionToken();
+      if (token == null || token.isEmpty) return null;
+      final res = await MobileBackendService().createSignedStorageUrl(
+        bucket: 'avatars',
+        path: path,
+        expiresIn: 60 * 60 * 12,
+      );
+      final signed = (res['signed_url']?.toString() ?? '').trim();
+      if (res['ok'] == true && signed.isNotEmpty) {
+        return signed;
+      }
     } catch (_) {}
 
     return null;
-  }
-
-  Future<bool> _isUrlReachable(String url) async {
-    try {
-      final res = await http
-          .get(Uri.parse(url))
-          .timeout(const Duration(seconds: 3));
-      return res.statusCode >= 200 && res.statusCode < 400;
-    } catch (_) {
-      return false;
-    }
   }
 
   bool _isSupabaseSignedAvatarUrl(String url) {
@@ -1144,20 +1265,26 @@ class AuthService {
     return null;
   }
 
-  /// After lockdown, photo_url may be a dead public URL with no photo_path.
-  /// Upload convention is profiles/{userId}.{ext}.
-  Future<String?> _guessAvatarPath(String userId) async {
-    final id = userId.trim();
-    if (id.isEmpty) return null;
-    for (final ext in ['jpg', 'jpeg', 'png', 'webp']) {
-      final path = 'profiles/$id.$ext';
-      final url = await _resolveAvatarUrl(path);
-      if (url != null &&
-          url.isNotEmpty &&
-          await _isUrlReachable(url)) {
-        return path;
-      }
+  /// After lockdown, photo_url may be empty with no photo_path.
+  /// Resolve via PHP BFF (service-role list + sign). Never probe from the app.
+  Future<Map<String, String>?> _resolveOwnAvatarFromServer() async {
+    if (!MobileBackendService.isConfigured) return null;
+    try {
+      final token = await MobileBackendService.getSessionToken();
+      if (token == null || token.isEmpty) return null;
+      final res = await MobileBackendService().resolveOwnAvatar(
+        expiresIn: 60 * 60 * 12,
+      );
+      if (res['ok'] != true) return null;
+      final signed = (res['signed_url']?.toString() ?? '').trim();
+      final path = (res['path']?.toString() ?? '').trim();
+      if (signed.isEmpty) return null;
+      return {
+        'signed_url': signed,
+        'path': path,
+      };
+    } catch (_) {
+      return null;
     }
-    return null;
   }
 }

@@ -4,16 +4,18 @@ import '../services/auth_service.dart';
 import '../services/device_performance_service.dart';
 import '../services/event_service.dart';
 import '../services/notification_service.dart';
-import '../screens/student/student_certificates.dart';
-import '../screens/student/student_event_details.dart';
-import '../screens/teacher/teacher_event_manage.dart';
-import '../screens/teacher/teacher_proposal_requirements_page.dart';
 import '../widgets/custom_loader.dart';
 import '../utils/teacher_theme_utils.dart';
-import '../utils/app_page_routes.dart';
+import '../utils/notification_navigation.dart';
 
 class NotificationsPage extends StatefulWidget {
-  const NotificationsPage({super.key});
+  const NotificationsPage({
+    super.key,
+    this.isTeacherTheme = false,
+  });
+
+  /// Known at push time so the header is sky on the first teacher frame.
+  final bool isTeacherTheme;
 
   @override
   State<NotificationsPage> createState() => _NotificationsPageState();
@@ -26,7 +28,7 @@ class _NotificationsPageState extends State<NotificationsPage> {
 
   List<AppNotification> _notifications = [];
   bool _isLoading = true;
-  bool _isTeacherTheme = false;
+  late bool _isTeacherTheme;
   String _selectedFilter = 'All'; // 'All', 'Unread', 'Events', 'Alerts'
   StreamSubscription<int>? _unreadSubscription;
 
@@ -38,6 +40,7 @@ class _NotificationsPageState extends State<NotificationsPage> {
   @override
   void initState() {
     super.initState();
+    _isTeacherTheme = widget.isTeacherTheme;
     _loadData(force: true);
     _unreadSubscription = _service.unreadCountStream.listen((_) {
       _loadData();
@@ -46,12 +49,14 @@ class _NotificationsPageState extends State<NotificationsPage> {
 
   Future<void> _loadData({bool force = false}) async {
     final user = await _auth.getCurrentUser();
-    final role = user?['role']?.toString().toLowerCase() ?? 'student';
+    final role = user?['role']?.toString().toLowerCase() ?? '';
     final notifs = await _service.getNotifications(forceRefresh: force);
 
     if (!mounted) return;
     setState(() {
-      _isTeacherTheme = role == 'teacher';
+      if (role.isNotEmpty) {
+        _isTeacherTheme = NotificationNavigation.isTeacherRole(role);
+      }
       _notifications = notifs;
       _isLoading = false;
     });
@@ -113,11 +118,11 @@ class _NotificationsPageState extends State<NotificationsPage> {
               decoration: BoxDecoration(
                 gradient: LinearGradient(
                   colors: _isTeacherTheme
-                      ? [const Color(0xFF380808), const Color(0xFF7F1D1D)]
-                      : [
-                          const Color(0xFF1C0A0A),
-                          const Color(0xFF7F1D1D),
-                          const Color(0xFF9A3412)
+                      ? TeacherThemeUtils.chromeGradient
+                      : const [
+                          Color(0xFF1C0A0A),
+                          Color(0xFF7F1D1D),
+                          Color(0xFF9A3412)
                         ],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
@@ -333,7 +338,11 @@ class _NotificationsPageState extends State<NotificationsPage> {
                 Text(
                   label,
                   style: TextStyle(
-                    color: isSelected ? const Color(0xFF7F1D1D) : Colors.white,
+                    color: isSelected
+                        ? (_isTeacherTheme
+                            ? TeacherThemeUtils.dark
+                            : const Color(0xFF7F1D1D))
+                        : Colors.white,
                     fontWeight: isSelected ? FontWeight.w900 : FontWeight.w700,
                     fontSize: 13,
                   ),
@@ -345,7 +354,10 @@ class _NotificationsPageState extends State<NotificationsPage> {
                         horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
                       color: isSelected
-                          ? const Color(0xFF7F1D1D).withValues(alpha: 0.12)
+                          ? (_isTeacherTheme
+                                  ? TeacherThemeUtils.dark
+                                  : const Color(0xFF7F1D1D))
+                              .withValues(alpha: 0.12)
                           : Colors.white.withValues(alpha: 0.25),
                       borderRadius: BorderRadius.circular(10),
                     ),
@@ -353,7 +365,9 @@ class _NotificationsPageState extends State<NotificationsPage> {
                       '$count',
                       style: TextStyle(
                         color: isSelected
-                            ? const Color(0xFF7F1D1D)
+                            ? (_isTeacherTheme
+                                ? TeacherThemeUtils.dark
+                                : const Color(0xFF7F1D1D))
                             : Colors.white,
                         fontSize: 10.5,
                         fontWeight: FontWeight.w900,
@@ -632,88 +646,12 @@ class _NotificationsPageState extends State<NotificationsPage> {
   }
 
   Future<void> _openNotificationTarget(AppNotification n) async {
-    final role =
-        (await _auth.getCurrentUser())?['role']?.toString().toLowerCase() ??
-            'student';
     if (!mounted) return;
-
-    if (n.id.startsWith('cert_')) {
-      Navigator.of(context).push(
-        AppPageRoute(builder: (_) => const StudentCertificates()),
-      );
-      return;
-    }
-
-    final eventId = n.eventId?.trim() ?? '';
-    if (eventId.isEmpty) return;
-
-    Map<String, dynamic>? event;
-    try {
-      event = await _eventService.getEventById(eventId);
-    } catch (_) {
-      event = null;
-    }
-
-    if (role == 'teacher') {
-      if (event != null && mounted) {
-        final opensProposalRequirements = n.id.startsWith('proposal_req_') ||
-            n.id.startsWith('proposal_under_review_');
-        if (opensProposalRequirements) {
-          Navigator.of(context).push(
-            AppPageRoute(
-              builder: (_) => TeacherProposalRequirementsPage(event: event!),
-            ),
-          );
-          return;
-        }
-        Navigator.of(context).push(
-          AppPageRoute(builder: (_) => TeacherEventManage(event: event!)),
-        );
-        return;
-      }
-    }
-
-    if (role == 'student' && event != null) {
-      final user = await _auth.getCurrentUser();
-      final userId = user?['id']?.toString().trim() ?? '';
-      String? yearLevel;
-      String? courseCode;
-      String? specialization;
-      if (userId.isNotEmpty) {
-        final scope = await _eventService.getStudentTargetScope(userId);
-        yearLevel = scope['yearLevel'];
-        courseCode = scope['courseCode'];
-        specialization = scope['specialization'];
-      } else {
-        yearLevel = await _auth.getStudentYearLevel();
-        courseCode = await _auth.getStudentCourseCode();
-      }
-      final allowed = _eventService.isStudentAllowedForEvent(
-        event,
-        yearLevel: yearLevel,
-        courseCode: courseCode,
-        specialization: specialization,
-      );
-      if (!allowed) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content:
-                Text('This event is not available for your course/year level.'),
-          ),
-        );
-        return;
-      }
-    }
-
-    if (!mounted) return;
-    Navigator.of(context).push(
-      AppPageRoute(
-        builder: (_) => StudentEventDetails(
-          eventId: eventId,
-          initialEvent: event,
-        ),
-      ),
+    await NotificationNavigation.open(
+      context,
+      n,
+      auth: _auth,
+      eventService: _eventService,
     );
   }
 }

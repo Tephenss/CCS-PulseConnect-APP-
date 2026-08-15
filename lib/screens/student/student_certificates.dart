@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
@@ -248,7 +250,6 @@ class _StudentCertificatesState extends State<StudentCertificates>
       _isDownloading = true;
     }
 
-    final messenger = ScaffoldMessenger.of(context);
     try {
       Uint8List? imageBytes = renderedImageBytes;
 
@@ -266,11 +267,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
       }
 
       if (imageBytes == null || imageBytes.isEmpty) {
-        messenger.showSnackBar(
-          const SnackBar(
-            content: Text('Certificate file is unavailable for download.'),
-          ),
-        );
+        AppSnackBar.error(context, 'Certificate file is unavailable for download.');
         return;
       }
 
@@ -288,9 +285,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
       );
 
       if (savedName != null && savedName.isNotEmpty) {
-        messenger.showSnackBar(
-          SnackBar(content: Text('Saved to Downloads as $savedName')),
-        );
+        AppSnackBar.success(context, 'Saved to Downloads as $savedName');
         return;
       }
 
@@ -305,9 +300,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
         ),
       );
     } catch (_) {
-      messenger.showSnackBar(
-        const SnackBar(content: Text('Failed to download certificate.')),
-      );
+      AppSnackBar.error(context, 'Failed to download certificate.');
     } finally {
       if (!alreadyLocked) {
         _isDownloading = false;
@@ -504,6 +497,12 @@ class _StudentCertificatesState extends State<StudentCertificates>
       if (resolvedName.isNotEmpty) {
         _cachedParticipantName = resolvedName;
       }
+      await Future.wait(certs.map((cert) async {
+        final id = cert['id']?.toString() ?? '';
+        if (id.isEmpty) return;
+        if (_CertificatePreviewCache.peek(id) != null) return;
+        await _CertificatePreviewCache.load(id);
+      }));
       final previousById = <String, Map<String, dynamic>>{
         for (final row in _certificates)
           if ((row['id']?.toString() ?? '').isNotEmpty)
@@ -590,15 +589,102 @@ class _StudentCertificatesState extends State<StudentCertificates>
 
   @override
   Widget build(BuildContext context) {
+    final chromeColor = CourseThemeUtils.studentChromeFromPrimary(
+      _studentPrimary(context),
+    );
     return Scaffold(
       backgroundColor: const Color(0xFFF9FAFB),
-      appBar: AppBar(
-        automaticallyImplyLeading: false,
-        backgroundColor: _studentPrimary(context),
-        centerTitle: true,
-        title: const Text(
-          'Certificates',
-          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 20, color: Colors.white),
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(100.0),
+        child: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: CourseThemeUtils.studentTicketGradientFromPrimary(
+                _studentPrimary(context),
+              ),
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: chromeColor.withValues(alpha: 0.3),
+                blurRadius: 15,
+                offset: const Offset(0, 8),
+              ),
+            ],
+            borderRadius: const BorderRadius.only(
+              bottomLeft: Radius.circular(32),
+              bottomRight: Radius.circular(32),
+            ),
+          ),
+          child: SafeArea(
+            bottom: false,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(8, 12, 24, 16),
+              child: Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(
+                      Icons.arrow_back_ios_new_rounded,
+                      color: Colors.white,
+                      size: 20,
+                    ),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.18),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.25),
+                        width: 1.5,
+                      ),
+                      boxShadow: const [
+                        BoxShadow(
+                          color: Colors.black12,
+                          blurRadius: 8,
+                          offset: Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: const Icon(
+                      Icons.workspace_premium_rounded,
+                      color: Color(0xFFFBBF24), // Gold
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Certificates',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 24,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: -0.5,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'Your earned achievements',
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.85),
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
       body: _isLoading
@@ -619,55 +705,77 @@ class _StudentCertificatesState extends State<StudentCertificates>
                   : Column(
                       children: [
                         Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                          child: TextField(
-                            controller: _searchController,
-                            onChanged: (value) {
-                              setState(() {
-                                _searchQuery = value;
-                              });
-                            },
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
+                          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.04),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
                             ),
-                            decoration: InputDecoration(
-                              hintText: 'Search certificates',
-                              prefixIcon: const Icon(Icons.search_rounded),
-                              suffixIcon: _searchQuery.isNotEmpty
-                                  ? IconButton(
-                                      icon: const Icon(Icons.close_rounded),
-                                      onPressed: () {
-                                        _searchController.clear();
-                                        setState(() {
-                                          _searchQuery = '';
-                                        });
-                                      },
-                                    )
-                                  : const Icon(Icons.tune_rounded),
-                              filled: true,
-                              fillColor: const Color(0xFFFCFCFC),
-                              contentPadding: const EdgeInsets.symmetric(
-                                vertical: 12,
-                                horizontal: 14,
+                            child: TextField(
+                              controller: _searchController,
+                              onChanged: (value) {
+                                setState(() {
+                                  _searchQuery = value;
+                                });
+                              },
+                              style: const TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
                               ),
-                              border: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(14),
-                                borderSide: BorderSide(
-                                  color: const Color(0xFFE5E7EB),
+                              decoration: InputDecoration(
+                                hintText: 'Search certificates',
+                                hintStyle: TextStyle(
+                                  color: Colors.grey.shade400,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
                                 ),
-                              ),
-                              enabledBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(14),
-                                borderSide: BorderSide(
-                                  color: const Color(0xFFE5E7EB),
+                                prefixIcon: Icon(
+                                  Icons.search_rounded,
+                                  color: _studentPrimary(context).withValues(alpha: 0.7),
                                 ),
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(14),
-                                borderSide: BorderSide(
-                                  color: _studentPrimary(context),
-                                  width: 1.4,
+                                suffixIcon: _searchQuery.isNotEmpty
+                                    ? IconButton(
+                                        icon: const Icon(Icons.close_rounded),
+                                        onPressed: () {
+                                          _searchController.clear();
+                                          setState(() {
+                                            _searchQuery = '';
+                                          });
+                                        },
+                                      )
+                                    : Icon(
+                                        Icons.tune_rounded,
+                                        color: Colors.grey.shade400,
+                                      ),
+                                filled: true,
+                                fillColor: Colors.white,
+                                contentPadding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                  horizontal: 16,
+                                ),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                  borderSide: BorderSide(
+                                    color: Colors.grey.shade200,
+                                  ),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                  borderSide: BorderSide(
+                                    color: Colors.grey.shade200,
+                                  ),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(16),
+                                  borderSide: BorderSide(
+                                    color: _studentPrimary(context),
+                                    width: 1.5,
+                                  ),
                                 ),
                               ),
                             ),
@@ -767,100 +875,183 @@ class _StudentCertificatesState extends State<StudentCertificates>
       try { startDate = DateTime.parse(startAt); } catch (_) {}
     }
 
-    return GestureDetector(
-      onTap: () => _showCertificatePreview(cert),
-      child: SizedBox(
+    return SizedBox(
         width: double.infinity,
         child: Container(
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFFE5E7EB)),
-          boxShadow: [
-            BoxShadow(
-              color: const Color(0x1A111827),
-              blurRadius: 14,
-              offset: const Offset(0, 6),
-            ),
-          ],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            SizedBox(
-              height: 160,
-              child: ClipRRect(
-                borderRadius: const BorderRadius.vertical(
-                  top: Radius.circular(15),
-                ),
-                // Cached personal PNG only — never Fabric / never raw {{participant_name}} thumb.
-                child: _CertificateListThumb(
-                  cert: cert,
-                  certId: cert['id']?.toString() ?? '',
-                  participantName: () {
-                    final n = _participantName(cert);
-                    if (n.isNotEmpty) return n;
-                    return (_cachedParticipantName ?? '').trim();
-                  }(),
-                  title: eventTitle,
-                  eventService: _eventService,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: const Color(0xFFE5E7EB)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.06),
+                blurRadius: 20,
+                offset: const Offset(0, 10),
+              ),
+              BoxShadow(
+                color: _studentPrimary(context).withValues(alpha: 0.03),
+                blurRadius: 30,
+                offset: const Offset(0, 15),
+                spreadRadius: -5,
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(
+                height: 160,
+                child: ClipRRect(
+                  borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(19),
+                  ),
+                  // Cached personal PNG only — never Fabric / never raw {{participant_name}} thumb.
+                  child: _CertificateListThumb(
+                    key: ValueKey('cert-thumb-${cert['id']?.toString() ?? ''}'),
+                    cert: cert,
+                    certId: cert['id']?.toString() ?? '',
+                    participantName: () {
+                      final n = _participantName(cert);
+                      if (n.isNotEmpty) return n;
+                      return (_cachedParticipantName ?? '').trim();
+                    }(),
+                    title: eventTitle,
+                    eventService: _eventService,
+                  ),
                 ),
               ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (seminarLabel != null && seminarLabel.isNotEmpty)
-                    Container(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 4,
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (seminarLabel != null && seminarLabel.isNotEmpty)
+                            Container(
+                              margin: const EdgeInsets.only(bottom: 10),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 5,
+                              ),
+                              decoration: BoxDecoration(
+                                gradient: const LinearGradient(
+                                  colors: [Color(0xFFFFFBEB), Color(0xFFFEF3C7)],
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                ),
+                                borderRadius: BorderRadius.circular(30),
+                                border: Border.all(
+                                  color: const Color(0xFFFDE68A),
+                                  width: 1,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: const Color(0xFFD97706).withValues(alpha: 0.08),
+                                    blurRadius: 4,
+                                    offset: const Offset(0, 2),
+                                  ),
+                                ],
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.bookmark_added_rounded,
+                                    size: 13,
+                                    color: Color(0xFFD97706),
+                                  ),
+                                  const SizedBox(width: 5),
+                                  Flexible(
+                                    child: Text(
+                                      seminarLabel,
+                                      style: GoogleFonts.inter(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w800,
+                                        color: const Color(0xFF92400E),
+                                        letterSpacing: 0.2,
+                                      ),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          Text(
+                            eventTitle,
+                            style: GoogleFonts.inter(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 18,
+                              color: const Color(0xFF1F2937),
+                              letterSpacing: -0.3,
+                              height: 1.25,
+                            ),
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.calendar_today_rounded,
+                                size: 13,
+                                color: Colors.grey.shade400,
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                startDate != null
+                                    ? DateFormat('MMMM dd, yyyy').format(startDate)
+                                    : '--',
+                                style: GoogleFonts.inter(
+                                  fontSize: 12,
+                                  color: const Color(0xFF6B7280),
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFEF3C7),
-                        borderRadius: BorderRadius.circular(999),
-                        border: Border.all(color: const Color(0xFFFBBF24)),
-                      ),
-                      child: Text(
-                        seminarLabel,
-                        style: GoogleFonts.inter(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: const Color(0xFF92400E),
+                    ),
+                    const SizedBox(width: 16),
+                    GestureDetector(
+                      onTap: () => _showCertificatePreview(cert),
+                      child: Container(
+                        width: 44,
+                        height: 44,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              _studentPrimary(context),
+                              CourseThemeUtils.studentDarkFromPrimary(_studentPrimary(context)),
+                            ],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                          shape: BoxShape.circle,
+                          boxShadow: [
+                            BoxShadow(
+                              color: _studentPrimary(context).withValues(alpha: 0.35),
+                              blurRadius: 10,
+                              offset: const Offset(0, 4),
+                            ),
+                          ],
+                        ),
+                        child: const Icon(
+                          Icons.arrow_forward_rounded,
+                          color: Colors.white,
+                          size: 20,
                         ),
                       ),
                     ),
-                  Text(
-                    eventTitle,
-                    style: GoogleFonts.inter(
-                      fontWeight: FontWeight.w800,
-                      fontSize: 18,
-                      color: Color(0xFF1F2937),
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    startDate != null
-                        ? DateFormat('MMM dd, yyyy').format(startDate)
-                        : '--',
-                    style: GoogleFonts.inter(
-                      fontSize: 12,
-                      color: const Color(0xFF6B7280),
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
-        ),
-      ),
     );
   }
 
@@ -972,8 +1163,11 @@ class _CertificatePreviewDialogState extends State<_CertificatePreviewDialog> {
   bool _loadingCanvas = true;
   bool _previewReady = false;
   bool _isSaving = false;
+  Uint8List? _cachedPng;
   final GlobalKey<_CertificateCanvasPreviewState> _canvasKey =
       GlobalKey<_CertificateCanvasPreviewState>();
+
+  String get _certId => _cert['id']?.toString() ?? '';
 
   @override
   void initState() {
@@ -981,12 +1175,38 @@ class _CertificatePreviewDialogState extends State<_CertificatePreviewDialog> {
     _cert = widget.cert;
     _canvasState = widget.seedCanvas;
     _participantName = widget.seedParticipantName;
-    _loadingCanvas = true;
-    _previewReady = false;
+    _cachedPng = _CertificatePreviewCache.peek(_certId);
+    _loadingCanvas = _cachedPng == null;
+    _previewReady = _cachedPng != null;
     unawaited(_bootstrap());
   }
 
   Future<void> _bootstrap() async {
+    if (_cachedPng == null && _certId.isNotEmpty) {
+      final disk = await _CertificatePreviewCache.load(_certId);
+      if (!mounted) return;
+      if (disk != null && disk.isNotEmpty) {
+        setState(() {
+          _cachedPng = disk;
+          _loadingCanvas = false;
+          _previewReady = true;
+        });
+        final name = await widget.resolveParticipantName(_cert);
+        if (!mounted) return;
+        if (name.isNotEmpty) {
+          setState(() => _participantName = name);
+        }
+        return;
+      }
+    } else if (_cachedPng != null) {
+      final name = await widget.resolveParticipantName(_cert);
+      if (!mounted) return;
+      if (name.isNotEmpty) {
+        setState(() => _participantName = name);
+      }
+      return;
+    }
+
     final nameFuture = widget.resolveParticipantName(_cert);
     Map<String, dynamic>? canvas = _canvasState;
     if (canvas == null) {
@@ -1013,8 +1233,7 @@ class _CertificatePreviewDialogState extends State<_CertificatePreviewDialog> {
       _canvasState = canvas;
       if (name.isNotEmpty) _participantName = name;
       _loadingCanvas = false;
-      // Keep spinner until Fabric paints (onReady), unless no canvas at all.
-      _previewReady = canvas == null;
+      _previewReady = canvas == null || _cachedPng != null;
     });
   }
 
@@ -1059,6 +1278,20 @@ class _CertificatePreviewDialogState extends State<_CertificatePreviewDialog> {
   }
 
   Widget _previewBody() {
+    if (_cachedPng != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Image.memory(
+          _cachedPng!,
+          fit: BoxFit.contain,
+          width: double.infinity,
+          height: double.infinity,
+          gaplessPlayback: true,
+          filterQuality: FilterQuality.high,
+        ),
+      );
+    }
+
     if (_canvasState == null) {
       if (_loadingCanvas) return _loadingPanel();
       return Center(
@@ -1186,15 +1419,16 @@ class _CertificatePreviewDialogState extends State<_CertificatePreviewDialog> {
                     ),
                   ),
                   child: ElevatedButton.icon(
-                    onPressed: _isSaving || !_previewReady || _canvasState == null
+                    onPressed: _isSaving || !_previewReady
                         ? null
                         : () async {
                             if (_isSaving) return;
                             setState(() => _isSaving = true);
                             try {
-                              Uint8List? rendered;
+                              Uint8List? rendered = _cachedPng;
                               final state = _canvasKey.currentState;
-                              if (state != null) {
+                              if ((rendered == null || rendered.isEmpty) &&
+                                  state != null) {
                                 rendered = await state.exportPng();
                               }
                               if (rendered != null &&
@@ -1202,7 +1436,7 @@ class _CertificatePreviewDialogState extends State<_CertificatePreviewDialog> {
                                   _participantName.isNotEmpty) {
                                 unawaited(
                                   _CertificatePreviewCache.save(
-                                    _cert['id']?.toString() ?? '',
+                                    _certId,
                                     rendered,
                                   ),
                                 );
@@ -1306,6 +1540,7 @@ class _CertificatePreviewCache {
 /// List thumb: show loading → real PNG. Generates once via Fabric if not cached.
 class _CertificateListThumb extends StatefulWidget {
   const _CertificateListThumb({
+    super.key,
     required this.cert,
     required this.certId,
     required this.participantName,
@@ -1353,7 +1588,8 @@ class _CertificateListThumbState extends State<_CertificateListThumb> {
     final peeked = _CertificatePreviewCache.peek(widget.certId);
     if (peeked != null) {
       _pngBytes = peeked;
-    } else {
+    }
+    if (_pngBytes == null) {
       unawaited(_bootstrap());
     }
   }

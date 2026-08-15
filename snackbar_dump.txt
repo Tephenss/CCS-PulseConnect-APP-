@@ -1,0 +1,774 @@
+﻿
+
+Filename   : main.dart
+LineNumber : 484
+Line       :       messenger.showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : main.dart
+LineNumber : 485
+Line       :         SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : change_password_screen.dart
+LineNumber : 106
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : change_password_screen.dart
+LineNumber : 107
+Line       :           SnackBar(content: const Text('Password changed successfully!'), backgroundColor: _primaryColor),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : change_password_screen.dart
+LineNumber : 120
+Line       :     ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : change_password_screen.dart
+LineNumber : 121
+Line       :       SnackBar(content: Text(message), backgroundColor: const Color(0xFF7F1D1D)),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : forgot_password_screen.dart
+LineNumber : 183
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : forgot_password_screen.dart
+LineNumber : 184
+Line       :         SnackBar(content: Text(msg), backgroundColor: const Color(0xFF7F1D1D)),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : forgot_password_screen.dart
+LineNumber : 191
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : forgot_password_screen.dart
+LineNumber : 192
+Line       :         SnackBar(content: Text(msg), backgroundColor: const Color(0xFF15803D)),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : login_screen.dart
+LineNumber : 81
+Line       :         SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : login_screen.dart
+LineNumber : 89
+Line       :         SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : login_screen.dart
+LineNumber : 97
+Line       :         SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : login_screen.dart
+LineNumber : 111
+Line       :         await messenger.showSnackBar(snackBar).closed;
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_certificates.dart
+LineNumber : 269
+Line       :         messenger.showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_certificates.dart
+LineNumber : 270
+Line       :           const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_certificates.dart
+LineNumber : 291
+Line       :         messenger.showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_certificates.dart
+LineNumber : 292
+Line       :           SnackBar(content: Text('Saved to Downloads as $savedName')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_certificates.dart
+LineNumber : 308
+Line       :       messenger.showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_certificates.dart
+LineNumber : 309
+Line       :         const SnackBar(content: Text('Failed to download certificate.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1156
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1157
+Line       :           SnackBar(content: Text(_registrationClosedMessage())),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1178
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1179
+Line       :           const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1205
+Line       :           ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1206
+Line       :             SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1233
+Line       :           ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1234
+Line       :             SnackBar(content: Text(_registrationClosedMessage())),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1276
+Line       :                 ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1277
+Line       :                   const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1473
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1474
+Line       :           const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1484
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1485
+Line       :           SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1544
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1545
+Line       :         SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1577
+Line       :           ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1578
+Line       :             const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1589
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_details.dart
+LineNumber : 1590
+Line       :           SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_evaluation.dart
+LineNumber : 93
+Line       :           ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_evaluation.dart
+LineNumber : 94
+Line       :             SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_evaluation.dart
+LineNumber : 129
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_evaluation.dart
+LineNumber : 130
+Line       :         const SnackBar(content: Text('Please provide at least one answer before submitting.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_evaluation.dart
+LineNumber : 182
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_evaluation.dart
+LineNumber : 183
+Line       :         SnackBar(content: Text(message)),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_evaluation.dart
+LineNumber : 189
+Line       :     ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_event_evaluation.dart
+LineNumber : 190
+Line       :       SnackBar(content: Text(result['error']?.toString() ?? 'Submission failed.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_home.dart
+LineNumber : 710
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_home.dart
+LineNumber : 711
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_home.dart
+LineNumber : 843
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_home.dart
+LineNumber : 844
+Line       :         const SnackBar(content: Text('Reason submitted successfully.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_profile.dart
+LineNumber : 103
+Line       :           ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_profile.dart
+LineNumber : 104
+Line       :             SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_profile.dart
+LineNumber : 115
+Line       :           ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_profile.dart
+LineNumber : 116
+Line       :             SnackBar(content: Text(res['error'] ?? 'Upload failed'), backgroundColor: Colors.red),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_profile.dart
+LineNumber : 123
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_profile.dart
+LineNumber : 124
+Line       :           SnackBar(content: Text('Error: ${e.toString()}'), backgroundColor: Colors.red),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_profile.dart
+LineNumber : 895
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_profile.dart
+LineNumber : 896
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 373
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 374
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 447
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 448
+Line       :         SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 458
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 459
+Line       :         SnackBar(content: Text('Unable to open file picker: $error')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 494
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 495
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 510
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 511
+Line       :         const SnackBar(content: Text('Unable to read the selected file.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 522
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 523
+Line       :           const SnackBar(content: Text('File is too large. Max 15 MB.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 556
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 557
+Line       :         const SnackBar(content: Text('Document uploaded successfully.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 561
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 562
+Line       :         SnackBar(content: Text('Upload failed: $error')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 599
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 600
+Line       :         SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 622
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 623
+Line       :           const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 632
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_registration_requirements_page.dart
+LineNumber : 633
+Line       :         SnackBar(content: Text(message)),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_scan.dart
+LineNumber : 1271
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_scan.dart
+LineNumber : 1272
+Line       :         SnackBar(content: Text('Offline sync update: $details.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_ticket_view.dart
+LineNumber : 342
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_ticket_view.dart
+LineNumber : 343
+Line       :         const SnackBar(content: Text('Ticket already saved offline.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_ticket_view.dart
+LineNumber : 348
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_ticket_view.dart
+LineNumber : 349
+Line       :         const SnackBar(content: Text('Ticket is not available yet.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_ticket_view.dart
+LineNumber : 408
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_ticket_view.dart
+LineNumber : 409
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_ticket_view.dart
+LineNumber : 416
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : student_ticket_view.dart
+LineNumber : 417
+Line       :         SnackBar(content: Text('Failed to save ticket offline: $e')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 390
+Line       :     ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 391
+Line       :       const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 400
+Line       :     ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 401
+Line       :       SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 420
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 421
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 450
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 451
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 470
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 471
+Line       :           const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 477
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_create_event.dart
+LineNumber : 478
+Line       :           SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1336
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1337
+Line       :           const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1361
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1362
+Line       :           SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1377
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1378
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1390
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1391
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1542
+Line       :                                           messenger.showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1543
+Line       :                                             SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1550
+Line       :                                           messenger.showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 1551
+Line       :                                             SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 2036
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 2037
+Line       :         const SnackBar(content: Text('Mobile backend is not configured.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 2046
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 2047
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 2065
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 2066
+Line       :           SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 3800
+Line       :           ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 3801
+Line       :             const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 3820
+Line       :           ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 3821
+Line       :             const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 3833
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_event_manage.dart
+LineNumber : 3834
+Line       :           SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_profile.dart
+LineNumber : 93
+Line       :           ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_profile.dart
+LineNumber : 94
+Line       :             SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_profile.dart
+LineNumber : 105
+Line       :           ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_profile.dart
+LineNumber : 106
+Line       :             SnackBar(content: Text(res['error'] ?? 'Upload failed'), backgroundColor: Colors.red),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_profile.dart
+LineNumber : 113
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_profile.dart
+LineNumber : 114
+Line       :           SnackBar(content: Text('Error: ${e.toString()}'), backgroundColor: Colors.red),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_profile.dart
+LineNumber : 833
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_profile.dart
+LineNumber : 834
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_proposal_requirements_page.dart
+LineNumber : 329
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_proposal_requirements_page.dart
+LineNumber : 330
+Line       :         const SnackBar(content: Text('Requirement uploaded successfully.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_proposal_requirements_page.dart
+LineNumber : 337
+Line       :       ).showSnackBar(SnackBar(content: Text('Upload failed: $error')));
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_proposal_requirements_page.dart
+LineNumber : 386
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_proposal_requirements_page.dart
+LineNumber : 387
+Line       :         const SnackBar(content: Text('Proposal submitted for admin review.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_proposal_requirements_page.dart
+LineNumber : 394
+Line       :       ).showSnackBar(SnackBar(content: Text('Submit failed: $error')));
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_scan.dart
+LineNumber : 1405
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_scan.dart
+LineNumber : 1406
+Line       :         SnackBar(content: Text('Offline sync update: $details.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_sections.dart
+LineNumber : 96
+Line       :           ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_sections.dart
+LineNumber : 97
+Line       :             SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_section_students.dart
+LineNumber : 52
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : teacher_section_students.dart
+LineNumber : 53
+Line       :           SnackBar(content: Text('Failed to load students: $e'), backgroundColor: Colors.red),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : notification_navigation.dart
+LineNumber : 114
+Line       :         ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : notification_navigation.dart
+LineNumber : 115
+Line       :           const SnackBar(content: Text('This notification has no page to open.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : notification_navigation.dart
+LineNumber : 130
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : notification_navigation.dart
+LineNumber : 131
+Line       :         const SnackBar(content: Text('This event is no longer available.')),
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : notification_navigation.dart
+LineNumber : 182
+Line       :       ScaffoldMessenger.of(context).showSnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+Filename   : notification_navigation.dart
+LineNumber : 183
+Line       :         const SnackBar(
+Context    : Microsoft.PowerShell.Commands.MatchInfoContext
+
+
+

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -13,6 +14,7 @@ import '../../utils/course_theme_utils.dart';
 import '../../widgets/shiny_text.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../../services/device_performance_service.dart';
+import '../../utils/app_page_routes.dart';
 
 class _EventDetailsSnapshot {
   final Map<String, dynamic> event;
@@ -776,17 +778,17 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       _bindApprovalRealtime(userId);
       final missingCover =
           ((_event?['cover_image_url'] ?? '').toString().trim().isEmpty);
-      final results = await Future.wait([
+    final results = await Future.wait([
         _eventService.getEventById(
           widget.eventId,
           forceFresh: forceFresh || missingCover,
         ),
-        _eventService.isRegistered(widget.eventId, userId),
+      _eventService.isRegistered(widget.eventId, userId),
         _eventService.getEventRegistrationSettings(
           widget.eventId,
           forceFresh: forceFresh,
         ),
-        _eventService.getEventSessions(widget.eventId),
+      _eventService.getEventSessions(widget.eventId),
       ]).timeout(const Duration(seconds: 8));
 
       if (!mounted || loadToken != _eventLoadToken) return;
@@ -795,13 +797,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final isRegisteredResult = results[1] as bool;
       var isReg = isRegisteredResult;
       final registrationSettings = results[2] as Map<String, dynamic>?;
-      final sessions = results[3] as List<Map<String, dynamic>>;
+    final sessions = results[3] as List<Map<String, dynamic>>;
       final event = _mergeEventData(baseEvent, registrationSettings);
 
       // Paint event content ASAP. If payment just cleared and registration flips
       // true, keep CTA unresolved until docs gate is known (no See Ticket flash).
       if (mounted && loadToken == _eventLoadToken) {
-        setState(() {
+      setState(() {
           if (event.isNotEmpty) {
             _event = {
               ...?_event,
@@ -818,7 +820,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           }
           _eventSessions = sessions;
           final becameRegistered = isReg && !_isRegistered;
-          _isRegistered = isReg;
+        _isRegistered = isReg;
           final looksPaid =
               event.isNotEmpty ? !_eventLooksFree(event) : false;
           if (becameRegistered &&
@@ -1099,7 +1101,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                 ...nextEvent,
               };
             }
-            _eventSessions = sessions;
+        _eventSessions = sessions;
             _participantCount = resolvedCount;
             _hasStudentRequirements = hasStudentRequirements;
           }
@@ -1118,8 +1120,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             // Stay on Checking... / Loading... — retry shortly.
             _isRegistrationResolved = false;
           }
-          _isLoading = false;
-        });
+        _isLoading = false;
+      });
         if (registrationResolved) {
           _storeDetailsSnapshot();
         }
@@ -1163,7 +1165,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     try {
       final result = await Navigator.push<bool>(
         context,
-        MaterialPageRoute(
+        AppPageRoute(
           builder: (_) => StudentRegistrationRequirementsPage(
             eventId: widget.eventId,
             event: Map<String, dynamic>.from(_event!),
@@ -1174,11 +1176,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       if (!mounted) return;
       await _loadEvent(silent: true);
       if (result == true && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Documents submitted. Wait for teacher approval.'),
-          ),
-        );
+        AppSnackBar.success(context, 'Documents submitted. Wait for teacher approval.');
       }
     } finally {
       if (mounted) {
@@ -1201,15 +1199,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       // Paid: settle payment before any document / register CTA.
       if (_approvalRequired && !_canRegisterNow && !_isRegistered) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                _registrationMessage.isNotEmpty
-                    ? _registrationMessage
-                    : _settlePaymentMessage(),
-              ),
-            ),
-          );
+          AppSnackBar.warning(context, _registrationMessage.isNotEmpty ? _registrationMessage : _settlePaymentMessage());
         }
         return;
       }
@@ -1229,9 +1219,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
       if (_isRegistrationClosedForEvent()) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(_registrationClosedMessage())),
-          );
+        AppSnackBar.warning(context, _registrationClosedMessage());
         }
         return;
       }
@@ -1272,13 +1260,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           if (!approved) {
             if (status == 'pending_review') {
               if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text(
-                      'Your documents are under review. Wait for teacher approval.',
-                    ),
-                  ),
-                );
+                AppSnackBar.info(context, 'Your documents are under review. Wait for teacher approval.');
               }
               return;
             }
@@ -1469,26 +1451,14 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     if (snapshot != null && snapshot['is_full'] == true) {
       await _loadEvent(silent: true);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Registration is full for this event.'),
-          ),
-        );
+        AppSnackBar.error(context, 'Registration is full for this event.');
       }
       return;
     }
 
     if (_isAccessDenied || !_canRegisterNow) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              _registrationMessage.isNotEmpty
-                  ? _registrationMessage
-                  : 'You are not allowed to register for this event.',
-            ),
-          ),
-        );
+        AppSnackBar.warning(context, _registrationMessage.isNotEmpty ? _registrationMessage : 'You are not allowed to register for this event.');
       }
       return;
     }
@@ -1499,7 +1469,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
     if (result['requirements_required'] == true) {
       if (mounted) {
-        setState(() => _isRegistering = false);
+    setState(() => _isRegistering = false);
         await _handleRequirementsFlow();
       }
       return;
@@ -1509,9 +1479,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final nextCount = _participantCount + 1;
 
       if (mounted) {
-        setState(() {
+      setState(() {
           _isRegistering = false;
-          _isRegistered = true;
+        _isRegistered = true;
           _canRegisterNow = false;
           _approvalRequired = false;
           _registrationMessage = '';
@@ -1540,12 +1510,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
     if (mounted) {
       setState(() => _isRegistering = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(result['error'] as String? ?? 'Registration failed'),
-          backgroundColor: _studentPrimary(context),
-        ),
-      );
+      AppSnackBar.error(context, result['error'] as String? ?? 'Registration failed');
     }
   }
 
@@ -1564,32 +1529,20 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         setState(() => _isRegistering = false);
         Navigator.push(
           context,
-          MaterialPageRoute(
+          AppPageRoute(
             builder: (_) => StudentTicketView(ticket: myTicket),
           ),
         );
       } else {
         if (mounted) {
           setState(() => _isRegistering = false);
-        }
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text(
-                'Could not load ticket details. Please check your network connection.',
-              ),
-            ),
-          );
+          AppSnackBar.error(context, 'Could not load ticket details. Please check your network connection.');
         }
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isRegistering = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Connection timeout or error. Please try again.'),
-          ),
-        );
+        AppSnackBar.error(context, 'Connection timeout or error. Please try again.');
       }
     }
   }
@@ -1750,10 +1703,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         color: Colors.white,
         child: CustomScrollView(
           clipBehavior: Clip.hardEdge,
-          slivers: [
-            SliverAppBar(
+        slivers: [
+          SliverAppBar(
               expandedHeight: coverExpandedHeight,
-              pinned: true,
+            pinned: true,
               stretch: true,
               elevation: 0,
               scrolledUnderElevation: 0,
@@ -1804,9 +1757,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                       // Scrim: stronger when collapsed so toolbar icons stay readable
                       DecoratedBox(
                         decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            begin: Alignment.topCenter,
-                            end: Alignment.bottomCenter,
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
                             colors: [
                               Color.lerp(
                                 const Color(0x66000000),
@@ -1878,28 +1831,28 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                               textAlign: TextAlign.left,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ),
-                      ),
+                  ),
+                ),
+              ),
+            ),
                       // Back button
                       Positioned(
                         left: 8,
                         top: topInset + 4,
                         child: IconButton(
-                          icon: Container(
-                            padding: const EdgeInsets.all(8),
-                            decoration: BoxDecoration(
+              icon: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
                               color: Colors.black.withValues(alpha: 0.35),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
+                  borderRadius: BorderRadius.circular(12),
+                ),
                             child: const Icon(
                               Icons.arrow_back_ios_rounded,
                               size: 18,
                               color: Colors.white,
                             ),
-                          ),
-                          onPressed: () => Navigator.pop(context),
+              ),
+              onPressed: () => Navigator.pop(context),
                         ),
                       ),
                       // White left/right curve cut — painted ON TOP of cover so it's visible
@@ -1931,13 +1884,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             ),
 
             // Flat white sheet — curve lives only on the cover so no black crescent cut
-            SliverToBoxAdapter(
+          SliverToBoxAdapter(
               child: Container(
                 color: Colors.white,
                 padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
                   // Event Type Badge
                   if (eventType.isNotEmpty)
                     Container(
@@ -1998,7 +1951,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                     eventFor: eventFor,
                     graceTime: graceTime,
                     event: _event!,
-                  ),
+                    ),
                   if (usesSessions) ...[
                     const SizedBox(height: 12),
                     const Text(
@@ -2066,7 +2019,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                     isRegistrationClosed ||
                     !_canRegisterNow)) ...[
               Container(
-                width: double.infinity,
+          width: double.infinity,
                 margin: const EdgeInsets.only(bottom: 12),
                 padding: const EdgeInsets.symmetric(
                   horizontal: 14,
@@ -2127,48 +2080,48 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 280),
                 curve: Curves.easeOutCubic,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(16),
-                  gradient: LinearGradient(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              gradient: LinearGradient(
                     colors: _isTicketPrimaryAction
-                        ? [const Color(0xFFD4A843), const Color(0xFFB8942F)]
+                    ? [const Color(0xFFD4A843), const Color(0xFFB8942F)]
                         : (useDisabledGradient
                               ? const [Color(0xFFE5E7EB), Color(0xFFD1D5DB)]
                               : [
                                   _studentDark(context),
                                   _studentPrimary(context),
                                 ]),
-                  ),
-                  boxShadow: [
-                    BoxShadow(
+              ),
+              boxShadow: [
+                BoxShadow(
                       color:
                           (_isTicketPrimaryAction
-                                  ? const Color(0xFFD4A843)
+                          ? const Color(0xFFD4A843)
                                   : (useDisabledGradient
                                         ? const Color(0xFF9CA3AF)
                                         : _studentPrimary(context)))
-                              .withValues(alpha: 0.3),
-                      blurRadius: 15,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
+                      .withValues(alpha: 0.3),
+                  blurRadius: 15,
+                  offset: const Offset(0, 4),
                 ),
-                child: ElevatedButton(
+              ],
+            ),
+            child: ElevatedButton(
                   // Avoid Material "disabled" gray styling on the loader —
                   // use a no-op while loading so the maroon CTA stays branded.
                   onPressed: canTapAction
                       ? _handlePrimaryAction
                       : (isCtaLoading ? () {} : null),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.transparent,
-                    shadowColor: Colors.transparent,
-                    foregroundColor: Colors.white,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.transparent,
+                shadowColor: Colors.transparent,
+                foregroundColor: Colors.white,
                     disabledForegroundColor: const Color(0xFF6B7280),
-                    padding: const EdgeInsets.symmetric(vertical: 18),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                  ),
+                padding: const EdgeInsets.symmetric(vertical: 18),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
                   child: isCtaLoading
                       ? const PulseConnectLoader(size: 14, color: Colors.white)
                       : AnimatedSwitcher(
@@ -2185,24 +2138,24 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                                         ? 'requirements_action'
                                         : 'register_action'),
                             ),
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(
                                 _primaryActionIcon(),
-                                size: 20,
-                              ),
-                              const SizedBox(width: 10),
-                              Text(
+                          size: 20,
+                        ),
+                        const SizedBox(width: 10),
+                        Text(
                                 _primaryActionLabel(),
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                            ],
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
                           ),
                         ),
-                ),
+                      ],
+                    ),
+            ),
+          ),
               ),
             ),
           ],
@@ -2239,10 +2192,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       child: Center(
         child: Padding(
           padding: const EdgeInsets.only(bottom: 48),
-          child: Container(
+      child: Container(
             width: 64,
             height: 64,
-            decoration: BoxDecoration(
+        decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: Colors.white.withValues(alpha: 0.1),
               border: Border.all(
@@ -2306,9 +2259,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
               : 'Single',
           'Span',
           itemWidth,
-        ),
-      );
-    }
+      ),
+    );
+  }
 
     return Wrap(spacing: spacing, runSpacing: spacing, children: items);
   }
@@ -2323,13 +2276,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       width: width,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-        decoration: BoxDecoration(
-          color: const Color(0xFFFFF1F2),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFF1F2),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: const Color(0xFFFECDD3)),
-        ),
-        child: Column(
-          children: [
+            ),
+            child: Column(
+              children: [
             Icon(icon, color: _studentPrimary(context), size: 22),
             const SizedBox(height: 6),
             AnimatedSwitcher(
@@ -2338,7 +2291,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                 value,
                 key: ValueKey('$label-$value'),
                 textAlign: TextAlign.center,
-                style: TextStyle(
+                  style: TextStyle(
                   fontWeight: FontWeight.w800,
                   fontSize: 14,
                   color: _studentPrimary(context),
@@ -2346,18 +2299,18 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 softWrap: true,
-              ),
-            ),
-            const SizedBox(height: 2),
-            Text(
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
               label,
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
+                ),
+              ],
             ),
-          ],
-        ),
       ),
     );
   }
@@ -2694,11 +2647,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           .where((e) => ['1', '2', '3', '4'].contains(e))
           .toList();
       const yearLabel = {
-        '1': '1st Year',
-        '2': '2nd Year',
-        '3': '3rd Year',
-        '4': '4th Year',
-      };
+      '1': '1st Year',
+      '2': '2nd Year',
+      '3': '3rd Year',
+      '4': '4th Year',
+    };
       final years = yearsRaw.isEmpty
           ? 'All Levels'
           : yearsRaw.map((y) => yearLabel[y] ?? y).join(', ');

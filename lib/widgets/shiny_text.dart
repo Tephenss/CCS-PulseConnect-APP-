@@ -9,6 +9,8 @@ class ShinyText extends StatefulWidget {
   final Color shineColor;
   final double spread;
   final bool disabled;
+  /// When true, shine runs even on Battery Saver / low performance.
+  final bool ignorePerformanceMode;
   final double fontSize;
   final FontWeight fontWeight;
   final TextAlign textAlign;
@@ -24,6 +26,7 @@ class ShinyText extends StatefulWidget {
     this.shineColor = Colors.white,
     this.spread = 120.0,
     this.disabled = false,
+    this.ignorePerformanceMode = false,
     this.fontSize = 16,
     this.fontWeight = FontWeight.w800,
     this.textAlign = TextAlign.left,
@@ -41,7 +44,8 @@ class _ShinyTextState extends State<ShinyText>
   late AnimationController _controller;
 
   bool get _shineEnabled =>
-      !widget.disabled && DevicePerformance.instance.enableShine;
+      !widget.disabled &&
+      (widget.ignorePerformanceMode || DevicePerformance.instance.enableShine);
 
   @override
   void initState() {

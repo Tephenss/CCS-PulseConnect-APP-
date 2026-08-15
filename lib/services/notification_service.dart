@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,6 +19,10 @@ class AppNotification {
   final NotificationType type;
   bool isRead;
   final String? eventId;
+  /// Inbox payload type, e.g. certificate_ready, eval_open, event_published.
+  final String? actionType;
+  /// Inbox payload route, e.g. certificates, evaluation.
+  final String? route;
 
   AppNotification({
     required this.id,
@@ -25,6 +30,8 @@ class AppNotification {
     required this.message,
     required this.timestamp,
     this.eventId,
+    this.actionType,
+    this.route,
     this.type = NotificationType.info,
     this.isRead = false,
   });
@@ -228,7 +235,7 @@ class NotificationService {
 
   void _startPolling() {
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(seconds: 90), (_) {
+    _pollTimer = Timer.periodic(const Duration(seconds: 120), (_) {
       unawaited(refresh(force: false));
     });
   }
@@ -379,6 +386,8 @@ class NotificationService {
             timestamp: issuedAt,
             type: NotificationType.success,
             eventId: eventId.isEmpty ? null : eventId,
+            actionType: 'certificate_ready',
+            route: 'certificates',
           ),
         );
       }
@@ -424,6 +433,8 @@ class NotificationService {
             timestamp: issuedAt,
             type: NotificationType.success,
             eventId: eventId.isEmpty ? null : eventId,
+            actionType: 'certificate_ready',
+            route: 'certificates',
           ),
         );
       }
@@ -583,7 +594,8 @@ class NotificationService {
           isProposalUnderReview ||
           isProposalApproved ||
           isProposalRejected ||
-          isEvalOpen;
+          isEvalOpen ||
+          isCertificateReady;
 
       // Registration open/closed updates are already emitted as push from web APIs.
       // Never mirror them as local popup to prevent duplicate tray notifications.
@@ -723,16 +735,41 @@ class NotificationService {
   NotificationType _notificationTypeFromInbox(String rawType) {
     switch (rawType.trim().toLowerCase()) {
       case 'success':
+      case 'certificate_ready':
+      case 'certificate':
+      case 'reg_approved':
+      case 'student_requirements_approved':
         return NotificationType.success;
       case 'warning':
+      case 'eval_open':
+      case 'proposal_rejected':
+      case 'proposal-rejected':
+      case 'student_requirements_declined':
         return NotificationType.warning;
       case 'error':
         return NotificationType.error;
       case 'event':
+      case 'event_published':
+      case 'reg_open':
         return NotificationType.event;
       default:
         return NotificationType.info;
     }
+  }
+
+  Map<String, dynamic> _parseInboxData(dynamic raw) {
+    if (raw is Map) {
+      return Map<String, dynamic>.from(raw);
+    }
+    if (raw is String && raw.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) {
+          return Map<String, dynamic>.from(decoded);
+        }
+      } catch (_) {}
+    }
+    return <String, dynamic>{};
   }
 
   Future<List<AppNotification>> _fetchInboxNotifications(String userId) async {
@@ -794,8 +831,17 @@ class NotificationService {
         final createdRaw =
             row['updated_at']?.toString() ?? row['created_at']?.toString() ?? '';
         final timestamp = _tryParseLocalDate(createdRaw) ?? DateTime.now();
-        final eventId = row['event_id']?.toString().trim();
-        final inboxType = row['notification_type']?.toString() ?? 'info';
+        final dataMap = _parseInboxData(row['data']);
+        final actionType = (dataMap['type']?.toString() ?? '').trim();
+        final route = (dataMap['route']?.toString() ?? '').trim();
+        final dataEventId = (dataMap['event_id']?.toString() ?? '').trim();
+        final rowEventId = row['event_id']?.toString().trim() ?? '';
+        final eventId = rowEventId.isNotEmpty
+            ? rowEventId
+            : (dataEventId.isNotEmpty ? dataEventId : null);
+        final inboxType = actionType.isNotEmpty
+            ? actionType
+            : (row['notification_type']?.toString() ?? 'info');
 
         notifications.add(
           AppNotification(
@@ -804,7 +850,9 @@ class NotificationService {
             message: row['body']?.toString() ?? '',
             timestamp: timestamp,
             type: _notificationTypeFromInbox(inboxType),
-            eventId: eventId != null && eventId.isNotEmpty ? eventId : null,
+            eventId: eventId,
+            actionType: actionType.isNotEmpty ? actionType : inboxType,
+            route: route.isNotEmpty ? route : null,
           ),
         );
       }
@@ -1127,6 +1175,7 @@ class NotificationService {
                   timestamp: requirementsRequestedAt,
                   type: NotificationType.warning,
                   eventId: eventId,
+                  actionType: 'proposal_requirements_requested',
                 ),
               );
             } else if (isTeacherCreator &&
@@ -1314,6 +1363,8 @@ class NotificationService {
                   timestamp: effectiveEndAt,
                   type: NotificationType.warning,
                   eventId: eventId,
+                  actionType: 'eval_open',
+                  route: 'evaluation',
                 ));
                 }
               }

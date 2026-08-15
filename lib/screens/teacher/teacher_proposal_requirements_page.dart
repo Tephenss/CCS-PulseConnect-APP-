@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import '../../widgets/app_snackbar.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 import 'package:path/path.dart' as path;
@@ -259,8 +260,9 @@ class _TeacherProposalRequirementsPageState
 
     final pickedFile = await _picker.pickImage(
       source: source,
-      imageQuality: 88,
-      maxWidth: 2000,
+      imageQuality: 72,
+      maxWidth: 1600,
+      maxHeight: 1600,
     );
     if (pickedFile == null) return;
 
@@ -326,15 +328,11 @@ class _TeacherProposalRequirementsPageState
       }
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Requirement uploaded successfully.')),
-      );
+      AppSnackBar.success(context, 'Requirement uploaded successfully.');
       await _loadData();
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Upload failed: $error')));
+      AppSnackBar.error(context, 'Upload failed: $error');
     } finally {
       if (mounted) {
         setState(() {
@@ -383,15 +381,11 @@ class _TeacherProposalRequirementsPageState
       }
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Proposal submitted for admin review.')),
-      );
+      AppSnackBar.success(context, 'Proposal submitted for admin review.');
       await _loadData();
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Submit failed: $error')));
+      AppSnackBar.error(context, 'Submit failed: $error');
     } finally {
       if (mounted) {
         setState(() => _isSubmitting = false);
