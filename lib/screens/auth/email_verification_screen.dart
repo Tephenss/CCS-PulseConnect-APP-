@@ -8,6 +8,7 @@ import '../../services/email_verification_service.dart';
 import '../../services/push_notification_service.dart';
 import '../../utils/teacher_theme_utils.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/otp_code_boxes.dart';
 
 class EmailVerificationScreen extends StatefulWidget {
   final Map<String, dynamic> user;
@@ -406,53 +407,19 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
                                           ),
                                         ),
                                         const SizedBox(height: 14),
-                                        TextField(
+                                        const Text(
+                                          'Verification Code',
+                                          style: TextStyle(
+                                            color: Color(0xFFA1A1AA),
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 10),
+                                        OtpCodeBoxes(
                                           controller: _codeController,
-                                          keyboardType: TextInputType.number,
-                                          maxLength: 6,
-                                          style: const TextStyle(
-                                            color: Color(0xFFF4F4F5),
-                                            fontWeight: FontWeight.w700,
-                                            letterSpacing: 2,
-                                          ),
-                                          cursorColor: _primaryColor,
-                                          decoration: InputDecoration(
-                                            labelText: 'Verification Code',
-                                            labelStyle: const TextStyle(
-                                              color: Color(0xFFA1A1AA),
-                                            ),
-                                            hintText: '123456',
-                                            counterText: '',
-                                            prefixIcon: const Icon(
-                                              Icons.mark_email_read_outlined,
-                                              color: Color(0xFF52525B),
-                                              size: 20,
-                                            ),
-                                            filled: true,
-                                            fillColor: const Color(0xFF1C1C22),
-                                            border: OutlineInputBorder(
-                                              borderRadius:
-                                                  BorderRadius.circular(14),
-                                              borderSide: const BorderSide(
-                                                color: Color(0xFF27272A),
-                                              ),
-                                            ),
-                                            enabledBorder: OutlineInputBorder(
-                                              borderRadius:
-                                                  BorderRadius.circular(14),
-                                              borderSide: const BorderSide(
-                                                color: Color(0xFF27272A),
-                                              ),
-                                            ),
-                                            focusedBorder: OutlineInputBorder(
-                                              borderRadius:
-                                                  BorderRadius.circular(14),
-                                              borderSide: BorderSide(
-                                                color: _primaryColor,
-                                                width: 1.5,
-                                              ),
-                                            ),
-                                          ),
+                                          focusColor: _primaryColor,
+                                          enabled: !_isVerifying,
                                         ),
                                         if (_error != null) ...[
                                           const SizedBox(height: 8),

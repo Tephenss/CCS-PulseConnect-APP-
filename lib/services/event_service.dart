@@ -44,9 +44,9 @@ class EventService {
   static const Duration _eventSessionsTtl = Duration(seconds: 60);
   static const Duration _eventRegistrationSettingsTtl = Duration(seconds: 30);
   static const String _eventListColumns =
-      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_structure,event_mode,event_for,allow_registration,cover_image_url,location,event_type,event_span,grace_time,registration_limit,is_free_event,event_fee,registration_close_weeks,registration_close_extend_days';
+      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_structure,event_mode,event_for,allow_registration,cover_image_url,location,event_type,event_span,grace_time,registration_limit,is_free_event,event_fee,registration_close_weeks,registration_close_extend_days,early_out_enabled_at';
   static const String _eventListColumnsFallback =
-      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for,cover_image_url,location,event_type,event_span,is_free_event,event_fee';
+      'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for,cover_image_url,location,event_type,event_span,is_free_event,event_fee,early_out_enabled_at';
   static const String _eventListColumnsMinimal =
       'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for';
 
@@ -91,6 +91,26 @@ class EventService {
       final results = await _connectivity.checkConnectivity();
       return results.isEmpty ||
           results.every((result) => result == ConnectivityResult.none);
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// True when there is no link, or the hosted backend cannot be reached.
+  /// Use this for scanner offline mode (Wi‑Fi off + no mobile data, or
+  /// captive portal / DNS failure while the radio still looks "connected").
+  static Future<bool> isEffectivelyOffline({
+    bool skipLinkCheck = false,
+  }) async {
+    if (!skipLinkCheck && await isLikelyOffline()) {
+      return true;
+    }
+    if (!MobileBackendService.isConfigured) {
+      return false;
+    }
+    try {
+      final reachable = await MobileBackendService.probeReachable();
+      return !reachable;
     } catch (_) {
       return true;
     }
@@ -615,6 +635,13 @@ class EventService {
       if (normalized.startsWith('/')) {
         normalized = normalized.substring(1);
       }
+      while (normalized.startsWith('media/avatars/avatars/')) {
+        normalized =
+            'media/avatars/${normalized.substring('media/avatars/avatars/'.length)}';
+      }
+      if (normalized.startsWith('media/avatars/')) {
+        return normalized;
+      }
       if (normalized.startsWith('avatars/')) {
         normalized = normalized.substring('avatars/'.length);
       }
@@ -631,6 +658,16 @@ class EventService {
     }
     if (path.contains(signMarker)) {
       return path.split(signMarker).last;
+    }
+    if (path.endsWith('/api/media_serve.php')) {
+      var localPath = (uri.queryParameters['p'] ?? '').trim();
+      while (localPath.startsWith('media/avatars/avatars/')) {
+        localPath =
+            'media/avatars/${localPath.substring('media/avatars/avatars/'.length)}';
+      }
+      if (localPath.startsWith('media/avatars/')) {
+        return localPath;
+      }
     }
     return '';
   }
@@ -2832,7 +2869,7 @@ class EventService {
     bool forceFresh = false,
   }) async {
     final cacheKey =
-        'active:v5:${yearLevel ?? ''}:${courseCode ?? ''}:${specialization ?? ''}';
+        'active:v7:${yearLevel ?? ''}:${courseCode ?? ''}:${specialization ?? ''}';
     if (!forceFresh) {
       final cached = _readListCache(cacheKey, _activeEventsTtl);
       if (cached != null) {
@@ -2915,13 +2952,11 @@ class EventService {
           } else if (catalog.isNotEmpty) {
             final nowDt = DateTime.now().toUtc();
             response = catalog.where((row) {
-              final endRaw = (row['end_at'] ?? '').toString().trim();
-              if (endRaw.isEmpty) return true;
-              try {
-                return DateTime.parse(endRaw).toUtc().isAfter(nowDt);
-              } catch (_) {
-                return true;
-              }
+              final map = Map<String, dynamic>.from(row);
+              return !isEventPastLifecycleMap(
+                map,
+                now: nowDt.add(kManilaOffset),
+              );
             }).toList();
           }
         } catch (_) {
@@ -2934,8 +2969,13 @@ class EventService {
       }
 
       final list = List<Map<String, dynamic>>.from(response);
+      final nowRef = DateTime.now().toUtc().add(kManilaOffset);
+      // Drop Early Out events whose early_out+1h already ended (even if end_at is later).
+      final stillLive = list
+          .where((e) => !isEventPastLifecycleMap(e, now: nowRef))
+          .toList();
       final filtered = _filterByTargetParticipant(
-        list,
+        stillLive,
         yearLevel: yearLevel,
         courseCode: courseCode,
         specialization: specialization,
@@ -2972,12 +3012,18 @@ class EventService {
   }
 
   Future<List<dynamic>> _selectPublishedActiveEvents(String nowUtc) async {
+    // end_at >= (now - 1h) keeps events through the check-out window, matching
+    // web Published / PHP auto-finish delay.
+    final cutoffUtc = DateTime.now()
+        .toUtc()
+        .subtract(kEventCheckoutWindow)
+        .toIso8601String();
     try {
       return await _supabase
           .from('events')
           .select(_eventListColumns)
           .eq('status', 'published')
-          .gte('end_at', nowUtc)
+          .gte('end_at', cutoffUtc)
           .order('start_at', ascending: true);
     } catch (e) {
       debugPrint('EventService: active events fallback select: $e');
@@ -2986,7 +3032,7 @@ class EventService {
             .from('events')
             .select(_eventListColumnsFallback)
             .eq('status', 'published')
-            .gte('end_at', nowUtc)
+            .gte('end_at', cutoffUtc)
             .order('start_at', ascending: true);
       } catch (e2) {
         debugPrint('EventService: active events minimal select: $e2');
@@ -2994,7 +3040,7 @@ class EventService {
             .from('events')
             .select(_eventListColumnsMinimal)
             .eq('status', 'published')
-            .gte('end_at', nowUtc)
+            .gte('end_at', cutoffUtc)
             .order('start_at', ascending: true);
       }
     }
@@ -3034,14 +3080,17 @@ class EventService {
     String? specialization,
   }) async {
     try {
-      final now = DateTime.now().toUtc().toIso8601String();
+      final cutoffUtc = DateTime.now()
+          .toUtc()
+          .subtract(kEventCheckoutWindow)
+          .toIso8601String();
       List<dynamic> response;
       try {
         response = await _supabase
             .from('events')
             .select(_eventListColumns)
             .inFilter('status', ['published', 'approved'])
-            .gte('end_at', now)
+            .gte('end_at', cutoffUtc)
             .order('start_at', ascending: true);
       } catch (_) {
         try {
@@ -3049,21 +3098,25 @@ class EventService {
               .from('events')
               .select(_eventListColumnsFallback)
               .inFilter('status', ['published', 'approved'])
-              .gte('end_at', now)
+              .gte('end_at', cutoffUtc)
               .order('start_at', ascending: true);
         } catch (_) {
           response = await _supabase
               .from('events')
               .select(_eventListColumnsMinimal)
               .inFilter('status', ['published', 'approved'])
-              .gte('end_at', now)
+              .gte('end_at', cutoffUtc)
               .order('start_at', ascending: true);
         }
       }
 
       final list = List<Map<String, dynamic>>.from(response);
+      final nowRef = DateTime.now().toUtc().add(kManilaOffset);
+      final stillLive = list
+          .where((e) => !isEventPastLifecycleMap(e, now: nowRef))
+          .toList();
       final filtered = _filterByTargetParticipant(
-        list,
+        stillLive,
         yearLevel: yearLevel,
         courseCode: courseCode,
         specialization: specialization,
@@ -5383,14 +5436,17 @@ class EventService {
       final eventEnd = eventRaw is Map
           ? _toUtcDate(eventRaw['end_at'])
           : null;
-      final eventEnded = eventEnd != null && !nowUtc.isBefore(eventEnd);
+      // "Already ended" only after the full time-out grace (end_at + 1h).
+      final eventFullyEnded = eventEnd != null &&
+          nowUtc.isAfter(eventEnd.add(const Duration(hours: 1)));
+      final closedMessage = (closedCtx['message']?.toString() ?? '').trim();
       return {
         'ok': true,
         'status': 'closed',
         'scanner_enabled': false,
-        'message': eventEnded
+        'message': eventFullyEnded
             ? 'Assigned scanner event has already ended.'
-            : 'Scanning Closed',
+            : (closedMessage.isNotEmpty ? closedMessage : 'Scanning Closed'),
         'context': closedCtx,
         'assignments': events.length,
         'server_time': nowUtc.toIso8601String(),
@@ -5436,6 +5492,31 @@ class EventService {
         'assignments': 0,
         'server_time': DateTime.now().toUtc().toIso8601String(),
       };
+    }
+
+    if (MobileBackendService.isConfigured) {
+      try {
+        final hosted = await _mobileBackend.getScanContext(fresh: true);
+        if (hosted['ok'] == true) {
+          final hostedStatus =
+              (hosted['status']?.toString() ?? '').trim().toLowerCase();
+          final hostedContext = hosted['context'];
+          final hasHostedContext = hostedContext is Map &&
+              ((hostedContext['event'] is Map &&
+                      ((hostedContext['event'] as Map)['id']?.toString() ?? '')
+                          .trim()
+                          .isNotEmpty) ||
+                  (hostedContext['id']?.toString() ?? '').trim().isNotEmpty);
+          if (hasHostedContext ||
+              (hostedStatus != 'no_assignment' &&
+                  hostedStatus != 'error' &&
+                  hostedStatus != 'forbidden')) {
+            return Map<String, dynamic>.from(hosted);
+          }
+        }
+      } catch (_) {
+        // Fall through to anon path when BFF is unreachable.
+      }
     }
 
     try {
@@ -5548,6 +5629,34 @@ class EventService {
       };
     }
 
+    if (MobileBackendService.isConfigured) {
+      try {
+        final hosted = await _mobileBackend.getScanContext(fresh: true);
+        if (hosted['ok'] == true) {
+          final hostedStatus =
+              (hosted['status']?.toString() ?? '').trim().toLowerCase();
+          final hostedContext = hosted['context'];
+          final hasHostedContext = hostedContext is Map &&
+              ((hostedContext['event'] is Map &&
+                      ((hostedContext['event'] as Map)['id']?.toString() ?? '')
+                          .trim()
+                          .isNotEmpty) ||
+                  (hostedContext['id']?.toString() ?? '').trim().isNotEmpty);
+          // Only trust BFF when it returns a usable assignment/window.
+          // Bare no_assignment can be a deploy/schema miss — fall through
+          // to the local assistant lookup so offline warm is not stuck.
+          if (hasHostedContext ||
+              (hostedStatus != 'no_assignment' &&
+                  hostedStatus != 'error' &&
+                  hostedStatus != 'forbidden')) {
+            return Map<String, dynamic>.from(hosted);
+          }
+        }
+      } catch (_) {
+        // Fall through to anon path when BFF is unreachable.
+      }
+    }
+
     try {
       final rows = await _fetchStudentAssistantScanRows(studentId);
       final candidateRows = <Map<String, dynamic>>[];
@@ -5632,10 +5741,9 @@ class EventService {
       final seenEventIds = <String>{};
       for (final row in candidateRows) {
         final eventId = row['event_id']?.toString().trim() ?? '';
-        final assignedBy =
-            row['assigned_by_teacher_id']?.toString().trim() ?? '';
         if (eventId.isEmpty) continue;
-        if (assignedBy.isEmpty) continue;
+        // Prefer teacher-assigned rows, but allow legacy allow_scan rows
+        // without assigned_by_teacher_id so offline warm is not stuck.
         final event = eventsById[eventId];
         if (event == null) continue;
         if (!seenEventIds.add(eventId)) continue;
@@ -7662,9 +7770,39 @@ class EventService {
     return 'PULSE-EVENT-$id';
   }
 
+  Future<Map<String, dynamic>> getSelfAttendancePack() async {
+    if (!MobileBackendService.isConfigured) {
+      return {
+        'ok': false,
+        'error': 'Mobile backend is not configured.',
+        'status': 'error',
+        'events': <Map<String, dynamic>>[],
+      };
+    }
+    try {
+      final result = Map<String, dynamic>.from(
+        await _mobileBackend.getSelfAttendancePack(),
+      );
+      if (result['ok'] != true) {
+        debugPrint('[self-offline] pack API ok=false: ${result['error']}');
+      }
+      return result;
+    } catch (e) {
+      debugPrint('[self-offline] pack API exception: $e');
+      return {
+        'ok': false,
+        'error': 'Failed to load self-attendance pack.',
+        'status': 'error',
+        'debug': e.toString(),
+        'events': <Map<String, dynamic>>[],
+      };
+    }
+  }
+
   Future<Map<String, dynamic>> checkInSelfViaEventQr(
-    String eventQrPayload,
-  ) async {
+    String eventQrPayload, {
+    String? scannedAtIso,
+  }) async {
     final payload = eventQrPayload.trim();
     if (!payload.toUpperCase().startsWith('PULSE-EVENT-')) {
       return {
@@ -7679,6 +7817,7 @@ class EventService {
         return Map<String, dynamic>.from(
           await _mobileBackend.selfCheckInViaEventQr(
             eventQrPayload: payload,
+            scannedAtIso: scannedAtIso,
           ),
         );
       } catch (e) {

@@ -5,6 +5,7 @@ import 'auth/register_screen.dart';
 import '../widgets/shiny_text.dart';
 import '../utils/teacher_theme_utils.dart';
 import '../utils/app_page_routes.dart';
+import '../services/device_performance_service.dart';
 
 class WelcomeScreen extends StatefulWidget {
   const WelcomeScreen({super.key});
@@ -41,8 +42,13 @@ class _WelcomeScreenState extends State<WelcomeScreen>
       duration: const Duration(seconds: 12),
     );
 
-    _collisionController.repeat();
-    _gradientController.repeat(reverse: true);
+    if (DevicePerformance.instance.enableDecorativeMotion) {
+      _collisionController.repeat();
+      _gradientController.repeat(reverse: true);
+    } else {
+      // Park on the settled frame so the CCS logo stays visible without a ticker.
+      _collisionController.value = 0.5;
+    }
 
     // Ensure global app theme matches the default selected role on screen open.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -532,7 +538,6 @@ class _WelcomeScreenState extends State<WelcomeScreen>
                         speed: 2.2,
                         fontWeight: FontWeight.w900,
                         textAlign: TextAlign.center,
-                        ignorePerformanceMode: true,
                       ),
 
                       SizedBox(height: size.height * 0.04),

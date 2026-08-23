@@ -82,12 +82,14 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
 
   /// Explicit controller: QR-only + unrestricted detection (screen-of-screen
   /// tickets need more frames than DetectionSpeed.normal's 250ms gate).
+  /// autoZoom (Android): zooms when a small/far QR is detected — Lens-like assist.
   final MobileScannerController _scannerController = MobileScannerController(
     detectionSpeed: DetectionSpeed.unrestricted,
     facing: CameraFacing.back,
     formats: const [BarcodeFormat.qrCode],
     returnImage: false,
     cameraResolution: const Size(1280, 720),
+    autoZoom: true,
   );
 
   Future<void> _configureScanSoundPlayer() async {
@@ -195,8 +197,11 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           (status == 'queued_offline' || fromOfflineQueue)) {
         final participantName =
             (res['participant_name']?.toString() ?? '').trim();
+        final action = (res['action']?.toString() ?? '').toLowerCase();
+        final queuedLabel =
+            action == 'check_out' ? 'Timed Out' : 'Present';
         _scanStatus = participantName.isNotEmpty
-            ? 'Queued offline: $participantName — Present'
+            ? 'Queued offline: $participantName — $queuedLabel'
             : (res['message']?.toString() ??
                 'Offline check-in saved. Syncing when online.');
         _statusColor = Colors.orange.shade700;
@@ -435,7 +440,9 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     final current = _scanContext;
     if (!_payloadHasAssignedContext(current)) return false;
 
-    final snapshot = Map<String, dynamic>.from(current!);
+    final snapshot = _resolveOfflineWindowLocally(
+      Map<String, dynamic>.from(current!),
+    );
     final context = snapshot['context'];
     final contextMap = context is Map<String, dynamic>
         ? context
@@ -461,6 +468,9 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
             : _contextColor(status);
       }
     });
+    if (scannerEnabled) {
+      _rememberOfflinePinnedContext(snapshot);
+    }
     _scheduleWindowCloseTimer(_scanContext);
     return true;
   }
@@ -545,9 +555,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         _enforceLocalOfflineWindowGuard();
         unawaited(_refreshScanContext(silent: true));
         unawaited(_refreshAttendanceStats());
-        if (!_isOffline && _pendingSyncCount > 0 && !_isSyncing) {
-          unawaited(_syncQueueIfNeeded(showSnack: false));
-        }
+        unawaited(_syncQueueWhenOnline(showSnack: false));
       },
     );
   }
@@ -564,8 +572,8 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       if (!widget.isActive) return;
       _startContextRefreshTimer();
       unawaited(_refreshScanContext(silent: true));
+      unawaited(_syncQueueWhenOnline(showSnack: false));
       if (!_isOffline && _teacherId.trim().isNotEmpty) {
-        unawaited(_syncQueueIfNeeded(showSnack: false));
         unawaited(
           _offlineSyncService.refreshSnapshotForCurrentScanner(
             actorId: _teacherId,
@@ -579,6 +587,14 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
   bool _resultsAreOffline(List<ConnectivityResult> results) {
     return results.isEmpty ||
         results.every((result) => result == ConnectivityResult.none);
+  }
+
+  Future<bool> _resolveIsOffline({
+    List<ConnectivityResult>? linkResults,
+  }) async {
+    // Offline scanner mode follows the radio link only.
+    final results = linkResults ?? await Connectivity().checkConnectivity();
+    return _resultsAreOffline(results);
   }
 
   /// Camera only runs while this tab is visible (keep-alive when inactive).
@@ -636,60 +652,108 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
   void _scheduleWindowCloseTimer(Map<String, dynamic>? payload) {
     _windowCloseTimer?.cancel();
     _windowCloseTimer = null;
-    if (!widget.isActive) return;
-    if (payload?['scanner_enabled'] != true) return;
-    final closesAt = _contextClosesAtUtc(payload);
-    if (closesAt == null) return;
+    if (!widget.isActive || payload == null) return;
 
-    final delay = closesAt.difference(DateTime.now().toUtc());
+    final rawContext = payload['context'];
+    final contextMap = rawContext is Map<String, dynamic>
+        ? rawContext
+        : (rawContext is Map ? Map<String, dynamic>.from(rawContext) : null);
+    if (contextMap == null) return;
+
+    final now = DateTime.now().toUtc();
+    final opensAt = _parseIsoToUtc(contextMap['opens_at']?.toString());
+    final closesAt = _parseIsoToUtc(contextMap['closes_at']?.toString());
+    final enabled = payload['scanner_enabled'] == true;
+
+    // Schedule BOTH open and close boundaries (online + offline).
+    // Previously online only scheduled close while enabled — so after end_at
+    // the check-out window stayed closed until a manual refresh/touch.
+    Duration? delay;
+    if (!enabled && opensAt != null && now.isBefore(opensAt)) {
+      delay = opensAt.difference(now);
+    } else if (enabled && closesAt != null && !now.isAfter(closesAt)) {
+      delay = closesAt.difference(now);
+    } else if (!enabled && opensAt != null && !now.isBefore(opensAt)) {
+      // opens_at already reached but UI still closed — apply now.
+      _applyWindowBoundaryNow();
+      return;
+    } else {
+      return;
+    }
+
     if (delay <= Duration.zero) {
-      _applyLocalWindowClosed();
+      _applyWindowBoundaryNow();
       return;
     }
 
     _windowCloseTimer = Timer(delay + const Duration(milliseconds: 250), () {
       if (!mounted || !widget.isActive) return;
-      final currentCloses = _contextClosesAtUtc(_scanContext);
-      if (currentCloses == null) return;
-      if (DateTime.now().toUtc().isBefore(currentCloses)) {
-        _scheduleWindowCloseTimer(_scanContext);
-        return;
-      }
-      _applyLocalWindowClosed();
-      unawaited(_refreshScanContext(silent: true));
+      _applyWindowBoundaryNow();
     });
   }
 
-  void _applyLocalWindowClosed() {
-    if (!mounted) return;
-    if (_scanContext?['scanner_enabled'] != true) return;
+  void _applyWindowBoundaryNow() {
+    if (_isOffline) {
+      _enforceLocalOfflineWindowGuard();
+      return;
+    }
+    _enforceLocalWindowBoundaryOnline();
+  }
 
-    setState(() {
-      final current = _scanContext;
-      if (current != null) {
-        final updated = Map<String, dynamic>.from(current);
-        updated['ok'] = true;
-        updated['scanner_enabled'] = false;
-        updated['status'] = 'closed';
-        updated['message'] = _scannerClosedLabel;
-        final rawContext = updated['context'];
-        if (rawContext is Map) {
-          final contextMap = Map<String, dynamic>.from(rawContext);
-          contextMap['status'] = 'closed';
-          updated['context'] = contextMap;
+  /// Online: flip open/close from local schedule immediately, then confirm with BFF.
+  void _enforceLocalWindowBoundaryOnline() {
+    final active = _scanContext;
+    if (active == null || active.isEmpty || !_payloadHasAssignedContext(active)) {
+      unawaited(_refreshScanContext(silent: true));
+      return;
+    }
+
+    final resolved = _resolveOfflineWindowLocally(
+      Map<String, dynamic>.from(active),
+    );
+    final rawContext = resolved['context'];
+    final contextMap = rawContext is Map<String, dynamic>
+        ? rawContext
+        : (rawContext is Map ? Map<String, dynamic>.from(rawContext) : null);
+    final nextStatus =
+        (resolved['status']?.toString() ?? 'closed').trim().toLowerCase();
+    final nextEnabled = resolved['scanner_enabled'] == true;
+    final prevStatus =
+        (active['status']?.toString() ?? '').trim().toLowerCase();
+    final prevEnabled = active['scanner_enabled'] == true;
+
+    if (nextEnabled != prevEnabled || nextStatus != prevStatus) {
+      if (!mounted) return;
+      setState(() {
+        _scanContext = resolved;
+        _selectedEventTitle = _currentEventTitle(contextMap);
+        _isScanning = _cameraShouldRun(scannerEnabled: nextEnabled);
+        _manualPause = false;
+        if (!_hasScanResult) {
+          _scanStatus = nextEnabled
+              ? 'Ready to scan.'
+              : _scanAvailabilityNote(
+                  status: nextStatus,
+                  serviceMessage: (resolved['message']?.toString() ?? '').trim(),
+                  context: contextMap,
+                );
+          _statusColor = nextEnabled
+              ? TeacherThemeUtils.primary
+              : _contextColor(nextStatus);
         }
-        _scanContext = updated;
-      }
-      _isScanning = false;
-      _isProcessingScan = false;
-      _manualPause = false;
-      if (!_hasScanResult) {
-        _scanStatus = _scannerClosedLabel;
-        _statusColor = Colors.grey.shade700;
-      }
-    });
-    _windowCloseTimer?.cancel();
-    _windowCloseTimer = null;
+      });
+    }
+
+    _scheduleWindowCloseTimer(_scanContext);
+    unawaited(_refreshScanContext(silent: true));
+  }
+
+  Map<String, dynamic> _resolveOfflineWindowLocally(
+    Map<String, dynamic> payload,
+  ) {
+    // Use shared schedule resolver so offline flips check_in → check_out
+    // at event end / Early Out (same rules as BFF + ticket validation).
+    return _offlineSyncService.resolveScannerContextLocally(payload);
   }
 
   Future<void> _initScannerAccess() async {
@@ -697,7 +761,9 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       final user = await _authService.getCurrentUser();
       final teacherId = user?['id']?.toString() ?? '';
       final initialConnectivity = await Connectivity().checkConnectivity();
-      final startOffline = _resultsAreOffline(initialConnectivity);
+      final startOffline = await _resolveIsOffline(
+        linkResults: initialConnectivity,
+      );
 
       if (mounted) {
         setState(() {
@@ -1200,7 +1266,27 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     final explicitClose = _parseScheduleDate(context['closes_at']?.toString());
     if (explicitClose != null) return explicitClose;
 
+    final scanMode =
+        (context['scan_mode']?.toString() ?? 'check_in').toLowerCase().trim();
+
     final session = context['session'];
+    final event = context['event'];
+
+    if (scanMode == 'check_out') {
+      if (session is Map) {
+        final sessionEnd = _parseScheduleDate(session['end_at']?.toString());
+        if (sessionEnd != null) {
+          return sessionEnd.add(const Duration(hours: 1));
+        }
+      }
+      if (event is Map) {
+        final eventEnd = _parseScheduleDate(event['end_at']?.toString());
+        if (eventEnd != null) {
+          return eventEnd.add(const Duration(hours: 1));
+        }
+      }
+    }
+
     if (session is Map) {
       final sessionStart = _parseScheduleDate(session['start_at']?.toString());
       final sessionWindow =
@@ -1210,7 +1296,6 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       }
     }
 
-    final event = context['event'];
     if (event is Map) {
       final eventStart = _parseScheduleDate(event['start_at']?.toString());
       final graceMinutes =
@@ -1224,18 +1309,16 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
   }
 
   bool _shouldDropOfflineAccessAfterDeadline(Map<String, dynamic>? context) {
-    if (context == null) return true;
+    if (context == null) return false;
 
+    // Keep assignment through the post-event time-out window (end_at → +1h),
+    // matching student_scan / check-out scan context.
     final event = context['event'];
-    if (event is Map) {
-      final eventEndAt = _parseScheduleDate(event['end_at']?.toString());
-      if (eventEndAt != null) {
-        final now = DateTime.now().toUtc().add(_manilaOffset);
-        return !now.isBefore(eventEndAt);
-      }
-    }
-
-    return true;
+    if (event is! Map) return false;
+    final eventEndAt = _parseScheduleDate(event['end_at']?.toString());
+    if (eventEndAt == null) return false;
+    final now = DateTime.now().toUtc().add(_manilaOffset);
+    return now.isAfter(eventEndAt.add(const Duration(hours: 1)));
   }
 
   bool _applyPinnedOpenContextFallback() {
@@ -1278,62 +1361,87 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     if (!_isOffline) return;
     final active = _activeOfflineValidationContext();
     if (active == null || active.isEmpty) return;
+    if (!_payloadHasAssignedContext(active)) return;
 
-    final rawContext = active['context'];
+    final resolved = _resolveOfflineWindowLocally(
+      Map<String, dynamic>.from(active),
+    );
+    final rawContext = resolved['context'];
     final contextMap = rawContext is Map<String, dynamic>
         ? rawContext
         : (rawContext is Map ? Map<String, dynamic>.from(rawContext) : null);
-    final deadline = _offlinePinnedDeadline(contextMap);
-    final now = DateTime.now().toUtc().add(_manilaOffset);
-    if (contextMap == null || deadline == null || now.isBefore(deadline)) {
+    final nextStatus =
+        (resolved['status']?.toString() ?? 'closed').trim().toLowerCase();
+    final nextEnabled = resolved['scanner_enabled'] == true;
+    final prevStatus =
+        (active['status']?.toString() ?? '').trim().toLowerCase();
+    final prevEnabled = active['scanner_enabled'] == true;
+
+    if (nextStatus == 'closed' && contextMap != null) {
+      final dropAccess = _shouldDropOfflineAccessAfterDeadline(contextMap);
+      if (dropAccess && prevStatus != 'no_assignment') {
+        _offlinePinnedOpenContext = null;
+        if (!mounted) return;
+        setState(() {
+          _scanContext = {
+            'ok': true,
+            'status': 'no_assignment',
+            'scanner_enabled': false,
+            'message': 'Assigned scanner event has already ended.',
+            'context': null,
+            'assignments': 0,
+          };
+          _selectedEventTitle = '';
+          _isScanning = false;
+          _manualPause = false;
+          if (!_hasScanResult) {
+            _scanStatus = 'Assigned scanner event has already ended.';
+            _statusColor = Colors.red.shade700;
+          }
+        });
+        _scheduleWindowCloseTimer(_scanContext);
+        unawaited(
+          _offlineSyncService.clearCachedScannerAccess(
+            actorId: _teacherId,
+            isTeacher: true,
+          ),
+        );
+        return;
+      }
+    }
+
+    if (nextEnabled == prevEnabled && nextStatus == prevStatus) {
+      _scheduleWindowCloseTimer(resolved);
       return;
     }
 
-    final dropAccess = _shouldDropOfflineAccessAfterDeadline(contextMap);
-    _offlinePinnedOpenContext = null;
     if (!mounted) return;
     setState(() {
-      if (dropAccess) {
-        _scanContext = {
-          'ok': true,
-          'status': 'no_assignment',
-          'scanner_enabled': false,
-          'message': 'Assigned scanner event has already ended.',
-          'context': null,
-          'assignments': 0,
-        };
-        _selectedEventTitle = '';
-      } else {
-        final closedContext = Map<String, dynamic>.from(active);
-        closedContext['status'] = 'closed';
-        closedContext['scanner_enabled'] = false;
-        _scanContext = closedContext;
-      }
-      _isScanning = false;
+      _scanContext = resolved;
+      _selectedEventTitle = _currentEventTitle(contextMap);
+      _isScanning = _cameraShouldRun(scannerEnabled: nextEnabled);
       _manualPause = false;
       if (!_hasScanResult) {
-        if (dropAccess) {
-          _scanStatus = 'Assigned scanner event has already ended.';
-          _statusColor = Colors.red.shade700;
+        if (nextEnabled) {
+          _scanStatus = 'Offline mode active. Ready to scan from cache.';
+          _statusColor = Colors.orange.shade700;
         } else {
           _scanStatus = _scanAvailabilityNote(
-            status: 'closed',
-            serviceMessage: 'Scanner is not open for this schedule.',
+            status: nextStatus,
+            serviceMessage: (resolved['message']?.toString() ?? '').trim(),
             context: contextMap,
           );
-          _statusColor = _contextColor('closed');
+          _statusColor = _contextColor(nextStatus);
         }
       }
     });
-    _scheduleWindowCloseTimer(_scanContext);
-    if (dropAccess) {
-      unawaited(
-        _offlineSyncService.clearCachedScannerAccess(
-          actorId: _teacherId,
-          isTeacher: true,
-        ),
-      );
+
+    if (nextEnabled) {
+      _rememberOfflinePinnedContext(resolved);
+    } else if (nextStatus == 'closed') {
+      _offlinePinnedOpenContext = null;
     }
+    _scheduleWindowCloseTimer(_scanContext);
   }
 
   Map<String, dynamic>? _activeOfflineValidationContext() {
@@ -1475,12 +1583,23 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     setState(() => _pendingSyncCount = count);
   }
 
-  /// Drain offline queue only when there is work — no "Syncing 0…" flash.
-  Future<void> _syncQueueIfNeeded({bool showSnack = false}) async {
-    if (_isSyncing || _teacherId.trim().isEmpty || _isOffline) return;
+  /// When any network link is present, leave offline mode and drain the queue.
+  Future<void> _syncQueueWhenOnline({bool showSnack = false}) async {
+    final results = await Connectivity().checkConnectivity();
+    if (_resultsAreOffline(results)) return;
+
+    if (_isOffline && mounted) {
+      setState(() => _isOffline = false);
+    }
     await _refreshPendingSyncCount();
     if (!mounted || _pendingSyncCount <= 0) return;
     await _performQueueSync(showSnack: showSnack);
+  }
+
+  /// Drain offline queue only when there is work — no "Syncing 0…" flash.
+  Future<void> _syncQueueIfNeeded({bool showSnack = false}) async {
+    if (_isSyncing || _teacherId.trim().isEmpty) return;
+    await _syncQueueWhenOnline(showSnack: showSnack);
   }
 
   Future<void> _performQueueSync({bool showSnack = false}) async {
@@ -1524,46 +1643,54 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
 
   void _initConnectivity() {
     _connectivity = Connectivity();
-    _connectivity.checkConnectivity().then((results) {
-      final isOffline = _resultsAreOffline(results);
+    _connectivity.checkConnectivity().then((results) async {
+      final isOffline = await _resolveIsOffline(linkResults: results);
       if (!mounted) return;
-      setState(() => _isOffline = isOffline);
+      final wasOffline = _isOffline;
+      if (wasOffline != isOffline) {
+        setState(() {
+          _isOffline = isOffline;
+          if (isOffline) _clearAttendanceStats();
+        });
+      }
+      if (!isOffline) {
+        unawaited(_syncQueueWhenOnline(showSnack: false));
+      }
     });
     _connectivitySubscription = _connectivity.onConnectivityChanged.listen((
       List<ConnectivityResult> results,
     ) async {
-      final isOffline = _resultsAreOffline(results);
+      final isOffline = await _resolveIsOffline(linkResults: results);
       if (!mounted) return;
       final wasOffline = _isOffline;
-      setState(() {
-        _isOffline = isOffline;
-        if (isOffline) _clearAttendanceStats();
-      });
+      if (wasOffline != isOffline) {
+        setState(() {
+          _isOffline = isOffline;
+          if (isOffline) _clearAttendanceStats();
+        });
+      }
       if (isOffline) {
-        await _sealCurrentContextForOfflineTransition();
-        if (_applyCurrentContextOfflineTransition()) {
+        if (!wasOffline) {
+          await _sealCurrentContextForOfflineTransition();
+          if (_applyCurrentContextOfflineTransition()) {
+            unawaited(_refreshOfflineReadiness());
+            return;
+          }
+          if (_applyPinnedOpenContextFallback()) {
+            unawaited(_refreshOfflineReadiness());
+            return;
+          }
+          await _refreshScanContext(silent: true);
           unawaited(_refreshOfflineReadiness());
-          return;
         }
-        if (_applyPinnedOpenContextFallback()) {
-          unawaited(_refreshOfflineReadiness());
-          return;
-        }
-      await _refreshScanContext(silent: true);
-        unawaited(_refreshOfflineReadiness());
         return;
       }
-      if (wasOffline || _pendingSyncCount > 0) {
-        await _syncQueueIfNeeded(showSnack: true);
-        await _refreshScanContext(silent: true);
-        unawaited(_refreshAttendanceStats());
-        unawaited(
-          _refreshOfflineReadiness(refreshSnapshot: true),
-        );
-      } else {
-        unawaited(_refreshAttendanceStats());
-        unawaited(_refreshOfflineReadiness());
-      }
+
+      // Link is up → always try to drain queue (Wi‑Fi reconnect / mobile data).
+      await _syncQueueWhenOnline(showSnack: true);
+      await _refreshScanContext(silent: true);
+      unawaited(_refreshAttendanceStats());
+      unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
     });
   }
 
@@ -1732,6 +1859,78 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     return _buildScannerView();
   }
 
+  Widget _buildOfflinePreparedHeaderChip() {
+    final ready = _offlineSnapshotReady && !_offlineSnapshotStale;
+    final String label;
+    final IconData icon;
+    if (_isOffline && ready) {
+      label = 'Offline';
+      icon = Icons.inventory_2_rounded;
+    } else if (ready) {
+      label = 'Prepared';
+      icon = Icons.cloud_done_rounded;
+    } else if (_offlineSnapshotStale) {
+      label = 'Refresh';
+      icon = Icons.sync_problem_rounded;
+    } else if (_isOffline) {
+      label = 'No pack';
+      icon = Icons.cloud_off_rounded;
+    } else {
+      label = 'Warming…';
+      icon = Icons.cloud_sync_rounded;
+    }
+
+    final Color accent = ready && !_isOffline
+        ? const Color(0xFFBBF7D0)
+        : (ready
+            ? const Color(0xFFFDE68A)
+            : Colors.white.withValues(alpha: 0.85));
+    final Color fill = ready && !_isOffline
+        ? const Color(0xFF166534).withValues(alpha: 0.35)
+        : (ready
+            ? const Color(0xFF92400E).withValues(alpha: 0.35)
+            : Colors.white.withValues(alpha: 0.12));
+
+    return Tooltip(
+      message: ready
+          ? (_isOffline
+              ? 'Offline pack is active on this device.'
+              : 'Offline pack saved. You can scan without internet later.')
+          : (_isOffline
+              ? 'No offline pack yet. Connect once while assigned to prepare.'
+              : 'Saving offline pack… keep this screen open with internet.'),
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 118),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: BoxDecoration(
+          color: fill,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: accent.withValues(alpha: 0.45)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: accent),
+            const SizedBox(width: 5),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  color: accent,
+                  letterSpacing: 0.1,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildGradientHeader({
     required String title,
     required String subtitle,
@@ -1776,7 +1975,10 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
               ],
             ),
           ),
+          const SizedBox(width: 10),
+          _buildOfflinePreparedHeaderChip(),
           if (actionIcon != null) ...[
+            const SizedBox(width: 8),
             GestureDetector(
               onTap: onAction,
               child: Container(
@@ -1921,14 +2123,25 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         serviceMessage.toLowerCase().contains('early time-out');
 
     if (status.toLowerCase() == 'open' && isCheckOutMode) {
+      final earlyOut = context?['early_out'] == true;
       if (closesAt != null && !now.isAfter(closesAt)) {
-        return 'Early Time-Out Open (until ${_formatStartTime(closesAt)})';
+        return earlyOut
+            ? 'Early Time-Out Open (until ${_formatStartTime(closesAt)})'
+            : 'Time-Out Open (until ${_formatStartTime(closesAt)})';
       }
-      return 'Early Time-Out Open';
+      return earlyOut ? 'Early Time-Out Open' : 'Time-Out Open';
     }
 
     if (opensAt != null) {
       if (now.isBefore(opensAt)) {
+        // After time-in grace, opens_at is the event end (time-out window) —
+        // do not label that as "event start".
+        if (isCheckOutMode) {
+          if (_isSameDate(now, opensAt)) {
+            return 'Waiting for time-out (Opens at ${_formatStartTime(opensAt)})';
+          }
+          return 'Time-out opens ${_formatScheduleDateTime(opensAt)}';
+        }
         if (_isSameDate(now, opensAt)) {
           return 'Waiting for event start (Starts at ${_formatStartTime(opensAt)})';
         }
@@ -2041,14 +2254,12 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         actionPart = 'Timed in';
       }
       if (namePart.isNotEmpty && actionPart.isNotEmpty) {
-    return Column(
+        return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
+          children: [
             Text(
               namePart,
               softWrap: true,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: 14,
                 fontWeight: FontWeight.w800,
@@ -2060,8 +2271,6 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
             Text(
               actionPart,
               softWrap: true,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 fontSize: 13,
                 fontWeight: FontWeight.w700,
@@ -2078,8 +2287,6 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       raw,
       textAlign: TextAlign.left,
       softWrap: true,
-      maxLines: 3,
-      overflow: TextOverflow.ellipsis,
       style: TextStyle(
         fontSize: 14,
         fontWeight: FontWeight.w700,
@@ -2500,7 +2707,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
                                 child: IgnorePointer(
                                   child: _buildLastVerifiedOverlay(),
                                 ),
-                                  ),
+                              ),
                                 ],
                               ),
                             ),
@@ -2553,7 +2760,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           const SizedBox(height: 10),
           _buildOfflineReadinessCard(),
         ],
-        if (_pendingSyncCount > 0) ...[
+        if (_isOffline || _pendingSyncCount > 0) ...[
           const SizedBox(height: 10),
           _buildConnectivityBanner(),
           const SizedBox(height: 8),
@@ -2596,16 +2803,21 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
                     ],
                   ),
                   child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Icon(
                         _statusColor == Colors.red.shade700
                             ? Icons.error_rounded
                             : (_statusColor == const Color(0xFFD4A843)
                                 ? Icons.hourglass_top_rounded
-                                : Icons.check_circle_rounded),
+                                : (_statusColor == Colors.orange.shade700
+                                    ? Icons.info_rounded
+                                    : Icons.check_circle_rounded)),
                         color: _statusColor,
                         size: 20,
+                        ),
                       ),
                       const SizedBox(width: 10),
                       Expanded(
@@ -2626,36 +2838,50 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     final accent = Colors.orange.shade700;
     final background = Colors.orange.shade50;
     final border = Colors.orange.shade200;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      margin: const EdgeInsets.symmetric(horizontal: 24),
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: border),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            _isOffline ? Icons.wifi_off_rounded : Icons.sync_rounded,
-            size: 16,
-            color: accent,
-          ),
-          const SizedBox(width: 8),
-          Text(
-            _isOffline
-                ? 'Offline Mode - $_pendingSyncCount scans queued'
-                : (_isSyncing
-                      ? 'Syncing $_pendingSyncCount queued scans...'
-                      : 'Online - $_pendingSyncCount queued scans pending'),
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
+    final String label;
+    if (_isOffline && _pendingSyncCount > 0) {
+      label = 'Offline mode — $_pendingSyncCount scan(s) queued';
+    } else if (_isOffline) {
+      label = 'Offline mode active — using saved pack';
+    } else if (_isSyncing) {
+      label = 'Syncing $_pendingSyncCount queued scan(s)…';
+    } else {
+      label = 'Online — $_pendingSyncCount queued scan(s) pending';
+    }
+    return GestureDetector(
+      onTap: () {
+        unawaited(_syncQueueWhenOnline(showSnack: true));
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        margin: const EdgeInsets.symmetric(horizontal: 24),
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: border),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              _isOffline ? Icons.wifi_off_rounded : Icons.sync_rounded,
+              size: 16,
               color: accent,
             ),
-          ),
-        ],
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: accent,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

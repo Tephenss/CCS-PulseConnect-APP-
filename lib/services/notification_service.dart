@@ -35,6 +35,47 @@ class AppNotification {
     this.type = NotificationType.info,
     this.isRead = false,
   });
+
+  Map<String, dynamic> toCacheMap() => {
+        'id': id,
+        'title': title,
+        'message': message,
+        'timestamp': timestamp.toUtc().toIso8601String(),
+        'type': type.name,
+        'isRead': isRead,
+        if (eventId != null) 'eventId': eventId,
+        if (actionType != null) 'actionType': actionType,
+        if (route != null) 'route': route,
+      };
+
+  static AppNotification? fromCacheMap(Map<String, dynamic> raw) {
+    final id = (raw['id']?.toString() ?? '').trim();
+    if (id.isEmpty) return null;
+    final tsRaw = (raw['timestamp']?.toString() ?? '').trim();
+    final ts = DateTime.tryParse(tsRaw)?.toLocal() ?? DateTime.now();
+    final typeName = (raw['type']?.toString() ?? 'info').trim().toLowerCase();
+    final type = NotificationType.values.firstWhere(
+      (t) => t.name == typeName,
+      orElse: () => NotificationType.info,
+    );
+    return AppNotification(
+      id: id,
+      title: (raw['title']?.toString() ?? '').trim(),
+      message: (raw['message']?.toString() ?? '').trim(),
+      timestamp: ts,
+      eventId: (raw['eventId']?.toString() ?? '').trim().isEmpty
+          ? null
+          : raw['eventId']?.toString().trim(),
+      actionType: (raw['actionType']?.toString() ?? '').trim().isEmpty
+          ? null
+          : raw['actionType']?.toString().trim(),
+      route: (raw['route']?.toString() ?? '').trim().isEmpty
+          ? null
+          : raw['route']?.toString().trim(),
+      type: type,
+      isRead: raw['isRead'] == true,
+    );
+  }
 }
 
 class NotificationService {
@@ -74,12 +115,14 @@ class NotificationService {
   bool _pendingForceRefresh = false;
   final Map<String, DateTime> _effectiveEndCache = {};
 
-  static const Duration _refreshCacheTtl = Duration(seconds: 8);
-  static const Duration _derivedFetchTtl = Duration(seconds: 20);
+  static const Duration _refreshCacheTtl = Duration(seconds: 45);
+  static const Duration _derivedFetchTtl = Duration(seconds: 45);
   static const String _eventNotificationColumns =
       'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_structure,event_mode,event_for,allow_registration,cover_image_url,location,event_type';
   static const String _eventNotificationColumnsFallback =
       'id,title,start_at,end_at,status,updated_at,created_at,created_by,proposal_stage,requirements_requested_at,requirements_submitted_at,description,event_mode,event_for,cover_image_url';
+
+  String _inboxDiskCacheKey(String userId) => 'notifications_inbox_v1_$userId';
 
   bool get _isCacheFresh =>
       _lastRefreshAt != null &&
@@ -94,6 +137,54 @@ class NotificationService {
     _cachedDerivedNotifications = null;
     _lastDerivedFetchAt = null;
     _lastRefreshAt = null;
+  }
+
+  /// In-memory snapshot only (no network). Used for instant UI paint.
+  List<AppNotification> peekCachedNotifications() =>
+      List<AppNotification>.from(_cachedNotifications);
+
+  /// Memory first, then disk — still no network.
+  Future<List<AppNotification>> getCachedNotifications() async {
+    if (_cachedNotifications.isNotEmpty) {
+      return List<AppNotification>.from(_cachedNotifications);
+    }
+    final userId = (_activeUserId ?? '').trim();
+    String resolvedUserId = userId;
+    if (resolvedUserId.isEmpty) {
+      final user = await AuthService().getCurrentUser();
+      resolvedUserId = (user?['id']?.toString() ?? '').trim();
+    }
+    if (resolvedUserId.isEmpty) return [];
+
+    final rows =
+        await AppCacheService().loadJsonList(_inboxDiskCacheKey(resolvedUserId));
+    if (rows.isEmpty) return [];
+
+    final parsed = <AppNotification>[];
+    for (final row in rows) {
+      final n = AppNotification.fromCacheMap(row);
+      if (n != null) parsed.add(n);
+    }
+    if (parsed.isEmpty) return [];
+
+    _cachedNotifications = parsed;
+    _activeUserId ??= resolvedUserId;
+    _emitUnreadCount();
+    return List<AppNotification>.from(_cachedNotifications);
+  }
+
+  Future<void> _persistNotificationsDisk() async {
+    final userId = (_activeUserId ?? '').trim();
+    if (userId.isEmpty) return;
+    try {
+      await AppCacheService().saveJsonList(
+        _inboxDiskCacheKey(userId),
+        _cachedNotifications.map((n) => n.toCacheMap()).toList(),
+        preserveNonEmptyOnEmpty: true,
+      );
+    } catch (e) {
+      debugPrint('Notifications: disk cache write failed: $e');
+    }
   }
 
   String _shownInteractiveNotificationsKey(String userId) =>
@@ -716,6 +807,7 @@ class NotificationService {
       _cachedNotifications = nextNotifications;
       _lastRefreshAt = DateTime.now();
       _emitUnreadCount();
+      unawaited(_persistNotificationsDisk());
     } finally {
       _isRefreshing = false;
       if (_pendingForceRefresh) {
@@ -726,8 +818,11 @@ class NotificationService {
   }
 
   Future<List<AppNotification>> getNotifications({bool forceRefresh = false}) async {
+    if (!forceRefresh && _cachedNotifications.isEmpty) {
+      await getCachedNotifications();
+    }
     if (forceRefresh || !_isCacheFresh) {
-      await refresh(force: true);
+      await refresh(force: forceRefresh || !_isCacheFresh);
     }
     return List<AppNotification>.from(_cachedNotifications);
   }
@@ -1625,6 +1720,7 @@ class NotificationService {
           notif.isRead = true;
         }
         _emitUnreadCount();
+        unawaited(_persistNotificationsDisk());
       }
 
       final authService = AuthService();
@@ -1671,6 +1767,7 @@ class NotificationService {
           notif.isRead = true;
         }
         _emitUnreadCount();
+        unawaited(_persistNotificationsDisk());
       }
 
       final authService = AuthService();

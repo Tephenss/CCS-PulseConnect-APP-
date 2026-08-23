@@ -1023,21 +1023,45 @@ class _TeacherProfileState extends State<TeacherProfile> {
                   ),
                   
                   const SizedBox(height: 32),
-                  
-                  // Security Selection
+
+                  // Security
                   const Align(
                     alignment: Alignment.centerLeft,
-                    child: Text('SECURITY', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w900, color: Color(0xFF6B7280), letterSpacing: 1.2)),
+                    child: Text(
+                      'SECURITY',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF6B7280),
+                        letterSpacing: 1.2,
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 16),
-                  
                   _buildActionCard(
                     icon: Icons.lock_person_rounded,
                     title: 'Change Password',
                     onTap: () => Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => const ChangePasswordScreen(role: 'Teacher'),
+                        builder: (_) =>
+                            const ChangePasswordScreen(role: 'Teacher'),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 28),
+
+                  // App & device
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'APP & DEVICE',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF6B7280),
+                        letterSpacing: 1.2,
                       ),
                     ),
                   ),
@@ -1048,7 +1072,7 @@ class _TeacherProfileState extends State<TeacherProfile> {
                     subtitle: _offlineSummarySubtitle(),
                     onTap: _showOfflineStatusSheet,
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 12),
                   _buildActionCard(
                     icon: Icons.speed_rounded,
                     title: 'Performance Mode',

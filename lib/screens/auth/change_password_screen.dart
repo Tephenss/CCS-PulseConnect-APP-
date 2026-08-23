@@ -6,7 +6,9 @@ import '../../services/auth_service.dart';
 import '../../services/mobile_backend_service.dart';
 import '../../services/notification_service.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/otp_code_boxes.dart';
 import '../../utils/teacher_theme_utils.dart';
+import '../../services/device_performance_service.dart';
 
 class ChangePasswordScreen extends StatefulWidget {
   final String role;
@@ -49,12 +51,16 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen>
     _logoFloatController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
-    )..repeat(reverse: true);
+    );
 
     _gradientController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 5),
-    )..repeat(reverse: true);
+    );
+    if (DevicePerformance.instance.enableDecorativeMotion) {
+      _logoFloatController.repeat(reverse: true);
+      _gradientController.repeat(reverse: true);
+    }
 
     _loadMaskedEmail();
   }
@@ -488,40 +494,10 @@ class _ChangePasswordScreenState extends State<ChangePasswordScreen>
           ),
         ),
         const SizedBox(height: 10),
-        TextField(
+        OtpCodeBoxes(
           controller: _codeController,
-          keyboardType: TextInputType.number,
-          maxLength: 6,
-          style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-          cursorColor: _primaryColor,
-          decoration: InputDecoration(
-            hintText: '6-digit code',
-            hintStyle: const TextStyle(color: Color(0xFF52525B), fontSize: 14),
-            counterText: '',
-            prefixIcon: const Icon(
-              Icons.mark_email_read_outlined,
-              color: Color(0xFF52525B),
-              size: 20,
-            ),
-            filled: true,
-            fillColor: const Color(0xFF1C1C22),
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 16,
-              vertical: 16,
-            ),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: const BorderSide(color: Color(0xFF27272A)),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: const BorderSide(color: Color(0xFF27272A)),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: BorderSide(color: _primaryColor, width: 1.5),
-            ),
-          ),
+          focusColor: _primaryColor,
+          enabled: !_isLoading,
         ),
         const SizedBox(height: 12),
         Align(

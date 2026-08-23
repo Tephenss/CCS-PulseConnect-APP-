@@ -9,6 +9,7 @@ import '../../widgets/app_snackbar.dart';
 import '../../main.dart';
 import '../../utils/teacher_theme_utils.dart';
 import '../../utils/app_page_routes.dart';
+import '../../services/device_performance_service.dart';
 
 class LoginScreen extends StatefulWidget {
   final String role;
@@ -40,7 +41,10 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
     _floatController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
-    )..repeat(reverse: true);
+    );
+    if (DevicePerformance.instance.enableDecorativeMotion) {
+      _floatController.repeat(reverse: true);
+    }
   }
 
   @override

@@ -1166,7 +1166,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         const SizedBox(height: 10),
         _buildCoverPicker(),
         const SizedBox(height: 24),
-        _buildLabel('Event Title'),
+        _buildLabel('Event Title', required: true),
         _buildTextField(
           controller: _titleCtrl,
           hint: 'e.g. CCS Summit 2026',
@@ -1174,7 +1174,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         ),
         const SizedBox(height: 24),
 
-        _buildLabel('Location'),
+        _buildLabel('Location', required: true),
         _buildTextField(
           controller: _locationCtrl,
           hint: 'e.g. Laguna University',
@@ -1188,7 +1188,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildLabel('Event Type'),
+                  _buildLabel('Event Type', required: true),
                   _buildDropdown(
                     value: _eventType,
                     items: [
@@ -1214,7 +1214,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _buildLabel('Target Course'),
+                  _buildLabel('Target Course', required: true),
                   _buildDropdown(
                     value: _targetCourse,
                     items: ['ALL', 'BSIT', 'BSIT-SD', 'BSIT-BA', 'BSCS'],
@@ -1235,7 +1235,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         ),
         if (_eventType == 'Other') ...[
           const SizedBox(height: 16),
-          _buildLabel('Specify event type'),
+          _buildLabel('Specify event type', required: true),
           TextField(
             controller: _eventTypeOtherCtrl,
             maxLength: 80,
@@ -1265,10 +1265,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           ),
         ],
         const SizedBox(height: 16),
-        _buildLabel('Target Year'),
+        _buildLabel('Target Year', required: true),
         _buildTargetYearChips(),
         const SizedBox(height: 24),
-        _buildLabel('Registration Type'),
+        _buildLabel('Registration Type', required: true),
         _buildRegistrationTypeCard(
           selected: _isFreeEvent,
           title: 'Free Event',
@@ -1284,7 +1284,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         ),
         if (!_isFreeEvent) ...[
           const SizedBox(height: 16),
-          _buildLabel('Settlement Amount (₱)'),
+          _buildLabel('Settlement Amount (₱)', required: true),
           _buildNumberField(
             controller: _eventFeeCtrl,
             hint: 'e.g. 250.00',
@@ -1410,7 +1410,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            _buildLabel('Description'),
+            _buildLabel('Description', required: true),
             const Spacer(),
             IconButton(
               tooltip: 'Expand view',
@@ -1615,7 +1615,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     Widget commonFields = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildLabel('Grace Time (Minutes)'),
+        _buildLabel('Grace Time (Minutes)', required: true),
         _buildNumberField(
           controller: _graceTimeCtrl,
           hint: '30',
@@ -1630,10 +1630,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           commonFields,
-          _buildLabel('Start Date & Time'),
+          _buildLabel('Start Date & Time', required: true),
           _buildDateTimeInput(_startDateCtrl, Icons.calendar_today_rounded),
           const SizedBox(height: 24),
-          _buildLabel('End Date & Time'),
+          _buildLabel('End Date & Time', required: true),
           _buildDateTimeInput(
             _endDateCtrl,
             Icons.access_time_rounded,
@@ -1650,17 +1650,17 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           commonFields,
           _buildBatchBadge('SEMINAR 1 SCHEDULE'),
           const SizedBox(height: 20),
-          _buildLabel('Seminar 1 Title'),
+          _buildLabel('Seminar 1 Title', required: true),
           _buildTextField(
             controller: _seminar1TitleCtrl,
             hint: 'e.g. Seminar Proper',
             prefixIcon: Icons.menu_book_rounded,
           ),
           const SizedBox(height: 24),
-          _buildLabel('Start Date & Time'),
+          _buildLabel('Start Date & Time', required: true),
           _buildDateTimeInput(_seminar1StartCtrl, Icons.calendar_today_rounded),
           const SizedBox(height: 24),
-          _buildLabel('End Date & Time'),
+          _buildLabel('End Date & Time', required: true),
           _buildDateTimeInput(
             _seminar1EndCtrl,
             Icons.access_time_rounded,
@@ -1700,20 +1700,20 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             const SizedBox(height: 32),
             _buildBatchBadge('SEMINAR 2 SCHEDULE'),
             const SizedBox(height: 20),
-            _buildLabel('Seminar 2 Title'),
+            _buildLabel('Seminar 2 Title', required: true),
             _buildTextField(
               controller: _seminar2TitleCtrl,
               hint: 'e.g. Workshop Session',
               prefixIcon: Icons.menu_book_outlined,
             ),
             const SizedBox(height: 24),
-            _buildLabel('Start Date & Time'),
+            _buildLabel('Start Date & Time', required: true),
             _buildDateTimeInput(
               _seminar2StartCtrl,
               Icons.calendar_today_rounded,
             ),
             const SizedBox(height: 24),
-            _buildLabel('End Date & Time'),
+            _buildLabel('End Date & Time', required: true),
             _buildDateTimeInput(
               _seminar2EndCtrl,
               Icons.access_time_rounded,
@@ -2533,15 +2533,28 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     );
   }
 
-  Widget _buildLabel(String text) {
+  Widget _buildLabel(String text, {bool required = false}) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8, left: 4),
-      child: Text(
-        text,
-        style: const TextStyle(
-          fontWeight: FontWeight.w700,
-          fontSize: 13,
-          color: Color(0xFF4B5563),
+      child: Text.rich(
+        TextSpan(
+          text: text,
+          style: const TextStyle(
+            fontWeight: FontWeight.w700,
+            fontSize: 13,
+            color: Color(0xFF4B5563),
+          ),
+          children: required
+              ? const [
+                  TextSpan(
+                    text: ' *',
+                    style: TextStyle(
+                      color: Color(0xFFE11D48),
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ]
+              : const [],
         ),
       ),
     );

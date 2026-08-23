@@ -126,8 +126,8 @@ class DevicePerformance extends ChangeNotifier {
   int? get ramMb => _ramMb;
 
   bool get enableShine => _tier == PerformanceTier.high;
-  // Decorative loops elsewhere (tickets, splash, etc.). Welcome page 1
-  // always animates regardless of tier.
+  // Battery Saver keeps decorative loops static; functional progress
+  // indicators and direct interaction feedback remain available.
   bool get enableDecorativeMotion => _tier != PerformanceTier.low;
   bool get enableHeavyShadows => _tier == PerformanceTier.high;
   bool get enableShadows => _tier != PerformanceTier.low;

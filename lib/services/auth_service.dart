@@ -1238,6 +1238,16 @@ class AuthService {
   String? _extractStoragePathFromUrl(String url) {
     if (url.isEmpty) return null;
     final trimmed = url.trim();
+    // Hostinger-local private avatar path. It must be resolved through the PHP
+    // BFF, not passed to Image.file as though it were an Android file path.
+    if (!trimmed.contains('://') &&
+        trimmed.startsWith('media/avatars/')) {
+      var path = trimmed;
+      while (path.startsWith('media/avatars/avatars/')) {
+        path = 'media/avatars/${path.substring('media/avatars/avatars/'.length)}';
+      }
+      return path;
+    }
     // Already a storage object path (e.g. profiles/{userId}.jpg).
     if (!trimmed.contains('://') &&
         (trimmed.startsWith('profiles/') || trimmed.startsWith('avatars/'))) {
@@ -1258,6 +1268,16 @@ class AuthService {
       }
       if (path.contains(signMarker)) {
         return path.split(signMarker).last;
+      }
+      if (path.endsWith('/api/media_serve.php')) {
+        var localPath = uri.queryParameters['p']?.trim() ?? '';
+        while (localPath.startsWith('media/avatars/avatars/')) {
+          localPath =
+              'media/avatars/${localPath.substring('media/avatars/avatars/'.length)}';
+        }
+        if (localPath.startsWith('media/avatars/')) {
+          return localPath;
+        }
       }
     } catch (_) {
       // no-op

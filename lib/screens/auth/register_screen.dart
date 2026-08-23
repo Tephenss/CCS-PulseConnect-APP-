@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../../main.dart';
 import '../../services/auth_service.dart';
 import '../../services/native_document_picker.dart';
+import '../../services/device_performance_service.dart';
 import '../../utils/class_schedule_format.dart';
 
 class RegisterScreen extends StatefulWidget {
@@ -48,7 +49,10 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
     _logoFloatController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
-    )..repeat(reverse: true);
+    );
+    if (DevicePerformance.instance.enableDecorativeMotion) {
+      _logoFloatController.repeat(reverse: true);
+    }
   }
 
   @override

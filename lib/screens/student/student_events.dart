@@ -711,17 +711,14 @@ class _StudentEventsState extends State<StudentEvents>
     final eventId = event['id']?.toString() ?? '';
     final title = event['title'] as String? ?? 'Untitled';
     final startAt = event['start_at'] as String?;
-    final endAt = event['end_at'] as String?;
     final eventFor = _getTargetLabel(event['event_for']?.toString());
     String status = (event['status'] as String? ?? 'published').toLowerCase();
 
     final startDate = parseStoredEventDateTime(startAt);
-    final endDate = parseStoredEventDateTime(endAt);
 
-    // Event becomes expired only when it has already ended.
+    // Event becomes expired only after Early Out+1h or end_at+1h.
     if (status != 'archived' &&
-        endDate != null &&
-        endDate.isBefore(DateTime.now())) {
+        isEventPastLifecycleMap(event, now: DateTime.now())) {
       status = 'expired';
     }
 

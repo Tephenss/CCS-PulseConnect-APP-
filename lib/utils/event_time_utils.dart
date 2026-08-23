@@ -2,6 +2,10 @@ import 'package:intl/intl.dart';
 
 const Duration kManilaOffset = Duration(hours: 8);
 
+/// Matches PHP `ATTENDANCE_CHECK_OUT_WINDOW_HOURS` — keep event "live" /
+/// published through the active time-out window.
+const Duration kEventCheckoutWindow = Duration(hours: 1);
+
 DateTime? parseStoredEventDateTime(dynamic raw) {
   final text = raw?.toString().trim() ?? '';
   if (text.isEmpty) return null;
@@ -28,6 +32,55 @@ DateTime? parseStoredEventDateTime(dynamic raw) {
     parsed.second,
     parsed.millisecond,
     parsed.microsecond,
+  );
+}
+
+/// When the event leaves Active/Published lists.
+/// Early Out activated → early_out_enabled_at + 1h (do not wait for end_at).
+/// Otherwise → end_at + 1h.
+DateTime? eventLifecycleEndsAt({
+  dynamic endAtRaw,
+  dynamic earlyOutEnabledAtRaw,
+}) {
+  final earlyOutAt = parseStoredEventDateTime(earlyOutEnabledAtRaw);
+  if (earlyOutAt != null) {
+    return earlyOutAt.add(kEventCheckoutWindow);
+  }
+  final endDate = parseStoredEventDateTime(endAtRaw);
+  if (endDate == null) return null;
+  return endDate.add(kEventCheckoutWindow);
+}
+
+DateTime? eventLifecycleEndsAtFromEvent(Map<String, dynamic> event) {
+  return eventLifecycleEndsAt(
+    endAtRaw: event['end_at'],
+    earlyOutEnabledAtRaw: event['early_out_enabled_at'],
+  );
+}
+
+/// True after the active check-out / Early Out window ends.
+bool isEventPastLifecycle({
+  dynamic endAtRaw,
+  dynamic earlyOutEnabledAtRaw,
+  DateTime? now,
+}) {
+  final ends = eventLifecycleEndsAt(
+    endAtRaw: endAtRaw,
+    earlyOutEnabledAtRaw: earlyOutEnabledAtRaw,
+  );
+  if (ends == null) return false;
+  final reference = now ?? DateTime.now().toUtc().add(kManilaOffset);
+  return reference.isAfter(ends);
+}
+
+bool isEventPastLifecycleMap(
+  Map<String, dynamic> event, {
+  DateTime? now,
+}) {
+  return isEventPastLifecycle(
+    endAtRaw: event['end_at'],
+    earlyOutEnabledAtRaw: event['early_out_enabled_at'],
+    now: now,
   );
 }
 
@@ -98,7 +151,8 @@ String formatTimeRange(DateTime? start, DateTime? end) {
   return '${DateFormat('hh:mm a').format(start)} - ${DateFormat('hh:mm a').format(end)}';
 }
 
-/// Matches the teacher Events tab "Active" filter: published and not yet ended.
+/// Matches the teacher Events tab "Active" filter: published and still within
+/// the active time-out window (Early Out+1h or end_at+1h), same as web Published.
 bool isTeacherActiveEvent(
   Map<String, dynamic> event, {
   DateTime? now,
@@ -108,12 +162,10 @@ bool isTeacherActiveEvent(
   if (status != 'published') return false;
 
   final reference = now ?? DateTime.now().toUtc().add(kManilaOffset);
-  final endDate = parseStoredEventDateTime(event['end_at']);
-  final isPast = endDate != null && endDate.isBefore(reference);
-  return !isPast;
+  return !isEventPastLifecycleMap(event, now: reference);
 }
 
-/// Home/calendar visibility: published or approved (ready to publish), not ended.
+/// Home/calendar visibility: published or approved (ready to publish), not past lifecycle.
 bool isCalendarVisibleEvent(
   Map<String, dynamic> event, {
   DateTime? now,
@@ -123,9 +175,7 @@ bool isCalendarVisibleEvent(
   if (status != 'published' && status != 'approved') return false;
 
   final reference = now ?? DateTime.now().toUtc().add(kManilaOffset);
-  final endDate = parseStoredEventDateTime(event['end_at']);
-  final isPast = endDate != null && endDate.isBefore(reference);
-  return !isPast;
+  return !isEventPastLifecycleMap(event, now: reference);
 }
 
 int? normalizeRegistrationCloseWeeks(dynamic value) {

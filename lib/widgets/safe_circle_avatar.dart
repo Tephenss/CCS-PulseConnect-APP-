@@ -31,6 +31,13 @@ class SafeCircleAvatar extends StatelessWidget {
     return normalized.startsWith('http://') || normalized.startsWith('https://');
   }
 
+  bool _isStoragePathNotFile(String value) {
+    final normalized = value.trim().replaceAll('\\', '/').toLowerCase();
+    return normalized.startsWith('media/avatars/') ||
+        normalized.startsWith('avatars/') ||
+        normalized.startsWith('profiles/');
+  }
+
   Widget _buildFallback() {
     return Container(
       width: size,
@@ -65,6 +72,11 @@ class SafeCircleAvatar extends StatelessWidget {
         cacheHeight: cachePx,
         errorBuilder: (context, error, stackTrace) => _buildFallback(),
       );
+    }
+
+    // Logical storage paths are not device file paths — wait for signed URL.
+    if (_isStoragePathNotFile(value)) {
+      return _buildFallback();
     }
 
     final file = File(value);

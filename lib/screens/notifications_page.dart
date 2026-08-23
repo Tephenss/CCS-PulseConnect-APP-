@@ -41,16 +41,32 @@ class _NotificationsPageState extends State<NotificationsPage> {
   void initState() {
     super.initState();
     _isTeacherTheme = widget.isTeacherTheme;
-    _loadData(force: true);
+    // Paint disk/memory cache first, then soft-refresh in background.
+    _loadData(force: false);
     _unreadSubscription = _service.unreadCountStream.listen((_) {
-      _loadData();
+      _loadData(force: false);
     });
   }
 
   Future<void> _loadData({bool force = false}) async {
+    // Instant paint from memory/disk when available.
+    final cached = await _service.getCachedNotifications();
+    if (!mounted) return;
+    if (cached.isNotEmpty) {
+      setState(() {
+        _notifications = cached;
+        _isLoading = false;
+      });
+    } else if (_notifications.isEmpty) {
+      setState(() => _isLoading = true);
+    }
+
     final user = await _auth.getCurrentUser();
     final role = user?['role']?.toString().toLowerCase() ?? '';
-    final notifs = await _service.getNotifications(forceRefresh: force);
+    // Soft refresh: use TTL when possible; force only when asked or empty cache.
+    final notifs = await _service.getNotifications(
+      forceRefresh: force || cached.isEmpty,
+    );
 
     if (!mounted) return;
     setState(() {

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -25,6 +26,32 @@ class MobileBackendService {
     if (uri == null) return false;
     final host = uri.host.trim().toLowerCase();
     return host.isNotEmpty && host != 'your-web-domain';
+  }
+
+  /// True when the hosted PHP base URL answers within [timeout].
+  /// Any HTTP response (including 404) counts as reachable; timeouts /
+  /// socket failures mean the device should use offline scan mode.
+  static Future<bool> probeReachable({
+    Duration timeout = const Duration(milliseconds: 2500),
+  }) async {
+    final base = _baseUri;
+    if (base == null || !isConfigured) return false;
+
+    final uri = base.replace(path: '/api/mobile_ping.php');
+
+    try {
+      final response = await http.get(uri).timeout(timeout);
+      // Any response from the host means the network path works.
+      return response.statusCode > 0;
+    } on SocketException {
+      return false;
+    } on TimeoutException {
+      return false;
+    } on http.ClientException {
+      return false;
+    } catch (_) {
+      return false;
+    }
   }
 
   static Uri? get _baseUri {
@@ -596,11 +623,22 @@ class MobileBackendService {
     });
   }
 
+  /// Teacher / student-assistant scan window (opens_at, closes_at, scan_mode).
+  /// Prefer this over anon context so offline warm matches mobile_scan_ticket.php.
+  Future<Map<String, dynamic>> getScanContext({bool fresh = false}) {
+    return post('/api/mobile_scan_context.php', {
+      if (fresh) 'fresh': true,
+    });
+  }
+
   Future<Map<String, dynamic>> selfCheckInViaEventQr({
     required String eventQrPayload,
+    String? scannedAtIso,
   }) {
     return post('/api/mobile_event_self_checkin.php', {
       'event_qr_payload': eventQrPayload.trim(),
+      if (scannedAtIso != null && scannedAtIso.trim().isNotEmpty)
+        'scanned_at': scannedAtIso.trim(),
     });
   }
 
@@ -935,6 +973,14 @@ class MobileBackendService {
 
   Future<Map<String, dynamic>> getMyTicketsSecure() {
     return post('/api/mobile_my_tickets.php', {}, timeout: _registrationTimeout);
+  }
+
+  Future<Map<String, dynamic>> getSelfAttendancePack() {
+    return post(
+      '/api/mobile_self_attendance_pack.php',
+      {},
+      timeout: _registrationTimeout,
+    );
   }
 
   Future<Map<String, dynamic>> getTeacherBlocksSecure() {

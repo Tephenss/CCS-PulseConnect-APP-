@@ -157,8 +157,11 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           (status == 'queued_offline' || fromOfflineQueue)) {
         final participantName =
             (res['participant_name']?.toString() ?? '').trim();
+        final action = (res['action']?.toString() ?? '').toLowerCase();
+        final queuedLabel =
+            action == 'check_out' ? 'Timed out' : 'Present';
         _scanStatus = participantName.isNotEmpty
-            ? 'Queued offline: $participantName — Present'
+            ? 'Queued offline: $participantName — $queuedLabel'
             : (res['message']?.toString() ??
                 'Offline check-in saved. Syncing when online.');
         _statusColor = Colors.orange.shade700;
@@ -248,7 +251,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           _normalizeScannerMessage(
             res['error']?.toString() ?? res['message']?.toString(),
             fallback: _selectedMode == StudentScanMode.takeAttendance && _isOffline
-                ? 'Connect to the internet to use the event QR.'
+                ? 'Offline Event QR failed. Open Take Attendance online once to prepare, then try again.'
                 : (_isOffline
                     ? 'Offline check-in failed. Refresh cache online first.'
                     : 'Scan failed.'),
@@ -293,6 +296,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
   int _pendingSyncCount = 0;
   bool _offlineSnapshotReady = false;
   bool _offlineSnapshotStale = false;
+  bool _offlineWarmFailed = false;
   DateTime? _offlineLastSyncedAt;
   Map<String, dynamic>? _offlinePinnedOpenContext;
   String _scanStatus = 'Checking scanner assignment...';
@@ -323,6 +327,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
   Timer? _scanResumeTimer;
   Timer? _contextRefreshTimer;
   Timer? _cameraHoldTimer;
+  Timer? _windowBoundaryTimer;
   bool _holdCameraForTab = true;
 
   /// Explicit controller so mode/tab switches do not recreate the camera
@@ -333,6 +338,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     formats: const [BarcodeFormat.qrCode],
     returnImage: false,
     cameraResolution: const Size(1280, 720),
+    autoZoom: true,
   );
 
   late Connectivity _connectivity;
@@ -382,7 +388,9 @@ class _StudentScanScreenState extends State<StudentScanScreen>
   bool get _scannerEnabled => _scanContext?['scanner_enabled'] == true;
   bool get _effectiveScannerEnabled {
     if (_selectedMode == StudentScanMode.takeAttendance) {
-      return !_isOffline && _studentId.isNotEmpty;
+      if (_studentId.isEmpty) return false;
+      if (!_isOffline) return true;
+      return _offlineSnapshotReady && !_offlineSnapshotStale;
     }
     return _scannerEnabled;
   }
@@ -407,15 +415,25 @@ class _StudentScanScreenState extends State<StudentScanScreen>
 
   void _applyTakeAttendanceUiState({required bool hasScanResult}) {
     if (hasScanResult) return;
-    _isScanning =
-        widget.isActive && !_isOffline && _studentId.isNotEmpty && !_manualPause;
-    if (_isOffline) {
-      _scanStatus = 'Connect to the internet to check in with the event QR.';
-      _statusColor = Colors.orange.shade700;
-    } else if (_studentId.isEmpty) {
+    final offlineReady =
+        _offlineSnapshotReady && !_offlineSnapshotStale;
+    final canScan = widget.isActive &&
+        _studentId.isNotEmpty &&
+        !_manualPause &&
+        (!_isOffline || offlineReady);
+    _isScanning = canScan;
+    if (_studentId.isEmpty) {
       _scanStatus = 'Log in to check yourself in with the event QR.';
       _statusColor = Colors.red.shade700;
       _isScanning = false;
+    } else if (_isOffline && !offlineReady) {
+      _scanStatus =
+          'No offline pack yet. Open Take Attendance once with internet to prepare.';
+      _statusColor = Colors.orange.shade700;
+    } else if (_isOffline) {
+      _scanStatus =
+          'Offline mode active. Point the camera at the event QR code.';
+      _statusColor = Colors.orange.shade700;
     } else {
       _scanStatus = 'Ready to scan. Point the camera at the event QR code.';
       _statusColor = Colors.grey.shade800;
@@ -480,7 +498,9 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     final current = _scanContext;
     if (!_payloadHasAssignedContext(current)) return false;
 
-    final snapshot = Map<String, dynamic>.from(current!);
+    final snapshot = _resolveOfflineWindowLocally(
+      Map<String, dynamic>.from(current!),
+    );
     final context = snapshot['context'];
     final contextMap = context is Map<String, dynamic>
         ? context
@@ -492,7 +512,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     setState(() {
       _scanContext = snapshot;
       _selectedEventTitle = _currentEventTitle(contextMap);
-      _isScanning = scannerEnabled && !_manualPause;
+      _isScanning = scannerEnabled && !_manualPause && widget.isActive;
       if (!_hasScanResult) {
         _scanStatus = scannerEnabled
             ? 'Offline mode active. Ready to scan from cache.'
@@ -506,6 +526,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
             : _contextColor(status);
       }
     });
+    if (scannerEnabled) {
+      _rememberOfflinePinnedContext(snapshot);
+    }
+    _scheduleOfflineWindowBoundaryTimer(snapshot);
     return true;
   }
 
@@ -548,6 +572,8 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       _scanResumeTimer?.cancel();
       _contextRefreshTimer?.cancel();
       _contextRefreshTimer = null;
+      _windowBoundaryTimer?.cancel();
+      _windowBoundaryTimer = null;
       if (mounted) {
         setState(() {
           _isScanning = false;
@@ -569,6 +595,9 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       _startContextRefreshTimer();
       if (_selectedMode == StudentScanMode.assist) {
         unawaited(_refreshScanContext(silent: true));
+        if (_isOffline) {
+          _enforceLocalOfflineWindowGuard();
+        }
       } else if (mounted) {
         setState(() {
           _applyTakeAttendanceUiState(hasScanResult: _hasScanResult);
@@ -590,6 +619,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     _scanResumeTimer?.cancel();
     _contextRefreshTimer?.cancel();
     _cameraHoldTimer?.cancel();
+    _windowBoundaryTimer?.cancel();
     _eventLiveSubscription?.cancel();
     _assignmentChannel?.unsubscribe();
     _eventChannel?.unsubscribe();
@@ -616,10 +646,12 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           setState(() {
             _applyTakeAttendanceUiState(hasScanResult: _hasScanResult);
           });
+          if (!_isOffline) {
+            unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
+          }
         }
-        if (!_isOffline && _pendingSyncCount > 0 && !_isSyncing) {
-          unawaited(_performQueueSync(showSnack: false));
-        }
+        // Auto-drain queue whenever a link exists (assist + self).
+        unawaited(_syncQueueWhenOnline(showSnack: false));
       },
     );
   }
@@ -642,8 +674,8 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           _applyTakeAttendanceUiState(hasScanResult: _hasScanResult);
         });
       }
+      unawaited(_syncQueueWhenOnline(showSnack: false));
       if (!_isOffline && _studentId.trim().isNotEmpty) {
-        unawaited(_performQueueSync(showSnack: false));
         if (_selectedMode == StudentScanMode.assist) {
           unawaited(
             _offlineSyncService.refreshSnapshotForCurrentScanner(
@@ -651,6 +683,13 @@ class _StudentScanScreenState extends State<StudentScanScreen>
               isTeacher: false,
             ),
           );
+        } else if (_selectedMode == StudentScanMode.takeAttendance) {
+          unawaited(
+            _offlineSyncService.refreshSelfAttendanceSnapshot(
+              studentId: _studentId,
+            ),
+          );
+          unawaited(_refreshOfflineReadiness());
         }
       }
     }
@@ -666,7 +705,9 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       final user = await _authService.getCurrentUser();
       final studentId = user?['id']?.toString() ?? '';
       final initialConnectivity = await Connectivity().checkConnectivity();
-      final startOffline = _resultsAreOffline(initialConnectivity);
+      final startOffline = await _resolveIsOffline(
+        linkResults: initialConnectivity,
+      );
       final isTakeAttendance =
           _selectedMode == StudentScanMode.takeAttendance;
 
@@ -678,6 +719,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           _isScanning = false;
           _offlineSnapshotReady = false;
           _offlineSnapshotStale = false;
+          _offlineWarmFailed = false;
           _offlineLastSyncedAt = null;
           _offlinePinnedOpenContext = null;
           _hasScanResult = false;
@@ -693,10 +735,16 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         });
       }
 
-      // Take Attendance = Event QR self check-in. Never gate on assistant assignment.
+      // Take Attendance = Event QR self check-in (online + offline pack).
       if (isTakeAttendance) {
         if (studentId.isNotEmpty) {
           await _refreshPendingSyncCount();
+          await _refreshOfflineReadiness(refreshSnapshot: !startOffline);
+          if (mounted) {
+            setState(() {
+              _applyTakeAttendanceUiState(hasScanResult: false);
+            });
+          }
           if (!_isOffline && _pendingSyncCount > 0) {
             unawaited(_performQueueSync(showSnack: false));
           }
@@ -754,6 +802,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           _studentId = '';
           _offlineSnapshotReady = false;
           _offlineSnapshotStale = false;
+          _offlineWarmFailed = false;
           _offlineLastSyncedAt = null;
           _offlinePinnedOpenContext = null;
           _selectedEventTitle = '';
@@ -929,6 +978,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
               : _contextColor(status);
         }
       });
+
+      if (_selectedMode == StudentScanMode.assist) {
+        _scheduleOfflineWindowBoundaryTimer(_scanContext);
+      }
 
       if (_selectedMode == StudentScanMode.assist &&
           eventId.isNotEmpty &&
@@ -1178,7 +1231,27 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     final explicitClose = _parseScheduleDate(context['closes_at']?.toString());
     if (explicitClose != null) return explicitClose;
 
+    final scanMode =
+        (context['scan_mode']?.toString() ?? 'check_in').toLowerCase().trim();
+
     final session = context['session'];
+    final event = context['event'];
+
+    if (scanMode == 'check_out') {
+      if (session is Map) {
+        final sessionEnd = _parseScheduleDate(session['end_at']?.toString());
+        if (sessionEnd != null) {
+          return sessionEnd.add(const Duration(hours: 1));
+        }
+      }
+      if (event is Map) {
+        final eventEnd = _parseScheduleDate(event['end_at']?.toString());
+        if (eventEnd != null) {
+          return eventEnd.add(const Duration(hours: 1));
+        }
+      }
+    }
+
     if (session is Map) {
       final sessionStart = _parseScheduleDate(session['start_at']?.toString());
       final sessionWindow =
@@ -1188,7 +1261,6 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       }
     }
 
-    final event = context['event'];
     if (event is Map) {
       final eventStart = _parseScheduleDate(event['start_at']?.toString());
       final graceMinutes =
@@ -1250,66 +1322,226 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     return true;
   }
 
+  DateTime? _parseIsoToUtc(String? raw) {
+    final text = (raw ?? '').trim();
+    if (text.isEmpty) return null;
+    final dt = DateTime.tryParse(text);
+    if (dt == null) return null;
+    final hasExplicitOffset = RegExp(
+      r'(z|[+-]\d{2}:\d{2}|[+-]\d{4})$',
+      caseSensitive: false,
+    ).hasMatch(text);
+    if (hasExplicitOffset) return dt.toUtc();
+    return DateTime.utc(
+      dt.year,
+      dt.month,
+      dt.day,
+      dt.hour,
+      dt.minute,
+      dt.second,
+      dt.millisecond,
+      dt.microsecond,
+    ).subtract(_manilaOffset);
+  }
+
+  Map<String, dynamic> _resolveOfflineWindowLocally(
+    Map<String, dynamic> payload,
+  ) {
+    // Shared resolver: flips check_in → check_out at end / Early Out offline.
+    return _offlineSyncService.resolveScannerContextLocally(payload);
+  }
+
+  void _scheduleOfflineWindowBoundaryTimer(Map<String, dynamic>? payload) {
+    _windowBoundaryTimer?.cancel();
+    _windowBoundaryTimer = null;
+    if (!widget.isActive ||
+        payload == null ||
+        _selectedMode == StudentScanMode.takeAttendance) {
+      return;
+    }
+
+    final rawContext = payload['context'];
+    final contextMap = rawContext is Map<String, dynamic>
+        ? rawContext
+        : (rawContext is Map ? Map<String, dynamic>.from(rawContext) : null);
+    if (contextMap == null) return;
+
+    final now = DateTime.now().toUtc();
+    final opensAt = _parseIsoToUtc(contextMap['opens_at']?.toString());
+    final closesAt = _parseIsoToUtc(contextMap['closes_at']?.toString());
+    final enabled = payload['scanner_enabled'] == true;
+
+    // Online + offline: schedule open at opens_at AND close at closes_at.
+    Duration? delay;
+    if (!enabled && opensAt != null && now.isBefore(opensAt)) {
+      delay = opensAt.difference(now);
+    } else if (enabled && closesAt != null && !now.isAfter(closesAt)) {
+      delay = closesAt.difference(now);
+    } else if (!enabled && opensAt != null && !now.isBefore(opensAt)) {
+      _applyWindowBoundaryNow();
+      return;
+    } else {
+      return;
+    }
+
+    if (delay <= Duration.zero) {
+      _applyWindowBoundaryNow();
+      return;
+    }
+
+    _windowBoundaryTimer = Timer(delay + const Duration(milliseconds: 250), () {
+      if (!mounted || !widget.isActive) return;
+      if (_selectedMode == StudentScanMode.takeAttendance) return;
+      _applyWindowBoundaryNow();
+    });
+  }
+
+  void _applyWindowBoundaryNow() {
+    if (_isOffline) {
+      _enforceLocalOfflineWindowGuard();
+      return;
+    }
+    _enforceLocalWindowBoundaryOnline();
+  }
+
+  /// Online: flip open/close from local schedule immediately, then confirm with BFF.
+  void _enforceLocalWindowBoundaryOnline() {
+    if (_selectedMode == StudentScanMode.takeAttendance) return;
+    final active = _scanContext;
+    if (active == null ||
+        active.isEmpty ||
+        !_payloadHasAssignedContext(active)) {
+      unawaited(_refreshScanContext(silent: true));
+      return;
+    }
+
+    final resolved = _resolveOfflineWindowLocally(
+      Map<String, dynamic>.from(active),
+    );
+    final rawContext = resolved['context'];
+    final contextMap = rawContext is Map<String, dynamic>
+        ? rawContext
+        : (rawContext is Map ? Map<String, dynamic>.from(rawContext) : null);
+    final nextStatus =
+        (resolved['status']?.toString() ?? 'closed').trim().toLowerCase();
+    final nextEnabled = resolved['scanner_enabled'] == true;
+    final prevStatus =
+        (active['status']?.toString() ?? '').trim().toLowerCase();
+    final prevEnabled = active['scanner_enabled'] == true;
+
+    if (nextEnabled != prevEnabled || nextStatus != prevStatus) {
+      if (!mounted) return;
+      setState(() {
+        _scanContext = resolved;
+        _selectedEventTitle = _currentEventTitle(contextMap);
+        _isScanning = nextEnabled && !_manualPause && widget.isActive;
+        _manualPause = false;
+        if (!_hasScanResult) {
+          _scanStatus = nextEnabled
+              ? 'Ready to scan.'
+              : _scanAvailabilityNote(
+                  status: nextStatus,
+                  serviceMessage:
+                      (resolved['message']?.toString() ?? '').trim(),
+                  context: contextMap,
+                );
+          _statusColor = nextEnabled
+              ? Colors.orange.shade700
+              : _contextColor(nextStatus);
+        }
+      });
+    }
+
+    _scheduleOfflineWindowBoundaryTimer(_scanContext);
+    unawaited(_refreshScanContext(silent: true));
+  }
+
   void _enforceLocalOfflineWindowGuard() {
     if (!_isOffline) return;
     if (_selectedMode == StudentScanMode.takeAttendance) return;
     final active = _activeOfflineValidationContext();
     if (active == null || active.isEmpty) return;
+    if (!_payloadHasAssignedContext(active)) return;
 
-    final rawContext = active['context'];
+    final resolved = _resolveOfflineWindowLocally(
+      Map<String, dynamic>.from(active),
+    );
+    final rawContext = resolved['context'];
     final contextMap = rawContext is Map<String, dynamic>
         ? rawContext
         : (rawContext is Map ? Map<String, dynamic>.from(rawContext) : null);
-    final deadline = _offlinePinnedDeadline(contextMap);
-    final now = DateTime.now().toUtc().add(_manilaOffset);
-    if (contextMap == null || deadline == null || now.isBefore(deadline)) {
+    final nextStatus =
+        (resolved['status']?.toString() ?? 'closed').trim().toLowerCase();
+    final nextEnabled = resolved['scanner_enabled'] == true;
+    final prevStatus =
+        (active['status']?.toString() ?? '').trim().toLowerCase();
+    final prevEnabled = active['scanner_enabled'] == true;
+
+    if (nextStatus == 'closed' && contextMap != null) {
+      final dropAccess = _shouldDropOfflineAccessAfterDeadline(contextMap);
+      if (dropAccess && prevStatus != 'no_assignment') {
+        _offlinePinnedOpenContext = null;
+        if (!mounted) return;
+        setState(() {
+          _scanContext = {
+            'ok': true,
+            'status': 'no_assignment',
+            'scanner_enabled': false,
+            'message': 'Assigned scanner event has already ended.',
+            'context': null,
+            'assignments': 0,
+          };
+          _selectedEventTitle = '';
+          _isScanning = false;
+          _manualPause = false;
+          if (!_hasScanResult) {
+            _scanStatus = 'Assigned scanner event has already ended.';
+            _statusColor = Colors.red.shade700;
+          }
+        });
+        _scheduleOfflineWindowBoundaryTimer(_scanContext);
+        unawaited(
+          _offlineSyncService.clearCachedScannerAccess(
+            actorId: _studentId,
+            isTeacher: false,
+          ),
+        );
+        return;
+      }
+    }
+
+    if (nextEnabled == prevEnabled && nextStatus == prevStatus) {
+      _scheduleOfflineWindowBoundaryTimer(resolved);
       return;
     }
 
-    final dropAccess = _shouldDropOfflineAccessAfterDeadline(contextMap);
-    _offlinePinnedOpenContext = null;
     if (!mounted) return;
     setState(() {
-      if (dropAccess) {
-        _scanContext = {
-          'ok': true,
-          'status': 'no_assignment',
-          'scanner_enabled': false,
-          'message': 'Assigned scanner event has already ended.',
-          'context': null,
-          'assignments': 0,
-        };
-        _selectedEventTitle = '';
-      } else {
-        final closedContext = Map<String, dynamic>.from(active);
-        closedContext['status'] = 'closed';
-        closedContext['scanner_enabled'] = false;
-        _scanContext = closedContext;
-      }
-      _isScanning = false;
+      _scanContext = resolved;
+      _selectedEventTitle = _currentEventTitle(contextMap);
+      _isScanning = nextEnabled && !_manualPause && widget.isActive;
       _manualPause = false;
       if (!_hasScanResult) {
-        if (dropAccess) {
-          _scanStatus = 'Assigned scanner event has already ended.';
-          _statusColor = Colors.red.shade700;
+        if (nextEnabled) {
+          _scanStatus = 'Offline mode active. Ready to scan from cache.';
+          _statusColor = Colors.orange.shade700;
         } else {
           _scanStatus = _scanAvailabilityNote(
-            status: 'closed',
-            serviceMessage: 'Scanner is not open for this schedule.',
+            status: nextStatus,
+            serviceMessage: (resolved['message']?.toString() ?? '').trim(),
             context: contextMap,
           );
-          _statusColor = _contextColor('closed');
+          _statusColor = _contextColor(nextStatus);
         }
       }
     });
-    if (dropAccess) {
-      unawaited(
-        _offlineSyncService.clearCachedScannerAccess(
-          actorId: _studentId,
-          isTeacher: false,
-        ),
-      );
+
+    if (nextEnabled) {
+      _rememberOfflinePinnedContext(resolved);
+    } else if (nextStatus == 'closed') {
+      _offlinePinnedOpenContext = null;
     }
+    _scheduleOfflineWindowBoundaryTimer(_scanContext);
   }
 
   Map<String, dynamic>? _activeOfflineValidationContext() {
@@ -1496,47 +1728,99 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     }
   }
 
+  Future<bool> _resolveIsOffline({
+    List<ConnectivityResult>? linkResults,
+  }) async {
+    // Offline scanner mode follows the radio link only. A failed backend probe
+    // must NOT keep the UI stuck offline (that blocked queue sync after Wi‑Fi).
+    final results = linkResults ?? await Connectivity().checkConnectivity();
+    return _resultsAreOffline(results);
+  }
+
+  /// When any network link is present, leave offline mode and drain the queue.
+  Future<void> _syncQueueWhenOnline({bool showSnack = false}) async {
+    final results = await Connectivity().checkConnectivity();
+    if (_resultsAreOffline(results)) return;
+
+    if (_isOffline && mounted) {
+      setState(() => _isOffline = false);
+    }
+    await _refreshPendingSyncCount();
+    if (!mounted || _pendingSyncCount <= 0) return;
+    await _performQueueSync(showSnack: showSnack);
+  }
+
+  Future<void> _applyOfflineFlag(bool isOffline) async {
+    if (!mounted) return;
+    final wasOffline = _isOffline;
+    if (wasOffline == isOffline) {
+      // Already online but still have queued scans (missed transition) → sync.
+      if (!isOffline && _pendingSyncCount > 0 && !_isSyncing) {
+        await _performQueueSync(showSnack: true);
+      }
+      return;
+    }
+
+    setState(() {
+      _isOffline = isOffline;
+      if (isOffline) _clearAttendanceStats();
+    });
+
+    if (isOffline) {
+      await _sealCurrentContextForOfflineTransition();
+      if (_applyCurrentContextOfflineTransition()) {
+        unawaited(_refreshOfflineReadiness());
+        return;
+      }
+      if (_applyPinnedOpenContextFallback()) {
+        unawaited(_refreshOfflineReadiness());
+        return;
+      }
+      if (_selectedMode == StudentScanMode.takeAttendance) {
+        if (mounted) {
+          setState(() {
+            _applyTakeAttendanceUiState(hasScanResult: _hasScanResult);
+          });
+        }
+        unawaited(_refreshOfflineReadiness());
+        return;
+      }
+      await _refreshScanContext(silent: true);
+      unawaited(_refreshOfflineReadiness());
+      return;
+    }
+
+    // Back online → always drain assist + self queues.
+    await _refreshPendingSyncCount();
+    await _performQueueSync(showSnack: true);
+    if (_selectedMode == StudentScanMode.assist) {
+      await _refreshScanContext(silent: true);
+      unawaited(_refreshAttendanceStats());
+    } else if (_selectedMode == StudentScanMode.takeAttendance && mounted) {
+      setState(() {
+        _applyTakeAttendanceUiState(hasScanResult: _hasScanResult);
+      });
+    }
+    unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
+  }
+
   void _initConnectivity() {
     _connectivity = Connectivity();
-    _connectivity.checkConnectivity().then((results) {
-      final isOffline = _resultsAreOffline(results);
-      if (!mounted) return;
-      setState(() => _isOffline = isOffline);
+    _connectivity.checkConnectivity().then((results) async {
+      final isOffline = await _resolveIsOffline(linkResults: results);
+      await _applyOfflineFlag(isOffline);
+      if (!isOffline) {
+        unawaited(_syncQueueWhenOnline(showSnack: false));
+      }
     });
     _connectivitySubscription = _connectivity.onConnectivityChanged.listen((
       List<ConnectivityResult> results,
     ) async {
-      final isOffline = _resultsAreOffline(results);
-      if (!mounted) return;
-      final wasOffline = _isOffline;
-      setState(() {
-        _isOffline = isOffline;
-        if (isOffline) _clearAttendanceStats();
-      });
-      if (isOffline) {
-        await _sealCurrentContextForOfflineTransition();
-        if (_applyCurrentContextOfflineTransition()) {
-          unawaited(_refreshOfflineReadiness());
-          return;
-        }
-        if (_applyPinnedOpenContextFallback()) {
-          unawaited(_refreshOfflineReadiness());
-          return;
-        }
-        await _refreshScanContext(silent: true);
-        unawaited(_refreshOfflineReadiness());
-        return;
-      }
-      if (wasOffline || _pendingSyncCount > 0) {
-        await _performQueueSync(showSnack: true);
-        await _refreshScanContext(silent: true);
-        unawaited(_refreshAttendanceStats());
-        unawaited(
-          _refreshOfflineReadiness(refreshSnapshot: true),
-        );
-      } else {
-        unawaited(_refreshAttendanceStats());
-        unawaited(_refreshOfflineReadiness());
+      final isOffline = await _resolveIsOffline(linkResults: results);
+      await _applyOfflineFlag(isOffline);
+      if (!isOffline) {
+        // Force sync on every link-up event (including Wi‑Fi reconnect).
+        unawaited(_syncQueueWhenOnline(showSnack: true));
       }
     });
   }
@@ -1547,6 +1831,32 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     return DateTime.tryParse(value)?.toLocal();
   }
 
+  bool _liveAssistContextHasEvent() {
+    if (_selectedMode != StudentScanMode.assist) return false;
+    final status = (_scanContext?['status']?.toString() ?? '').trim().toLowerCase();
+    if (status == 'no_assignment' ||
+        status == 'error' ||
+        status == 'forbidden' ||
+        status == 'checking') {
+      return false;
+    }
+    final raw = _scanContext?['context'];
+    final contextMap = raw is Map<String, dynamic>
+        ? raw
+        : (raw is Map ? Map<String, dynamic>.from(raw) : null);
+    if (contextMap == null) return false;
+    final event = contextMap['event'];
+    if (event is Map) {
+      return (event['id']?.toString() ?? '').trim().isNotEmpty;
+    }
+    // Some payloads nest the event fields directly on context.
+    return (contextMap['id']?.toString() ?? '').trim().isNotEmpty;
+  }
+
+  bool get _offlinePackChipReady =>
+      (_offlineSnapshotReady && !_offlineSnapshotStale) ||
+      (_selectedMode == StudentScanMode.assist && _liveAssistContextHasEvent());
+
   Future<void> _refreshOfflineReadiness({
     bool refreshSnapshot = false,
   }) async {
@@ -1556,7 +1866,29 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       setState(() {
         _offlineSnapshotReady = false;
         _offlineSnapshotStale = false;
+        _offlineWarmFailed = false;
         _offlineLastSyncedAt = null;
+      });
+      return;
+    }
+
+    if (_selectedMode == StudentScanMode.takeAttendance) {
+      final monitor = await _offlineSyncService.getSelfOfflineMonitorStatus(
+        studentId: actorId,
+        refreshSnapshot: refreshSnapshot && !_isOffline,
+        isOffline: _isOffline,
+      );
+      if (!mounted) return;
+      setState(() {
+        _offlineSnapshotReady = monitor['offline_ready'] == true;
+        _offlineSnapshotStale = monitor['snapshot_stale'] == true;
+        _offlineWarmFailed = monitor['warm_failed'] == true;
+        _offlineLastSyncedAt = _parseOfflineSyncDate(
+          monitor['last_synced_at']?.toString(),
+        );
+        if (!_hasScanResult) {
+          _applyTakeAttendanceUiState(hasScanResult: false);
+        }
       });
       return;
     }
@@ -1568,9 +1900,12 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       isOffline: _isOffline,
     );
     if (!mounted) return;
+    final monitorReady = monitor['offline_ready'] == true;
+    final liveReady = _liveAssistContextHasEvent();
     setState(() {
-      _offlineSnapshotReady = monitor['offline_ready'] == true;
-      _offlineSnapshotStale = monitor['snapshot_stale'] == true;
+      _offlineSnapshotReady = monitorReady || liveReady;
+      _offlineSnapshotStale =
+          monitor['snapshot_stale'] == true && !liveReady && !monitorReady;
       _offlineLastSyncedAt = _parseOfflineSyncDate(
         monitor['last_synced_at']?.toString(),
       );
@@ -1584,9 +1919,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     _scanResumeTimer = Timer(delay, () {
       if (!mounted || _manualPause || !widget.isActive) return;
 
-      final canResume = _selectedMode == StudentScanMode.takeAttendance
-          ? true
-          : _effectiveScannerEnabled;
+      final canResume = _effectiveScannerEnabled;
       if (!canResume) {
         setState(() => _isProcessingScan = false);
         if (_selectedMode == StudentScanMode.assist) {
@@ -1753,9 +2086,26 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       final Map<String, dynamic> res;
       if (isTakeMode) {
         res = Map<String, dynamic>.from(
-          await _eventService.checkInSelfViaEventQr(normalized),
+          _isOffline
+              ? await _offlineSyncService.enqueueOfflineSelfCheckIn(
+                  studentId: _studentId,
+                  eventQrPayload: normalized,
+                )
+              : await _eventService.checkInSelfViaEventQr(normalized),
         );
-        await _applyInstantCheckInResult(res, fromOfflineQueue: false);
+        await _applyInstantCheckInResult(
+          res,
+          fromOfflineQueue: _isOffline,
+        );
+        if (!_isOffline) {
+          unawaited(
+            _offlineSyncService.refreshSelfAttendanceSnapshot(
+              studentId: _studentId,
+            ),
+          );
+        } else {
+          unawaited(_refreshPendingSyncCount());
+        }
       } else {
         res = Map<String, dynamic>.from(
           _isOffline
@@ -1814,6 +2164,13 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     });
     if (mode == StudentScanMode.assist && !_isOffline) {
       unawaited(_refreshAttendanceStats());
+      unawaited(_refreshScanContext(silent: true));
+      unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
+    } else if (mode == StudentScanMode.takeAttendance) {
+      unawaited(_refreshOfflineReadiness(refreshSnapshot: !_isOffline));
+      if (!_isOffline && _pendingSyncCount > 0) {
+        unawaited(_performQueueSync(showSnack: false));
+      }
     }
   }
 
@@ -1852,12 +2209,97 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     );
   }
 
+  Widget _buildOfflinePreparedHeaderChip() {
+    final ready = _offlinePackChipReady;
+    final stale = (_offlineSnapshotStale || _offlineWarmFailed) && !ready;
+    final String label;
+    final IconData icon;
+    if (_isOffline && ready) {
+      label = 'Offline';
+      icon = Icons.inventory_2_rounded;
+    } else if (ready) {
+      label = 'Prepared';
+      icon = Icons.cloud_done_rounded;
+    } else if (stale) {
+      label = 'Refresh';
+      icon = Icons.sync_problem_rounded;
+    } else if (_isOffline) {
+      label = 'No pack';
+      icon = Icons.cloud_off_rounded;
+    } else {
+      label = 'Warming…';
+      icon = Icons.cloud_sync_rounded;
+    }
+
+    final Color accent = ready && !_isOffline
+        ? const Color(0xFFBBF7D0)
+        : (ready
+            ? const Color(0xFFFDE68A)
+            : Colors.white.withValues(alpha: 0.85));
+    final Color fill = ready && !_isOffline
+        ? const Color(0xFF166534).withValues(alpha: 0.35)
+        : (ready
+            ? const Color(0xFF92400E).withValues(alpha: 0.35)
+            : Colors.white.withValues(alpha: 0.12));
+
+    return Tooltip(
+      message: ready
+          ? (_isOffline
+              ? 'Offline pack is active on this device.'
+              : 'Offline pack saved. You can scan without internet later.')
+          : (_isOffline
+              ? (_selectedMode == StudentScanMode.takeAttendance
+                  ? 'No offline pack yet. Open Take Attendance once with internet to prepare.'
+                  : 'No offline pack yet. Connect once while assigned to prepare.')
+              : (_offlineWarmFailed
+                  ? 'Could not save offline pack. Tap to retry.'
+                  : 'Saving offline pack… keep this screen open with internet.')),
+      child: GestureDetector(
+        onTap: (!_isOffline && (stale || !ready))
+            ? () {
+                unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
+              }
+            : null,
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 118),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: fill,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: accent.withValues(alpha: 0.45)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 14, color: accent),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: accent,
+                    letterSpacing: 0.1,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildGradientHeader({
     required String title,
     required String subtitle,
     IconData? actionIcon,
     VoidCallback? onAction,
     VoidCallback? onBack,
+    bool showOfflineChip = true,
   }) {
     return Container(
       padding: EdgeInsets.fromLTRB(
@@ -1928,7 +2370,12 @@ class _StudentScanScreenState extends State<StudentScanScreen>
               ],
             ),
           ),
+          if (showOfflineChip) ...[
+            const SizedBox(width: 10),
+            _buildOfflinePreparedHeaderChip(),
+          ],
           if (actionIcon != null) ...[
+            const SizedBox(width: 8),
             GestureDetector(
               onTap: onAction,
               child: Container(
@@ -2068,8 +2515,19 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     final contextTitle =
         sessionTitle.isNotEmpty ? sessionTitle : _currentEventTitle(context);
 
+    final scanMode = (context?['scan_mode']?.toString() ?? '').toLowerCase();
+    final isCheckOutMode = scanMode == 'check_out' ||
+        serviceMessage.toLowerCase().contains('time-out') ||
+        serviceMessage.toLowerCase().contains('early time-out');
+
     if (opensAt != null) {
       if (now.isBefore(opensAt)) {
+        if (isCheckOutMode) {
+          if (_isSameDate(now, opensAt)) {
+            return 'Waiting for time-out (Opens at ${_formatStartTime(opensAt)})';
+          }
+          return 'Time-out opens ${_formatScheduleDateTime(opensAt)}';
+        }
         if (serviceMessage.isNotEmpty &&
             (serviceMessage.toLowerCase().contains('too early') ||
                 serviceMessage.toLowerCase().contains('wait for the scheduled'))) {
@@ -2188,6 +2646,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       return Text(
         _scanStatus,
         textAlign: TextAlign.left,
+        softWrap: true,
         style: TextStyle(
           fontSize: 14,
           fontWeight: FontWeight.w700,
@@ -2197,6 +2656,19 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       );
     }
 
+    TextStyle titleStyle() => TextStyle(
+          fontSize: 15,
+          fontWeight: FontWeight.w800,
+          color: _statusColor,
+          height: 1.25,
+        );
+    TextStyle messageStyle({double alpha = 0.92}) => TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+          color: _statusColor.withValues(alpha: alpha),
+          height: 1.35,
+        );
+
     // 3-line event context: title, message, date.
     if (lines.length >= 3) {
       final title = lines.first;
@@ -2205,37 +2677,15 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            title,
-            textAlign: TextAlign.left,
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w800,
-              color: _statusColor,
-              height: 1.25,
-            ),
-          ),
+          Text(title, textAlign: TextAlign.left, softWrap: true, style: titleStyle()),
           const SizedBox(height: 4),
-          Text(
-            message,
-            textAlign: TextAlign.left,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: _statusColor.withValues(alpha: 0.92),
-              height: 1.35,
-            ),
-          ),
+          Text(message, textAlign: TextAlign.left, softWrap: true, style: messageStyle()),
           const SizedBox(height: 4),
           Text(
             date,
             textAlign: TextAlign.left,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: _statusColor.withValues(alpha: 0.8),
-              height: 1.3,
-            ),
+            softWrap: true,
+            style: messageStyle(alpha: 0.8).copyWith(fontSize: 12),
           ),
         ],
       );
@@ -2246,32 +2696,19 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            lines[0],
-            textAlign: TextAlign.left,
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w800,
-              color: _statusColor,
-              height: 1.25,
-            ),
-          ),
+          Text(lines[0], textAlign: TextAlign.left, softWrap: true, style: titleStyle()),
           const SizedBox(height: 4),
           Text(
             lines[1],
             textAlign: TextAlign.left,
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
-              color: _statusColor.withValues(alpha: 0.9),
-              height: 1.35,
-            ),
+            softWrap: true,
+            style: messageStyle(alpha: 0.9),
           ),
         ],
       );
     }
 
-    // "Name — Timed in": name on top (scrollable), action always under it.
+    // "Name — Timed in": name on top, action under it.
     final raw = lines.first;
     final sepIndex = raw.lastIndexOf(' — ');
     if (sepIndex > 0) {
@@ -2281,25 +2718,20 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Text(
-                namePart,
-                softWrap: false,
-                maxLines: 1,
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w800,
-                  color: _statusColor,
-                  height: 1.25,
-                ),
+            Text(
+              namePart,
+              softWrap: true,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w800,
+                color: _statusColor,
+                height: 1.25,
               ),
             ),
             const SizedBox(height: 2),
             Text(
               actionPart,
-              softWrap: false,
-              maxLines: 1,
+              softWrap: true,
               style: TextStyle(
                 fontSize: 13,
                 fontWeight: FontWeight.w700,
@@ -2312,19 +2744,16 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       }
     }
 
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Text(
-        raw,
-        textAlign: TextAlign.left,
-        softWrap: false,
-        maxLines: 1,
-        style: TextStyle(
-          fontSize: 14,
-          fontWeight: FontWeight.w700,
-          color: _statusColor,
-          height: 1.35,
-        ),
+    // Long gate messages (too early / grace ended) must wrap — never clip mid-word.
+    return Text(
+      raw,
+      textAlign: TextAlign.left,
+      softWrap: true,
+      style: TextStyle(
+        fontSize: 14,
+        fontWeight: FontWeight.w700,
+        color: _statusColor,
+        height: 1.35,
       ),
     );
   }
@@ -2736,6 +3165,8 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           _buildGradientHeader(
             title: 'Scan QR Code',
             subtitle: eventTitle,
+            showOfflineChip: _selectedMode == StudentScanMode.assist ||
+                _selectedMode == StudentScanMode.takeAttendance,
           ),
           if (_selectedMode == StudentScanMode.assist &&
               !_isOffline &&
@@ -2756,7 +3187,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
             const SizedBox(height: 10),
             _buildOfflineReadinessCard(),
           ],
-          if (_pendingSyncCount > 0) ...[
+          if (_isOffline || _pendingSyncCount > 0) ...[
             const SizedBox(height: 10),
             _buildConnectivityBanner(),
             const SizedBox(height: 8),
@@ -2833,38 +3264,51 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     final accent = Colors.orange.shade700;
     final background = Colors.orange.shade50;
     final border = Colors.orange.shade200;
-    final label = _isOffline
-        ? 'Offline Mode - $_pendingSyncCount scans queued'
-        : (_isSyncing
-              ? 'Syncing $_pendingSyncCount queued scans...'
-              : 'Online - $_pendingSyncCount queued scans pending');
+    final String label;
+    if (_isOffline && _pendingSyncCount > 0) {
+      label = 'Offline mode — $_pendingSyncCount scan(s) queued';
+    } else if (_isOffline) {
+      label = 'Offline mode active — using saved pack';
+    } else if (_isSyncing) {
+      label = 'Syncing $_pendingSyncCount queued scan(s)…';
+    } else {
+      label = 'Online — $_pendingSyncCount queued scan(s) pending';
+    }
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      margin: const EdgeInsets.symmetric(horizontal: 24),
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: border),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            _isOffline ? Icons.wifi_off_rounded : Icons.sync_rounded,
-            size: 16,
-            color: accent,
-          ),
-          const SizedBox(width: 8),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
+    return GestureDetector(
+      onTap: () {
+        unawaited(_syncQueueWhenOnline(showSnack: true));
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        margin: const EdgeInsets.symmetric(horizontal: 24),
+        decoration: BoxDecoration(
+          color: background,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: border),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              _isOffline ? Icons.wifi_off_rounded : Icons.sync_rounded,
+              size: 16,
               color: accent,
             ),
-          ),
-        ],
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: accent,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

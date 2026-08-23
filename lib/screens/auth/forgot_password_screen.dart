@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import '../../widgets/app_snackbar.dart';
 import '../../widgets/custom_loader.dart';
+import '../../widgets/otp_code_boxes.dart';
 import '../../utils/teacher_theme_utils.dart';
 import '../../services/mobile_backend_service.dart';
+import '../../services/device_performance_service.dart';
 
 class ForgotPasswordScreen extends StatefulWidget {
   final String role;
@@ -46,12 +48,16 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
     _logoFloatController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
-    )..repeat(reverse: true);
+    );
 
     _gradientController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 5),
-    )..repeat(reverse: true);
+    );
+    if (DevicePerformance.instance.enableDecorativeMotion) {
+      _logoFloatController.repeat(reverse: true);
+      _gradientController.repeat(reverse: true);
+    }
   }
 
   @override
@@ -437,20 +443,10 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen>
           ),
         ),
         const SizedBox(height: 10),
-        TextFormField(
+        OtpCodeBoxes(
           controller: _codeController,
-          keyboardType: TextInputType.number,
-          maxLength: 6,
-          style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
-          cursorColor: _primaryColor,
-          decoration: _inputDecoration(
-            '6-digit code',
-            Icons.mark_email_read_outlined,
-          ),
-          validator: (val) {
-            if (val == null || val.isEmpty) return 'Code is required';
-            return null;
-          },
+          focusColor: _primaryColor,
+          enabled: !_isLoading,
         ),
         const SizedBox(height: 28),
         _buildSubmitButton('Verify Code', _verifyCode),

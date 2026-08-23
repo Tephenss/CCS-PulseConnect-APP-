@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../services/device_performance_service.dart';
+
 class AnimatedGreetingText extends StatefulWidget {
   final String text;
   final TextStyle style;
@@ -21,23 +23,57 @@ class AnimatedGreetingText extends StatefulWidget {
 class _AnimatedGreetingTextState extends State<AnimatedGreetingText> with SingleTickerProviderStateMixin {
   late AnimationController _controller;
 
+  bool get _animationEnabled =>
+      DevicePerformance.instance.tier == PerformanceTier.high;
+
   @override
   void initState() {
     super.initState();
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2500),
-    )..repeat();
+    );
+    DevicePerformance.instance.addListener(_onPerformanceChanged);
+    _syncAnimation();
+  }
+
+  void _onPerformanceChanged() {
+    if (!mounted) return;
+    _syncAnimation();
+    setState(() {});
+  }
+
+  void _syncAnimation() {
+    if (_animationEnabled) {
+      if (!_controller.isAnimating) _controller.repeat();
+    } else {
+      _controller.stop();
+      _controller.value = 0;
+    }
   }
 
   @override
   void dispose() {
+    DevicePerformance.instance.removeListener(_onPerformanceChanged);
     _controller.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // Continuous scan-line greeting is reserved for High Quality.
+    if (!_animationEnabled) {
+      return Text(
+        widget.text,
+        style: widget.style.copyWith(
+          color: widget.baseColor,
+          fontStyle: FontStyle.italic,
+        ),
+        maxLines: 1,
+        overflow: TextOverflow.visible,
+      );
+    }
+
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {

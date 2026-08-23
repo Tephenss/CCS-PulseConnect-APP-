@@ -310,11 +310,8 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
           .toLowerCase()
           .trim();
 
-      // Calculate if the event is truly expired based on event end time.
-      final endAtStr = e['end_at'] as String?;
-      final endDate = parseStoredEventDateTime(endAtStr);
-
-      bool isPast = endDate != null && endDate.isBefore(now);
+      // Past lifecycle = after end_at + 1h check-out window (match web Published).
+      final isPast = isEventPastLifecycleMap(e, now: now);
 
       if (statusFilter == 'expired') {
         // Shown in Expired if time naturally passed, excluding manually archived ones
@@ -449,7 +446,6 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
   Widget _buildEventCard(Map<String, dynamic> event) {
     final title = event['title'] as String? ?? 'Sample Event';
     final startAt = event['start_at'] as String?;
-    final endAt = event['end_at'] as String?;
     String status = event['status'] as String? ?? 'active';
     final proposalStage =
         event['proposal_stage']?.toString().trim().toLowerCase() ??
@@ -457,11 +453,12 @@ class _TeacherEventsTabState extends State<TeacherEventsTab>
     final target = _getTargetLabel(event['event_for']?.toString());
 
     final startDate = parseStoredEventDateTime(startAt);
-    final endDate = parseStoredEventDateTime(endAt);
 
     if (status != 'archived' &&
-        endDate != null &&
-        endDate.isBefore(DateTime.now().toUtc().add(kManilaOffset))) {
+        isEventPastLifecycleMap(
+          event,
+          now: DateTime.now().toUtc().add(kManilaOffset),
+        )) {
       status = 'expired';
     }
 

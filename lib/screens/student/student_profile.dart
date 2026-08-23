@@ -55,6 +55,8 @@ class _StudentProfileState extends State<StudentProfile> {
     _localUser = widget.user;
     unawaited(_initOfflineMonitoring());
     _fetchSectionName();
+    // Re-sign private avatar path on open (storage path is not a displayable URL).
+    unawaited(_refreshProfile());
     DevicePerformance.instance.addListener(_onPerformanceChanged);
   }
 
@@ -1087,37 +1089,82 @@ class _StudentProfileState extends State<StudentProfile> {
                   ),
                   
                   const SizedBox(height: 40),
-                  
-                  // Menu Items Header
+
+                  // Academics
                   const Align(
                     alignment: Alignment.centerLeft,
-                    child: Text('ACCOUNT SETTINGS', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w900, color: Color(0xFF6B7280), letterSpacing: 1.2)),
+                    child: Text(
+                      'ACADEMICS',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF6B7280),
+                        letterSpacing: 1.2,
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 16),
-                  
                   _buildMenuCard(
                     icon: Icons.workspace_premium_rounded,
                     title: 'My Certificates',
                     subtitle: 'View your earned achievements',
-                    onTap: () => Navigator.push(context, AppPageRoute(builder: (_) => const StudentCertificates())),
+                    onTap: () => Navigator.push(
+                      context,
+                      AppPageRoute(builder: (_) => const StudentCertificates()),
+                    ),
                   ),
-                  
-                  const SizedBox(height: 16),
-                  
-                  _buildMenuCard(
-                    icon: Icons.lock_person_rounded,
-                    title: 'Security',
-                    subtitle: 'Manage your password and auth',
-                    onTap: () => Navigator.push(context, AppPageRoute(builder: (_) => const ChangePasswordScreen())),
-                  ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 12),
                   _buildMenuCard(
                     icon: Icons.calendar_month_rounded,
                     title: 'Update class schedule',
                     subtitle: 'Update your Schedule',
                     onTap: () => Navigator.push(
                       context,
-                      AppPageRoute(builder: (_) => const StudentClassScheduleScreen()),
+                      AppPageRoute(
+                        builder: (_) => const StudentClassScheduleScreen(),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 28),
+
+                  // Security
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'SECURITY',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF6B7280),
+                        letterSpacing: 1.2,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _buildMenuCard(
+                    icon: Icons.lock_person_rounded,
+                    title: 'Security',
+                    subtitle: 'Manage your password and auth',
+                    onTap: () => Navigator.push(
+                      context,
+                      AppPageRoute(builder: (_) => const ChangePasswordScreen()),
+                    ),
+                  ),
+
+                  const SizedBox(height: 28),
+
+                  // App & device
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'APP & DEVICE',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF6B7280),
+                        letterSpacing: 1.2,
+                      ),
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -1127,7 +1174,7 @@ class _StudentProfileState extends State<StudentProfile> {
                     subtitle: _offlineSummarySubtitle(),
                     onTap: _showOfflineStatusSheet,
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 12),
                   _buildMenuCard(
                     icon: Icons.speed_rounded,
                     title: 'Performance Mode',

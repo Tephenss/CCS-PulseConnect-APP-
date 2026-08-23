@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'dart:math' as math;
 
+import '../services/device_performance_service.dart';
+
 class MacbookAnimation extends StatefulWidget {
   final double scale;
   const MacbookAnimation({super.key, this.scale = 1.0});
@@ -29,7 +31,13 @@ class _MacbookAnimationState extends State<MacbookAnimation> with SingleTickerPr
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 4), // matches 4s openLaptop CSS duration
-    )..repeat(reverse: true);
+    );
+    if (DevicePerformance.instance.enableDecorativeMotion) {
+      _controller.repeat(reverse: true);
+    } else {
+      // Keep it visible without running a continuous ticker.
+      _controller.value = 1;
+    }
     
     // Animate from -88.5 degrees (closed) to 0 (open) matching openLaptop CSS keyframes
     _rotateX = Tween<double>(begin: -88.5 * math.pi / 180, end: 0.0)

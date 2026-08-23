@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../services/device_performance_service.dart';
+
 class CircuitTicketIcon extends StatefulWidget {
   final Widget child;
   const CircuitTicketIcon({super.key, required this.child});
@@ -18,7 +20,10 @@ class _CircuitTicketIconState extends State<CircuitTicketIcon>
     _controller = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 3),
-    )..repeat();
+    );
+    if (DevicePerformance.instance.enableDecorativeMotion) {
+      _controller.repeat();
+    }
   }
 
   @override
