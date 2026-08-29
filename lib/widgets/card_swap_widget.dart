@@ -1,14 +1,25 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
 // ─────────────────────────────────────────────────────────────
 //  DATA MODEL
 // ─────────────────────────────────────────────────────────────
 class CardSwapItem {
-  final String imagePath;
   final String label;
-  const CardSwapItem({required this.imagePath, required this.label});
+  final String? imagePath;
+  final String? imageUrl;
+
+  CardSwapItem({
+    required this.label,
+    this.imagePath,
+    this.imageUrl,
+  }) : assert(
+          (imagePath != null && imagePath.trim().isNotEmpty) ||
+              (imageUrl != null && imageUrl.trim().isNotEmpty),
+          'CardSwapItem needs imagePath or imageUrl',
+        );
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -332,20 +343,7 @@ class _CardSwapWidgetState extends State<CardSwapWidget>
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // Background image
-          Image.asset(
-            item.imagePath,
-            fit: BoxFit.cover,
-            errorBuilder: (_, _, _) => Container(
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [Color(0xFFea580c), Color(0xFF7c2d12)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-              ),
-            ),
-          ),
+          _buildCardImage(item),
           // Overlay  (darker on back cards)
           Container(
             color: Colors.black.withValues(alpha: isFront ? 0.3 : 0.5),
@@ -380,6 +378,38 @@ class _CardSwapWidgetState extends State<CardSwapWidget>
           ),
         ],
       ),
+    );
+  }
+
+  Widget _gradientPlaceholder() {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Color(0xFFea580c), Color(0xFF7c2d12)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCardImage(CardSwapItem item) {
+    final imageUrl = item.imageUrl?.trim() ?? '';
+    if (imageUrl.isNotEmpty) {
+      return CachedNetworkImage(
+        imageUrl: imageUrl,
+        fit: BoxFit.cover,
+        memCacheWidth: 800,
+        placeholder: (_, _) => _gradientPlaceholder(),
+        errorWidget: (_, _, _) => _gradientPlaceholder(),
+      );
+    }
+
+    final imagePath = item.imagePath?.trim() ?? '';
+    return Image.asset(
+      imagePath,
+      fit: BoxFit.cover,
+      errorBuilder: (_, _, _) => _gradientPlaceholder(),
     );
   }
 }

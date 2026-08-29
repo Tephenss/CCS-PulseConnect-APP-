@@ -1,4 +1,5 @@
 import 'mobile_backend_service.dart';
+import '../utils/ai_text_layout.dart';
 
 class AiService {
   final MobileBackendService _backend = MobileBackendService();
@@ -54,23 +55,22 @@ class AiService {
     required String rawText,
     required String improvedText,
   }) {
-    if (_mentionsPulseConnect(rawText)) {
-      return improvedText;
+    var cleaned = improvedText;
+
+    if (!_mentionsPulseConnect(rawText)) {
+      final brandPatterns = <RegExp>[
+        RegExp(r'\bCCS\s+PulseConnect\b', caseSensitive: false),
+        RegExp(r'\bPulse\s*Connect\b', caseSensitive: false),
+        RegExp(r'\bPulseConnect\b', caseSensitive: false),
+      ];
+      for (final pattern in brandPatterns) {
+        cleaned = cleaned.replaceAll(pattern, '');
+      }
     }
 
-    String cleaned = improvedText;
-    final List<RegExp> brandPatterns = <RegExp>[
-      RegExp(r'\bCCS\s+PulseConnect\b', caseSensitive: false),
-      RegExp(r'\bPulse\s*Connect\b', caseSensitive: false),
-      RegExp(r'\bPulseConnect\b', caseSensitive: false),
-    ];
-
-    for (final RegExp pattern in brandPatterns) {
-      cleaned = cleaned.replaceAll(pattern, '');
-    }
-
+    cleaned = AiTextLayout.formatImprovedDescription(cleaned);
     cleaned = cleaned
-        .replaceAll(RegExp(r' {2,}'), ' ')
+        .replaceAll(RegExp(r'[^\S\n]{2,}'), ' ')
         .replaceAll(RegExp(r'\n{3,}'), '\n\n')
         .replaceAll(RegExp(r' ,'), ',')
         .replaceAll(RegExp(r' \.'), '.')

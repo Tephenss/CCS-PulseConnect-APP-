@@ -846,6 +846,7 @@ class NotificationService {
       case 'event':
       case 'event_published':
       case 'reg_open':
+      case 'reg_extended':
         return NotificationType.event;
       default:
         return NotificationType.info;

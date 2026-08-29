@@ -273,6 +273,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         _offlineSyncService.refreshSnapshotForCurrentScanner(
           actorId: _studentId,
           isTeacher: false,
+          force: true,
         ),
       );
     } else if (_selectedMode == StudentScanMode.assist) {
@@ -681,6 +682,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
             _offlineSyncService.refreshSnapshotForCurrentScanner(
               actorId: _studentId,
               isTeacher: false,
+              force: true,
             ),
           );
         } else if (_selectedMode == StudentScanMode.takeAttendance) {
@@ -712,7 +714,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           _selectedMode == StudentScanMode.takeAttendance;
 
       if (mounted) {
-        setState(() {
+          setState(() {
           _studentId = studentId;
           _isOffline = startOffline;
           _selectedEventTitle = '';
@@ -855,7 +857,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       if (_isOffline) {
         if (_applyCurrentContextOfflineTransition()) {
           if (mounted) {
-            setState(() => _isLoading = false);
+      setState(() => _isLoading = false);
           }
           return;
         }
@@ -897,7 +899,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
 
       if (result['ok'] != true || normalizedStatus == 'error') {
         if (!_isOffline) {
-          setState(() {
+        setState(() {
             if (_selectedMode == StudentScanMode.takeAttendance) {
               // Self check-in does not need assistant assignment.
               _applyTakeAttendanceUiState(hasScanResult: _hasScanResult);
@@ -911,7 +913,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                 'assignments': 0,
               };
               _selectedEventTitle = '';
-              _isScanning = false;
+          _isScanning = false;
               _manualPause = false;
               if (!_hasScanResult) {
                 _scanStatus = 'Unable to verify scanner access right now.';
@@ -942,7 +944,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         _rememberOfflinePinnedContext(result);
       }
 
-      setState(() {
+          setState(() {
         _scanContext = result;
         _selectedEventTitle =
             (normalizedStatus == 'no_assignment' || normalizedStatus == 'error')
@@ -957,7 +959,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
 
         if (scannerEnabled && !_manualPause) {
           _isScanning = true;
-        } else {
+              } else {
           _isScanning = false;
           if (!scannerEnabled) {
             _manualPause = false;
@@ -1001,7 +1003,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         }
         if (silent) {
           unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
-        } else {
+            } else {
           await _refreshOfflineReadiness(refreshSnapshot: true);
         }
       } else {
@@ -1100,7 +1102,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           _scanStatus = 'Assigned scanner event has already ended.';
           _statusColor = Colors.red.shade700;
         }
-      } else {
+              } else {
         _scanContext = cached;
         _selectedEventTitle = _currentEventTitle(contextMap);
         _isScanning = scannerEnabled && !_manualPause;
@@ -1496,7 +1498,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           _manualPause = false;
           if (!_hasScanResult) {
             _scanStatus = 'Assigned scanner event has already ended.';
-            _statusColor = Colors.red.shade700;
+                _statusColor = Colors.red.shade700;
           }
         });
         _scheduleOfflineWindowBoundaryTimer(_scanContext);
@@ -1532,9 +1534,9 @@ class _StudentScanScreenState extends State<StudentScanScreen>
             context: contextMap,
           );
           _statusColor = _contextColor(nextStatus);
-        }
-      }
-    });
+              }
+            }
+          });
 
     if (nextEnabled) {
       _rememberOfflinePinnedContext(resolved);
@@ -2345,9 +2347,9 @@ class _StudentScanScreenState extends State<StudentScanScreen>
             const SizedBox(width: 12),
           ],
           Expanded(
-            child: Column(
+        child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+          children: [
                 Text(
                   title,
                   style: const TextStyle(
@@ -2380,10 +2382,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
               onTap: onAction,
               child: Container(
                 padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
+              decoration: BoxDecoration(
                   color: Colors.white.withValues(alpha: 0.15),
-                  shape: BoxShape.circle,
-                ),
+                shape: BoxShape.circle,
+              ),
                 child: Icon(actionIcon, color: Colors.white, size: 22),
               ),
             ),
@@ -2681,7 +2683,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           const SizedBox(height: 4),
           Text(message, textAlign: TextAlign.left, softWrap: true, style: messageStyle()),
           const SizedBox(height: 4),
-          Text(
+            Text(
             date,
             textAlign: TextAlign.left,
             softWrap: true,
@@ -2715,9 +2717,9 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       final namePart = raw.substring(0, sepIndex).trim();
       final actionPart = raw.substring(sepIndex + 3).trim();
       if (namePart.isNotEmpty && actionPart.isNotEmpty) {
-        return Column(
+    return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      children: [
             Text(
               namePart,
               softWrap: true,
@@ -2911,10 +2913,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                   photoUrl: photoUrl,
                 ),
                 const SizedBox(width: 9),
-                Expanded(
-                  child: Column(
+        Expanded(
+            child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
+              children: [
                       Text(
                         verifiedLabel,
                         maxLines: 1,
@@ -2934,7 +2936,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                           maxLines: 1,
                           softWrap: false,
                           style: const TextStyle(
-                            color: Colors.white,
+                    color: Colors.white,
                             fontSize: 13.5,
                             fontWeight: FontWeight.w800,
                           ),
@@ -3023,46 +3025,46 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           key: const ValueKey('student_live_scanner'),
           controller: _scannerController,
           fit: BoxFit.cover,
-          onDetect: _handleDetect,
+                              onDetect: _handleDetect,
           errorBuilder: (context, error) {
             final looksLikePermission =
                 error.errorCode == MobileScannerErrorCode.permissionDenied;
             return ColoredBox(
-              color: Colors.black,
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
+                                  color: Colors.black,
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(20),
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
                     const Icon(
                       Icons.error_outline_rounded,
                       color: Colors.white,
                       size: 30,
                     ),
-                    const SizedBox(height: 10),
-                    const Text(
-                      'Camera unavailable',
+                                        const SizedBox(height: 10),
+                                        const Text(
+                                          'Camera unavailable',
                       style: TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.w700,
                       ),
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
+                                        ),
+                                        const SizedBox(height: 6),
+                                        Text(
                       looksLikePermission
                           ? 'Allow camera permission in app settings, then try again.'
                           : 'Camera is busy. Leave this tab and come back, then try again.',
-                      textAlign: TextAlign.center,
+                                          textAlign: TextAlign.center,
                       style: TextStyle(
                         color: Colors.grey.shade300,
                         fontSize: 12,
                       ),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          },
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
         ),
         IgnorePointer(
           child: AnimatedOpacity(
@@ -3101,7 +3103,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
 
               return Stack(
                 fit: StackFit.expand,
-                children: [
+                                children: [
                   Positioned.fill(
                     child: Padding(
                       padding: cameraPadding,
@@ -3126,12 +3128,12 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                                   child: _buildLastVerifiedOverlay(),
                                 ),
                               ),
-                            ],
-                          ),
-                        ),
-                      ),
+                                ],
+                              ),
+                            ),
                     ),
                   ),
+                ),
                   Positioned.fill(
                     child: IgnorePointer(
                       child: Image.asset(
@@ -3199,15 +3201,15 @@ class _StudentScanScreenState extends State<StudentScanScreen>
               child: Column(
                 children: [
                   _buildFramedScannerWindow(),
-                  const SizedBox(height: 20),
+                const SizedBox(height: 20),
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 300),
                     padding: const EdgeInsets.symmetric(
                       horizontal: 20,
                       vertical: 16,
                     ),
-                    width: double.infinity,
-                    decoration: BoxDecoration(
+                  width: double.infinity,
+                  decoration: BoxDecoration(
                       color: _isScanning
                           ? Colors.white
                           : (_statusColor == Colors.red.shade700
@@ -3221,17 +3223,17 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                             ? Colors.grey.shade200
                             : _statusColor.withValues(alpha: 0.3),
                       ),
-                      boxShadow: [
+                    boxShadow: [
                         BoxShadow(
                           color: Colors.black.withValues(alpha: 0.04),
                           blurRadius: 10,
                           offset: const Offset(0, 4),
                         ),
-                      ],
-                    ),
-                    child: Row(
+                    ],
+                  ),
+                  child: Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
+                    children: [
                         Padding(
                           padding: const EdgeInsets.only(top: 2),
                           child: Icon(
@@ -3244,19 +3246,19 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                           size: 20,
                         ),
                         ),
-                        const SizedBox(width: 10),
-                        Expanded(
+                      const SizedBox(width: 10),
+                      Expanded(
                           child: _buildScanStatusText(),
-                        ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
+                ),
                 ],
               ),
             ),
-          ),
-        ],
-      ),
+                        ),
+                      ],
+                    ),
     );
   }
 
@@ -3271,7 +3273,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       label = 'Offline mode active — using saved pack';
     } else if (_isSyncing) {
       label = 'Syncing $_pendingSyncCount queued scan(s)…';
-    } else {
+                          } else {
       label = 'Online — $_pendingSyncCount queued scan(s) pending';
     }
 
@@ -3297,16 +3299,16 @@ class _StudentScanScreenState extends State<StudentScanScreen>
             ),
             const SizedBox(width: 8),
             Flexible(
-              child: Text(
+                      child: Text(
                 label,
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
                   color: accent,
-                ),
-              ),
-            ),
+                      ),
+                    ),
+                  ),
           ],
         ),
       ),
@@ -3372,10 +3374,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
               fontSize: 11.7,
               fontWeight: FontWeight.w600,
               color: Colors.grey.shade700,
+                  ),
+                ),
+              ],
             ),
-          ),
-        ],
-      ),
     );
   }
 
@@ -3423,9 +3425,9 @@ class _StudentScanScreenState extends State<StudentScanScreen>
                 fontSize: 15,
                 color: _studentPrimary(context).withValues(alpha: 0.75),
                 height: 1.5,
-              ),
-            ),
-          ],
+          ),
+        ),
+      ],
         ),
       ),
     );

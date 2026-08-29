@@ -14,6 +14,8 @@ import 'offline_backup_service.dart';
 import 'offline_scan_store.dart';
 import 'offline_sync_service.dart';
 import 'mobile_backend_service.dart';
+import '../screens/student/student_event_details.dart';
+import '../screens/student/student_registration_requirements_page.dart';
 
 class AuthService {
   final _supabase = Supabase.instance.client;
@@ -857,6 +859,8 @@ class AuthService {
       await prefs.setBool(entry.key, entry.value);
     }
     await OfflineScanStore.instance.clearAll();
+    StudentEventDetails.clearUiCache();
+    StudentRegistrationRequirementsPage.clearPageCache();
     await _offlineBackupService.autoBackupIfConfigured();
   }
 

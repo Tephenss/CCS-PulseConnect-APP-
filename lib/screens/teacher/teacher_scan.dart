@@ -334,6 +334,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         _offlineSyncService.refreshSnapshotForCurrentScanner(
           actorId: _teacherId,
           isTeacher: true,
+          force: true,
         ),
       );
     } else {
@@ -578,6 +579,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           _offlineSyncService.refreshSnapshotForCurrentScanner(
             actorId: _teacherId,
             isTeacher: true,
+            force: true,
           ),
         );
       }
@@ -724,7 +726,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
 
     if (nextEnabled != prevEnabled || nextStatus != prevStatus) {
       if (!mounted) return;
-      setState(() {
+    setState(() {
         _scanContext = resolved;
         _selectedEventTitle = _currentEventTitle(contextMap);
         _isScanning = _cameraShouldRun(scannerEnabled: nextEnabled);
@@ -1507,7 +1509,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
 
   void _bumpAttendanceAfterSuccessfulScan(Map<String, dynamic> res) {
     if (_isOffline) return;
-    final status = (res['status']?.toString() ?? '').toLowerCase();
+      final status = (res['status']?.toString() ?? '').toLowerCase();
     final action = (res['action']?.toString() ?? '').toLowerCase();
     if (res['ok'] != true) return;
     if (status == 'queued_offline') {
@@ -1563,7 +1565,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       final total = int.tryParse(res['total']?.toString() ?? '') ?? 0;
       final percent = double.tryParse(res['percent']?.toString() ?? '') ??
           (total > 0 ? (present / total) * 100 : 0);
-      setState(() {
+    setState(() {
         _attendancePresent = present;
         _attendanceTotal = total;
         _attendancePercent = percent;
@@ -1609,7 +1611,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       actorId: _teacherId,
       isTeacher: true,
     );
-    if (!mounted) return;
+      if (!mounted) return;
     if (pendingBefore <= 0) {
       setState(() => _pendingSyncCount = 0);
       return;
@@ -1680,7 +1682,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
             unawaited(_refreshOfflineReadiness());
             return;
           }
-          await _refreshScanContext(silent: true);
+      await _refreshScanContext(silent: true);
           unawaited(_refreshOfflineReadiness());
         }
         return;
@@ -2254,9 +2256,9 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         actionPart = 'Timed in';
       }
       if (namePart.isNotEmpty && actionPart.isNotEmpty) {
-        return Column(
+    return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      children: [
             Text(
               namePart,
               softWrap: true,
@@ -2707,7 +2709,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
                                 child: IgnorePointer(
                                   child: _buildLastVerifiedOverlay(),
                                 ),
-                              ),
+                                  ),
                                 ],
                               ),
                             ),
@@ -2824,11 +2826,11 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
                         child: _buildScanStatusText(),
                       ),
                     ],
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-              ],
-            ),
-          ),
         ),
         ],
     );
@@ -2845,7 +2847,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       label = 'Offline mode active — using saved pack';
     } else if (_isSyncing) {
       label = 'Syncing $_pendingSyncCount queued scan(s)…';
-    } else {
+                        } else {
       label = 'Online — $_pendingSyncCount queued scan(s) pending';
     }
     return GestureDetector(
@@ -2870,19 +2872,19 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
             ),
             const SizedBox(width: 8),
             Flexible(
-              child: Text(
+                    child: Text(
                 label,
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
                   color: accent,
+                    ),
+                  ),
                 ),
-              ),
+              ],
             ),
-          ],
-        ),
-      ),
+          ),
     );
   }
 

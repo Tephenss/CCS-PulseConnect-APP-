@@ -15,4 +15,7 @@
     <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
         <item name="android:windowBackground">@android:color/white</item>
     </style>
+    <style name="PulseConnect.UcropTheme" parent="Ucrop.CropTheme">
+        <item name="android:fitsSystemWindows">true</item>
+    </style>
 </resources>

@@ -7,6 +7,7 @@ import '../../services/push_notification_service.dart';
 import '../../widgets/custom_loader.dart';
 import '../../widgets/app_snackbar.dart';
 import '../../main.dart';
+import '../../utils/course_theme_utils.dart';
 import '../../utils/teacher_theme_utils.dart';
 import '../../utils/app_page_routes.dart';
 import '../../services/device_performance_service.dart';
@@ -34,6 +35,15 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
   late AnimationController _floatController;
   Offset _pointerPosition = const Offset(0, 0);
   bool _pointerActive = false;
+
+  Future<String?> _resolveLoginCourse(Map<String, dynamic> userData) async {
+    final direct = CourseThemeUtils.normalizeCourse(userData['course']);
+    if (direct == 'CS' || direct == 'IT') return direct;
+    final fromSection = await _authService.getStudentCourseCode();
+    final sectionNorm = CourseThemeUtils.normalizeCourse(fromSection);
+    if (sectionNorm == 'CS' || sectionNorm == 'IT') return sectionNorm;
+    return userData['course']?.toString();
+  }
 
   @override
   void initState() {
@@ -158,7 +168,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
         if (!mounted) return;
         PulseConnectApp.of(context).enterAppAfterAuth(
           role: currentRole,
-          course: userData['course']?.toString(),
+          course: await _resolveLoginCourse(userData),
         );
       } else {
         if (!mounted) return;

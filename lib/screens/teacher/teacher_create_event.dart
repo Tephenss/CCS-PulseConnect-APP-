@@ -16,6 +16,9 @@ import '../../services/event_service.dart';
 import '../../services/mobile_backend_service.dart';
 import '../../services/native_document_picker.dart';
 import '../../utils/teacher_theme_utils.dart';
+import '../../utils/description_word_limit_formatter.dart';
+import '../../utils/event_fee_input_formatter.dart';
+import '../../utils/event_form_validation.dart';
 import '../../widgets/app_snackbar.dart';
 import '../../widgets/custom_loader.dart';
 
@@ -118,6 +121,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   bool _canUndo = false;
 
   String? _validationError;
+  final Map<String, String> _fieldErrors = {};
+  final ValueNotifier<String> _descriptionSnapshot = ValueNotifier<String>('');
+  late final DescriptionWordLimitFormatter _descriptionWordLimitFormatter;
 
   DateTime? _parseDateTime(String text) {
     if (text.trim().isEmpty) return null;
@@ -187,14 +193,18 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         }
       }
       if (!_isFreeEvent) {
-        final fee = double.tryParse(_eventFeeCtrl.text.trim());
-        if (fee == null || fee <= 0) {
-          setState(
-            () => _validationError =
-                'Enter the settlement amount students must pay for this paid event.',
-          );
+        final feeError = EventFormValidation.validateEventFee(
+          _eventFeeCtrl.text,
+          isPaid: true,
+        );
+        if (feeError != null) {
+          setState(() {
+            _validationError = feeError;
+            _fieldErrors['event_fee'] = feeError;
+          });
           return false;
         }
+        _fieldErrors.remove('event_fee');
       }
       final limitRaw = _registrationLimitCtrl.text.trim();
       if (limitRaw.isNotEmpty) {
@@ -208,10 +218,16 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         }
       }
     } else if (step == 2) {
-      if (_descCtrl.text.trim().isEmpty) {
-        setState(() => _validationError = 'Please add a description.');
+      final descriptionError =
+          EventFormValidation.validateDescription(_descCtrl.text);
+      if (descriptionError != null) {
+        setState(() {
+          _validationError = descriptionError;
+          _fieldErrors['description'] = descriptionError;
+        });
         return false;
       }
+      _fieldErrors.remove('description');
     } else if (step == 3) {
       if (_eventMode == 'seminar_based') {
         DateTime? s1 = _parseDateTime(_seminar1StartCtrl.text);
@@ -356,9 +372,23 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           );
           return false;
         }
+        if (_isProposalPdfOnlyCode(item.code)) {
+          final name = (item.fileName ?? item.file!.path).toLowerCase();
+          if (!name.endsWith('.pdf')) {
+            setState(
+              () => _validationError = '"$label" accepts PDF files only.',
+            );
+            return false;
+          }
+        }
       }
     }
     return true;
+  }
+
+  bool _isProposalPdfOnlyCode(String code) {
+    final normalized = code.trim().toUpperCase();
+    return normalized == 'LU-AA-FO-113' || normalized == 'LU-AA-FO-108';
   }
 
   bool _isAllowedScheduleTime(DateTime value) {
@@ -399,8 +429,63 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   @override
   void initState() {
     super.initState();
+    _descriptionWordLimitFormatter =
+        DescriptionWordLimitFormatter(snapshot: _descriptionSnapshot);
+    _eventFeeCtrl.addListener(_onEventFeeChanged);
+    _descCtrl.addListener(_onDescriptionChanged);
     _initSpeech();
   }
+
+  void _onEventFeeChanged() {
+    if (_isFreeEvent) {
+      if (_fieldErrors.containsKey('event_fee')) {
+        setState(() => _fieldErrors.remove('event_fee'));
+      }
+      return;
+    }
+    final error = EventFormValidation.validateEventFee(
+      _eventFeeCtrl.text,
+      isPaid: true,
+    );
+    setState(() {
+      if (error == null) {
+        _fieldErrors.remove('event_fee');
+      } else {
+        _fieldErrors['event_fee'] = error;
+      }
+    });
+  }
+
+  void _onDescriptionChanged() {
+    final error = EventFormValidation.validateDescription(_descCtrl.text);
+    setState(() {
+      if (error == null) {
+        _fieldErrors.remove('description');
+      } else if (error.contains('200 words')) {
+        _fieldErrors['description'] = error;
+      }
+    });
+  }
+
+  void _setDescriptionText(String value) {
+    final limited = EventFormValidation.truncateToWordLimit(
+      value,
+      EventFormValidation.descriptionMaxWords,
+    );
+    _descriptionSnapshot.value = limited;
+    _descCtrl.value = TextEditingValue(
+      text: limited,
+      selection: TextSelection.collapsed(offset: limited.length),
+      composing: TextRange.empty,
+    );
+    _onDescriptionChanged();
+  }
+
+  int get _descriptionWordCount =>
+      EventFormValidation.countWords(_descCtrl.text);
+
+  bool get _descriptionAtWordLimit =>
+      _descriptionWordCount >= EventFormValidation.descriptionMaxWords;
 
   void _initSpeech() async {
     _speechEnabled = await _speechToText.initialize(
@@ -429,8 +514,11 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     _seminar2StartCtrl.dispose();
     _seminar2EndCtrl.dispose();
     _graceTimeCtrl.dispose();
+    _eventFeeCtrl.removeListener(_onEventFeeChanged);
+    _descCtrl.removeListener(_onDescriptionChanged);
     _eventFeeCtrl.dispose();
     _registrationLimitCtrl.dispose();
+    _descriptionSnapshot.dispose();
     for (final item in _proposalItems) {
       item.labelCtrl?.dispose();
     }
@@ -447,7 +535,12 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   }
 
   void _submit() async {
-    if (!_validateStep(3) || !_validateStep(4)) return;
+    for (var step = 1; step <= 4; step++) {
+      if (!_validateStep(step)) {
+        setState(() => _currentStep = step);
+        return;
+      }
+    }
 
     setState(() => _isSubmitting = true);
     final user = await _authService.getCurrentUser();
@@ -671,8 +764,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     if (_isFreeEvent) {
       payload['event_fee'] = null;
     } else {
-      payload['event_fee'] =
-          double.tryParse(_eventFeeCtrl.text.trim()) ?? 0;
+      final feeText = EventFormValidation.normalizeEventFeeInput(_eventFeeCtrl.text);
+      payload['event_fee'] = int.tryParse(feeText) ?? 0;
     }
     final limitRaw = _registrationLimitCtrl.text.trim();
     payload['registration_limit'] = limitRaw.isEmpty
@@ -786,11 +879,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       _lastWords = _descCtrl.text;
       await _speechToText.listen(
         onResult: (result) {
-          setState(() {
-            _descCtrl.text = _lastWords.isEmpty
-                ? result.recognizedWords
-                : '$_lastWords ${result.recognizedWords}';
-          });
+          final combined = _lastWords.isEmpty
+              ? result.recognizedWords
+              : '$_lastWords ${result.recognizedWords}';
+          _setDescriptionText(combined);
         },
       );
       setState(() => _isListening = true);
@@ -815,10 +907,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       setState(() => _isAiProcessing = false);
       if (aiResult['ok'] == true) {
         _previousDescription = _descCtrl.text;
-        setState(() {
-          _descCtrl.text = aiResult['improved_text'];
-          _canUndo = true;
-        });
+        _setDescriptionText(aiResult['improved_text']?.toString() ?? '');
+        setState(() => _canUndo = true);
         AppSnackBar.success(context, 'Description improved by AI!');
       } else {
         AppSnackBar.error(context, aiResult['error'].toString());
@@ -828,7 +918,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
 
   void _undoAiImprove() {
     setState(() {
-      _descCtrl.text = _previousDescription;
+      _setDescriptionText(_previousDescription);
       _canUndo = false;
     });
   }
@@ -888,6 +978,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                         controller: _descCtrl,
                         maxLines: null,
                         keyboardType: TextInputType.multiline,
+                        inputFormatters: [_descriptionWordLimitFormatter],
                         style: const TextStyle(
                           fontSize: 15,
                           color: Color(0xFF111827),
@@ -1273,7 +1364,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           selected: _isFreeEvent,
           title: 'Free Event',
           subtitle: 'When published, students can register immediately.',
-          onTap: () => setState(() => _isFreeEvent = true),
+          onTap: () => setState(() {
+            _isFreeEvent = true;
+            _fieldErrors.remove('event_fee');
+          }),
         ),
         const SizedBox(height: 10),
         _buildRegistrationTypeCard(
@@ -1287,9 +1381,19 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           _buildLabel('Settlement Amount (₱)', required: true),
           _buildNumberField(
             controller: _eventFeeCtrl,
-            hint: 'e.g. 250.00',
+            hint: 'e.g. 2500 (max 4 digits)',
             prefixIcon: Icons.payments_outlined,
-            decimal: true,
+            inputFormatters: const [EventFeeInputFormatter()],
+            errorText: _fieldErrors['event_fee'],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Maximum 4 digits (₱${EventFormValidation.eventFeeMax}).',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.grey.shade600,
+              height: 1.4,
+            ),
           ),
         ],
         const SizedBox(height: 16),
@@ -1412,6 +1516,18 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           children: [
             _buildLabel('Description', required: true),
             const Spacer(),
+            Text(
+              _descriptionAtWordLimit
+                  ? '${EventFormValidation.descriptionMaxWords} / ${EventFormValidation.descriptionMaxWords} words · limit reached'
+                  : '$_descriptionWordCount / ${EventFormValidation.descriptionMaxWords} words',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: _descriptionAtWordLimit
+                    ? Colors.red.shade600
+                    : const Color(0xFF9CA3AF),
+              ),
+            ),
             IconButton(
               tooltip: 'Expand view',
               onPressed: _openDescriptionFullScreen,
@@ -1427,11 +1543,17 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           duration: const Duration(milliseconds: 300),
           decoration: BoxDecoration(
             border: Border.all(
-              color: _isListening ? Colors.red.shade200 : Colors.transparent,
+              color: _fieldErrors.containsKey('description')
+                  ? Colors.red.shade300
+                  : (_isListening
+                      ? Colors.red.shade200
+                      : Colors.transparent),
               width: 1.5,
             ),
             borderRadius: BorderRadius.circular(20),
-            color: _isListening ? Colors.red.shade50 : const Color(0xFFF3F4F6),
+            color: _descriptionAtWordLimit
+                ? const Color(0xFFF9FAFB)
+                : (_isListening ? Colors.red.shade50 : const Color(0xFFF3F4F6)),
           ),
           child: Stack(
             children: [
@@ -1439,6 +1561,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                 controller: _descCtrl,
                 maxLines: 9,
                 keyboardType: TextInputType.multiline,
+                inputFormatters: [_descriptionWordLimitFormatter],
                 style: const TextStyle(
                   fontSize: 15,
                   color: Color(0xFF111827),
@@ -1459,6 +1582,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             ],
           ),
         ),
+        _buildFieldError('description'),
         // --- Step 2 Controls ---
         const SizedBox(height: 32),
 
@@ -2061,7 +2185,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             ),
             label: Text(
               item.file == null
-                  ? 'Upload file (PDF, DOC, image)'
+                  ? (item.isDefault
+                      ? 'Upload PDF File'
+                      : 'Upload file (PDF, DOC, image)')
                   : (item.fileName ?? 'File selected'),
               style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
             ),
@@ -2303,6 +2429,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
 
   Future<void> _pickProposalFile(int index) async {
     try {
+      final item = _proposalItems[index];
+      final pdfOnly = _isProposalPdfOnlyCode(item.code);
       String? fileName;
       String? filePath;
       if (!kIsWeb && Platform.isAndroid) {
@@ -2315,7 +2443,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       } else {
         final result = await FilePicker.platform.pickFiles(
           type: FileType.custom,
-          allowedExtensions: const ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'webp'],
+          allowedExtensions: pdfOnly
+              ? const ['pdf']
+              : const ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'webp'],
           allowMultiple: false,
         );
         if (result == null || result.files.isEmpty) return;
@@ -2329,6 +2459,12 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       if (size <= 0 || size > 10 * 1024 * 1024) {
         if (!mounted) return;
         AppSnackBar.error(context, 'Each proposal file must be 10MB or smaller.');
+        return;
+      }
+      final resolvedName = (fileName ?? file.path).toLowerCase();
+      if (pdfOnly && !resolvedName.endsWith('.pdf')) {
+        if (!mounted) return;
+        AppSnackBar.error(context, '"${item.label}" accepts PDF files only.');
         return;
       }
       if (!mounted) return;
@@ -2467,15 +2603,36 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     );
   }
 
+  Widget _buildFieldError(String fieldKey) {
+    final message = _fieldErrors[fieldKey];
+    if (message == null || message.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, left: 4),
+      child: Text(
+        message,
+        style: TextStyle(
+          color: Colors.red.shade700,
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
   Widget _buildNumberField({
     required TextEditingController controller,
     required String hint,
     required IconData prefixIcon,
     bool decimal = false,
+    List<TextInputFormatter>? inputFormatters,
+    String? errorText,
   }) {
     return TextFormField(
       controller: controller,
       keyboardType: TextInputType.numberWithOptions(decimal: decimal),
+      inputFormatters: inputFormatters,
       style: const TextStyle(
         fontSize: 15,
         color: Color(0xFF111827),
@@ -2483,6 +2640,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       ),
       decoration: InputDecoration(
         hintText: hint,
+        errorText: errorText,
+        errorMaxLines: 2,
         hintStyle: const TextStyle(
           color: Color(0xFF9CA3AF),
           fontSize: 15,

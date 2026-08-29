@@ -27,9 +27,31 @@ class StudentRegistrationRequirementsPage extends StatefulWidget {
     required this.event,
   });
 
+  static void clearPageCache([String? eventId]) {
+    _StudentRegistrationRequirementsPageState.clearPageCache(eventId);
+  }
+
   @override
   State<StudentRegistrationRequirementsPage> createState() =>
       _StudentRegistrationRequirementsPageState();
+}
+
+class _RequirementsPageSnapshot {
+  final List<Map<String, dynamic>> requirements;
+  final Map<String, Map<String, dynamic>> documentsByRequirement;
+  final String status;
+  final String declineReason;
+  final String statusMessage;
+  final DateTime cachedAt;
+
+  const _RequirementsPageSnapshot({
+    required this.requirements,
+    required this.documentsByRequirement,
+    required this.status,
+    required this.declineReason,
+    required this.statusMessage,
+    required this.cachedAt,
+  });
 }
 
 class _StudentRegistrationRequirementsPageState
@@ -37,6 +59,26 @@ class _StudentRegistrationRequirementsPageState
     with WidgetsBindingObserver {
   static const _pendingPickRequirementKey = 'pending_student_req_upload_id';
   static const _pendingPickEventKey = 'pending_student_req_upload_event';
+
+  static final Map<String, _RequirementsPageSnapshot> _pageCache = {};
+  static const Duration _pageCacheTtl = Duration(minutes: 5);
+
+  static void clearPageCache([String? eventId]) {
+    if (eventId == null || eventId.trim().isEmpty) {
+      _pageCache.clear();
+      return;
+    }
+    final suffix = '|${eventId.trim()}';
+    _pageCache.removeWhere((key, _) => key.endsWith(suffix));
+  }
+
+  static String _pageCacheKey(String eventId, String userId) {
+    final event = eventId.trim();
+    final user = userId.trim();
+    if (event.isEmpty) return '';
+    if (user.isEmpty) return event;
+    return '$user|$event';
+  }
 
   final _eventService = EventService();
   StreamSubscription<String>? _eventLiveSubscription;
@@ -94,11 +136,62 @@ class _StudentRegistrationRequirementsPageState
       }
 
       _eventService.clearStudentRequirementsCache(eventId);
-      unawaited(_loadData(silent: true));
+      unawaited(_loadData(silent: _requirements.isNotEmpty));
     });
-    _loadData().then((_) {
-      unawaited(_recoverPendingPickIfNeeded());
+    unawaited(_bootstrap());
+  }
+
+  Future<void> _bootstrap() async {
+    await _hydrateFromCache();
+    final hadCache = _requirements.isNotEmpty;
+    await _loadData(silent: hadCache);
+    await _recoverPendingPickIfNeeded();
+  }
+
+  Future<void> _hydrateFromCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id') ?? '';
+    if (userId.isEmpty || !mounted) return;
+
+    _studentId = userId;
+    final cacheKey = _pageCacheKey(widget.eventId, userId);
+    final cached = cacheKey.isEmpty ? null : _pageCache[cacheKey];
+    if (cached == null ||
+        DateTime.now().difference(cached.cachedAt) > _pageCacheTtl) {
+      return;
+    }
+
+    setState(() {
+      _requirements = List<Map<String, dynamic>>.from(
+        cached.requirements.map((row) => Map<String, dynamic>.from(row)),
+      );
+      _documentsByRequirement = cached.documentsByRequirement.map(
+        (key, value) => MapEntry(key, Map<String, dynamic>.from(value)),
+      );
+      _status = cached.status;
+      _declineReason = cached.declineReason;
+      _statusMessage = cached.statusMessage;
+      _isLoading = false;
+      _errorMessage = null;
     });
+  }
+
+  void _storePageCache() {
+    if (_studentId.trim().isEmpty || _requirements.isEmpty) return;
+    final cacheKey = _pageCacheKey(widget.eventId, _studentId);
+    if (cacheKey.isEmpty) return;
+    _pageCache[cacheKey] = _RequirementsPageSnapshot(
+      requirements: _requirements
+          .map((row) => Map<String, dynamic>.from(row))
+          .toList(growable: false),
+      documentsByRequirement: _documentsByRequirement.map(
+        (key, value) => MapEntry(key, Map<String, dynamic>.from(value)),
+      ),
+      status: _status,
+      declineReason: _declineReason,
+      statusMessage: _statusMessage,
+      cachedAt: DateTime.now(),
+    );
   }
 
   @override
@@ -198,6 +291,7 @@ class _StudentRegistrationRequirementsPageState
         _statusMessage = (access['message']?.toString() ?? '').trim();
         _isLoading = false;
       });
+      _storePageCache();
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -273,6 +367,7 @@ class _StudentRegistrationRequirementsPageState
         _documentsByRequirement[requirementId] =
             Map<String, dynamic>.from(rawDoc);
       });
+      _storePageCache();
       return;
     }
 
@@ -287,6 +382,7 @@ class _StudentRegistrationRequirementsPageState
         'updated_at': nowIso,
       };
     });
+    _storePageCache();
   }
 
   static const _allowedExtensions = <String>{
@@ -570,6 +666,7 @@ class _StudentRegistrationRequirementsPageState
             ? 'Your documents were approved. You may now register.'
             : 'Your documents are under review. Registration will open after approval.';
       });
+      _storePageCache();
       AppSnackBar.success(context, _status == 'approved' ? 'Documents already approved.' : 'Documents submitted for review. You can register after approval.');
       Navigator.pop(context, true);
     } catch (error) {

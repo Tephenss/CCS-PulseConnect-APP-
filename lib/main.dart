@@ -69,7 +69,7 @@ void main() async {
 
   var firebaseReady = false;
   try {
-    await Firebase.initializeApp();
+  await Firebase.initializeApp();
     firebaseReady = true;
   } catch (e) {
     debugPrint('Firebase init skipped: $e');
@@ -81,21 +81,24 @@ void main() async {
   );
 
   if (firebaseReady) {
-    await PushNotificationService().initialize();
+  await PushNotificationService().initialize();
   }
 
   final authService = AuthService();
   var isLoggedIn = await authService.isLoggedIn();
   String role = 'student';
   String studentCourse = 'IT';
-
+  
   if (isLoggedIn) {
     final serverUser = await authService.refreshCurrentUserFromServer();
     final userData = serverUser ?? await authService.getCurrentUser();
     role = userData?['role']?.toString().toLowerCase() ?? 'student';
-    studentCourse = CourseThemeUtils.normalizeCourse(userData?['course']) == 'CS'
-        ? 'CS'
-        : 'IT';
+    var courseNorm = CourseThemeUtils.normalizeCourse(userData?['course']);
+    if (courseNorm != 'CS' && courseNorm != 'IT') {
+      final fromSection = await authService.getStudentCourseCode();
+      courseNorm = CourseThemeUtils.normalizeCourse(fromSection);
+    }
+    studentCourse = courseNorm == 'CS' ? 'CS' : 'IT';
 
     // Daily OTP reset (12:00 AM Asia/Manila): clear in-app session so the
     // user must re-login + verify. Keep FCM token (same phone / same person).
@@ -107,7 +110,7 @@ void main() async {
       role = 'student';
       studentCourse = 'IT';
     } else if (firebaseReady) {
-      await PushNotificationService().updateToken();
+    await PushNotificationService().updateToken();
       // Keep trust fresh while this install stays active.
       final uid = userData?['id']?.toString().trim() ?? '';
       if (uid.isNotEmpty) {
@@ -185,15 +188,46 @@ class PulseConnectAppState extends State<PulseConnectApp>
   /// only the cold-start value from main() and goes stale after login.
   bool _sessionHydrating = false;
 
+  /// Survives [AppRestarter] remounts so teacher/CS splash does not flash maroon
+  /// for one frame while prefs hydrate (widget.userRole is still main()'s value).
+  static String? _cachedRole;
+  static String? _cachedStudentCourse;
+  static bool? _cachedEnteredApp;
+
+  String get currentRole => _currentRole;
+  String get currentStudentCourse => _currentStudentCourse;
+
+  void _rememberSessionTheme({
+    required String role,
+    required String studentCourse,
+    required bool enteredApp,
+  }) {
+    _cachedRole = role;
+    _cachedStudentCourse = studentCourse;
+    _cachedEnteredApp = enteredApp;
+  }
+
+  void _clearSessionThemeCache() {
+    _cachedRole = null;
+    _cachedStudentCourse = null;
+    _cachedEnteredApp = null;
+  }
+
   @override
   void initState() {
     super.initState();
     _disableFlutterDebugOutlines();
     WidgetsBinding.instance.addObserver(this);
-    _currentRole = widget.userRole;
-    _currentStudentCourse = widget.studentCourse;
-    _enteredApp = widget.isLoggedIn;
+    // Prefer last-known session over stale constructor args from main().
+    _currentRole = _cachedRole ?? widget.userRole;
+    _currentStudentCourse = _cachedStudentCourse ?? widget.studentCourse;
+    _enteredApp = _cachedEnteredApp ?? widget.isLoggedIn;
     _sessionHydrating = true;
+    _rememberSessionTheme(
+      role: _currentRole,
+      studentCourse: _currentStudentCourse,
+      enteredApp: _enteredApp,
+    );
     _startConnectivityMonitoring();
     _startOfflineWarmupTicker();
     _scheduleDailyVerificationCheck();
@@ -214,24 +248,54 @@ class PulseConnectAppState extends State<PulseConnectApp>
     }
     // Mid-session soft remount: only Manila-day rollover may log out.
     unawaited(_enforceDailyVerificationLogout());
+    if (!mounted) return;
+    if (_enteredApp && await _authService.isLoggedIn()) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(PushNotificationService().consumePendingTap());
+      });
+    }
   }
 
   /// Keep the user logged in across AppRestarter remounts (Performance Mode).
   Future<void> _hydrateSessionFromStorage() async {
     try {
       final loggedIn = await _authService.isLoggedIn();
-      if (!loggedIn || !mounted) return;
+      if (!mounted) return;
+
+      if (!loggedIn) {
+        if (_enteredApp) {
+          setState(() {
+            _enteredApp = false;
+            _emailOtpUser = null;
+            _loginRoleOverride = null;
+          });
+        }
+        _clearSessionThemeCache();
+        return;
+      }
 
       final user = await _authService.getCurrentUser();
       if (user == null || !mounted) return;
 
       final role = (user['role']?.toString() ?? 'student').toLowerCase();
-      final course =
-          CourseThemeUtils.normalizeCourse(user['course']) == 'CS' ? 'CS' : 'IT';
+      var courseNorm = CourseThemeUtils.normalizeCourse(user['course']);
+      if (courseNorm != 'CS' && courseNorm != 'IT') {
+        final fromSection = await _authService.getStudentCourseCode();
+        final sectionNorm = CourseThemeUtils.normalizeCourse(fromSection);
+        if (sectionNorm == 'CS' || sectionNorm == 'IT') {
+          courseNorm = sectionNorm;
+        }
+      }
+      final course = courseNorm == 'CS' ? 'CS' : 'IT';
 
       if (_enteredApp &&
           _currentRole.toLowerCase() == role &&
           (role != 'student' || _currentStudentCourse == course)) {
+        _rememberSessionTheme(
+          role: _currentRole,
+          studentCourse: _currentStudentCourse,
+          enteredApp: true,
+        );
         return;
       }
 
@@ -246,6 +310,11 @@ class PulseConnectAppState extends State<PulseConnectApp>
         _emailOtpGateReason = null;
         _emailOtpPostRegistration = false;
       });
+      _rememberSessionTheme(
+        role: _currentRole,
+        studentCourse: _currentStudentCourse,
+        enteredApp: true,
+      );
     } catch (e) {
       debugPrint('Session hydrate after remount skipped: $e');
     }
@@ -317,6 +386,7 @@ class PulseConnectAppState extends State<PulseConnectApp>
         _emailOtpUser = null;
         _loginRoleOverride = null;
       });
+      _clearSessionThemeCache();
       final nav = PulseConnectApp.navigatorKey.currentState;
       if (nav == null) return;
       nav.pushAndRemoveUntil(
@@ -380,6 +450,11 @@ class PulseConnectAppState extends State<PulseConnectApp>
       _enteredApp = false;
       _currentRole = role;
     });
+    _rememberSessionTheme(
+      role: role,
+      studentCourse: _currentStudentCourse,
+      enteredApp: false,
+    );
     _replaceRoot(
       LoginScreen(key: ValueKey('login-$role'), role: role),
     );
@@ -408,7 +483,22 @@ class PulseConnectAppState extends State<PulseConnectApp>
       _loginRoleOverride = null;
       _enteredApp = false;
     });
+    _clearSessionThemeCache();
     _replaceRoot(const WelcomeScreen());
+  }
+
+  /// Call after local logout so Performance Mode remount does not restore
+  /// a teacher/student home splash from the previous session cache.
+  void clearSessionAfterLogout() {
+    _clearSessionThemeCache();
+    if (!mounted) return;
+    setState(() {
+      _enteredApp = false;
+      _emailOtpUser = null;
+      _emailOtpGateReason = null;
+      _emailOtpPostRegistration = false;
+      _loginRoleOverride = null;
+    });
   }
 
   void enterAppAfterAuth({required String role, String? course}) {
@@ -426,6 +516,11 @@ class PulseConnectAppState extends State<PulseConnectApp>
       _currentRole = role;
       _currentStudentCourse = nextCourse;
     });
+    _rememberSessionTheme(
+      role: _currentRole,
+      studentCourse: _currentStudentCourse,
+      enteredApp: true,
+    );
     _replaceRoot(
       normalizedRole == 'teacher'
           ? const TeacherHome()
@@ -442,10 +537,18 @@ class PulseConnectAppState extends State<PulseConnectApp>
     // Auth screens (Login/OTP) are shown only via _replaceRoot — never as
     // MaterialApp.home — so we don't mount EmailVerificationScreen twice
     // (home rebuild + push) and send two different codes.
-    if (_sessionHydrating && !_enteredApp) {
-      // Show animated splash screen while session is restored on startup.
-      return const PulseConnectSplashScreen(
-        statusMessage: 'Connecting to PulseCONNECT...',
+    if (_sessionHydrating) {
+      // Soft remount (Performance Mode): use cached role so teacher stays blue
+      // (not a one-frame maroon flash from stale main() constructor args).
+      final isTeacher = _currentRole.toLowerCase() == 'teacher';
+      return PulseConnectSplashScreen.aligned(
+        role: _currentRole,
+        course: _currentStudentCourse,
+        statusMessage: !_enteredApp
+            ? 'Connecting to PulseCONNECT...'
+            : (isTeacher
+                ? 'Loading faculty dashboard & events...'
+                : 'Loading student portal & events...'),
       );
     }
     if (_enteredApp) {
@@ -616,6 +719,11 @@ class PulseConnectAppState extends State<PulseConnectApp>
           _currentRole = role;
           _currentStudentCourse = nextCourse;
         });
+        _rememberSessionTheme(
+          role: role,
+          studentCourse: nextCourse,
+          enteredApp: _enteredApp,
+        );
       });
     }
   }
@@ -654,7 +762,7 @@ class PulseConnectAppState extends State<PulseConnectApp>
     final secondaryColor = isStudent
         ? CourseThemeUtils.studentSecondaryForCourse(studentCourse)
         : const Color(0xFFD4A843);
-
+    
     return ThemeData(
       useMaterial3: true,
       pageTransitionsTheme: const PageTransitionsTheme(

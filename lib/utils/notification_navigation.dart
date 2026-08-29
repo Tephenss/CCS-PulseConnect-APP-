@@ -35,6 +35,7 @@ class NotificationNavigation {
     if (id.startsWith('reject_')) return 'proposal_rejected';
     if (id.startsWith('reg_access_approved_') ||
         id.startsWith('reg_open_') ||
+        id.startsWith('reg_extended_') ||
         id.startsWith('reg_closed_')) {
       return 'reg_open';
     }

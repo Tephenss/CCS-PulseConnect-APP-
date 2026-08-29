@@ -751,14 +751,14 @@ class EventService {
     String participantName = '';
     String participantPhotoUrl = '';
 
-    try {
-      final regRows = await _supabase
-          .from('event_registrations')
-          .select('student_id')
+      try {
+        final regRows = await _supabase
+            .from('event_registrations')
+            .select('student_id')
           .eq('id', trimmedRegistrationId)
-          .limit(1);
+            .limit(1);
 
-      if (regRows.isNotEmpty) {
+        if (regRows.isNotEmpty) {
         final row = Map<String, dynamic>.from(regRows.first);
         studentId = (row['student_id']?.toString() ?? '').trim();
       }
@@ -1014,7 +1014,7 @@ class EventService {
     if (!(uri.scheme == 'http' || uri.scheme == 'https')) return false;
     final host = uri.host.trim().toLowerCase();
     if (host.isEmpty || host == 'your-web-domain') return false;
-    return true;
+      return true;
   }
 
   /// Production schema from migrations — do NOT probe missing columns with
@@ -1024,12 +1024,12 @@ class EventService {
     'event_id',
     'title',
     'start_at',
-    'topic',
-    'description',
-    'location',
-    'end_at',
-    'scan_window_minutes',
-    'sort_order',
+      'topic',
+      'description',
+      'location',
+      'end_at',
+      'scan_window_minutes',
+      'sort_order',
     'early_out_enabled_at',
   ];
 
@@ -1044,7 +1044,7 @@ class EventService {
     final supported = <String>[];
     for (final column in _eventSessionPreferredColumns) {
       if (_eventSessionColumnSupport[column] == false) continue;
-      supported.add(column);
+        supported.add(column);
       _eventSessionColumnSupport.putIfAbsent(column, () => true);
     }
     return supported.isEmpty ? List<String>.from(_eventSessionBaseColumns) : supported;
@@ -1435,7 +1435,7 @@ class EventService {
     if (await _supportsEventSessionAttendanceTable()) {
       try {
         final rows = await _supabase
-            .from('event_session_attendance')
+          .from('event_session_attendance')
             .select(
               'id,session_id,registration_id,ticket_id,status,check_in_at,last_scanned_at',
             )
@@ -1627,9 +1627,9 @@ class EventService {
                 method: 'PATCH',
                 filter: 'id=eq.${attendance['id']}',
                 payload: {
-                  'status': 'present',
+          'status': 'present',
                   'check_in_at': effectiveScanAtIso,
-                  'updated_at': nowIso,
+          'updated_at': nowIso,
                 },
               );
               if (updated == null) {
@@ -1639,9 +1639,9 @@ class EventService {
                   'status': 'error',
                 };
               }
-              return successResponse();
+        return successResponse();
             }
-            return alreadyRecordedResponse();
+          return alreadyRecordedResponse();
           }
 
           if (dryRun) {
@@ -1662,7 +1662,7 @@ class EventService {
             method: 'PATCH',
             filter: 'id=eq.${attendance['id']}',
             payload: {
-              'status': 'present',
+            'status': 'present',
               'check_in_at': effectiveScanAtIso,
               'last_scanned_by': teacherId,
               'last_scanned_at': effectiveScanAtIso,
@@ -1693,7 +1693,7 @@ class EventService {
         }
 
         if (dryRun) {
-          return successResponse();
+        return successResponse();
         }
 
         final eventId = (session['event_id']?.toString() ?? '').trim();
@@ -1732,7 +1732,7 @@ class EventService {
             _isAccessPolicyError(e)) {
           // Fall through to fail-closed message below.
         } else {
-          rethrow;
+        rethrow;
         }
       }
     }
@@ -1956,17 +1956,17 @@ class EventService {
     }
 
     Map<String, dynamic>? normalizeAttendanceItem(Map<String, dynamic> raw) {
-      final sessionId = raw['session_id']?.toString() ?? '';
+          final sessionId = raw['session_id']?.toString() ?? '';
       if (sessionId.isEmpty) return null;
-      final session = sessionById[sessionId];
+          final session = sessionById[sessionId];
       if (session == null) return null;
       return {
-        ...raw,
-        'session_no': session['session_no'],
-        'title': session['title'],
-        'display_name': session['display_name'],
-        'start_at': session['start_at'],
-      };
+            ...raw,
+            'session_no': session['session_no'],
+            'title': session['title'],
+            'display_name': session['display_name'],
+            'start_at': session['start_at'],
+          };
     }
 
     for (final raw in nestedAttendanceRows) {
@@ -2084,7 +2084,7 @@ class EventService {
           if (ticketId.isEmpty) continue;
           combined.addAll(
             List<Map<String, dynamic>>.from(
-              rowsByTicket[ticketId] ?? const <Map<String, dynamic>>[],
+        rowsByTicket[ticketId] ?? const <Map<String, dynamic>>[],
             ),
           );
         }
@@ -2141,8 +2141,8 @@ class EventService {
       }
       try {
         return await _queryEventSessions(eventId, _eventSessionBaseColumns);
-      } catch (_) {
-        return [];
+    } catch (_) {
+      return [];
       }
     }
   }
@@ -2247,7 +2247,7 @@ class EventService {
     if (_toUtcDate(earlyOutRaw) == null &&
         resolvedEnd != null &&
         nowUtc.isBefore(resolvedEnd)) {
-      return {
+    return {
         'status': 'closed',
         'source': source,
         'event': eventSummary,
@@ -2545,15 +2545,15 @@ class EventService {
           ? Map<String, dynamic>.from(last['session'] as Map<String, dynamic>)
           : <String, dynamic>{};
       final sessionSummary = last == null
-          ? null
-          : {
-              'id': session['id']?.toString() ?? '',
-              'title': session['title']?.toString() ?? '',
-              'topic': session['topic']?.toString() ?? '',
-              'display_name': _sessionDisplayName(session),
-              'start_at': session['start_at']?.toString() ?? '',
-              'end_at': session['end_at']?.toString() ?? '',
-              'scan_window_minutes': last['window_minutes'],
+            ? null
+            : {
+                'id': session['id']?.toString() ?? '',
+                'title': session['title']?.toString() ?? '',
+                'topic': session['topic']?.toString() ?? '',
+                'display_name': _sessionDisplayName(session),
+                'start_at': session['start_at']?.toString() ?? '',
+                'end_at': session['end_at']?.toString() ?? '',
+                'scan_window_minutes': last['window_minutes'],
               'early_out_enabled_at': session['early_out_enabled_at'],
             };
       return {
@@ -3169,7 +3169,7 @@ class EventService {
   }) async {
     try {
       final now = DateTime.now().toUtc().toIso8601String();
-      // We don't use .limit(5) on the DB side if we filter in Dart,
+      // We don't use .limit(5) on the DB side if we filter in Dart, 
       // because we might drop events and return fewer than 5.
       // Since it's upcoming, getting all and slicing after filter is safer.
       final response = await _supabase
@@ -3203,16 +3203,16 @@ class EventService {
     return _appCache.fetchOnce<Map<String, dynamic>?>(
       key,
       () async {
-        try {
-          final response = await _supabase
-              .from('events')
-              .select()
+    try {
+      final response = await _supabase
+          .from('events')
+          .select()
               .eq('id', id)
-              .single();
+          .single();
           return Map<String, dynamic>.from(response);
         } catch (_) {
-          return null;
-        }
+      return null;
+    }
       },
       ttl: _eventByIdTtl,
       forceFresh: forceFresh,
@@ -4437,12 +4437,12 @@ class EventService {
             ),
           );
         }
-      } catch (e) {
+    } catch (e) {
         debugPrint('[tickets] BFF failed: $e');
-      }
+    }
       // Fail closed — anon embed path floods Postgres ERROR after lockdown.
       return [];
-    }
+  }
 
     try {
       final response = await _supabase
@@ -4845,9 +4845,9 @@ class EventService {
             simpleTemplateByEvent[row['event_id']?.toString() ?? ''] ??
             <String, dynamic>{};
         return {
-          ...row,
+                ...row,
           ...selectedTemplate,
-          'certificate_scope': 'event',
+                'certificate_scope': 'event',
           'participant_name': participantName,
           'display_title': resolvedTitle,
           'events': eventMap,
@@ -4857,27 +4857,27 @@ class EventService {
       List<Map<String, dynamic>> sessionCerts = [];
       if (rawSessionCerts.isNotEmpty) {
         try {
-          final sessionTemplateIds = rawSessionCerts
-              .map((row) => row['session_template_id']?.toString() ?? '')
-              .where((id) => id.isNotEmpty)
-              .toSet()
-              .toList();
+        final sessionTemplateIds = rawSessionCerts
+            .map((row) => row['session_template_id']?.toString() ?? '')
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .toList();
           final eventTemplateIds = rawSessionCerts
-              .map((row) => row['template_id']?.toString() ?? '')
-              .where((id) => id.isNotEmpty)
-              .toSet()
-              .toList();
-          final sessionIds = rawSessionCerts
-              .map((row) => row['session_id']?.toString() ?? '')
-              .where((id) => id.isNotEmpty)
-              .toSet()
-              .toList();
-          final eventIds = rawSessionCerts
-              .map((row) => _asStringMap(row['event_sessions']))
-              .map((session) => session['event_id']?.toString() ?? '')
-              .where((id) => id.isNotEmpty)
-              .toSet()
-              .toList();
+            .map((row) => row['template_id']?.toString() ?? '')
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .toList();
+        final sessionIds = rawSessionCerts
+            .map((row) => row['session_id']?.toString() ?? '')
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .toList();
+        final eventIds = rawSessionCerts
+            .map((row) => _asStringMap(row['event_sessions']))
+            .map((session) => session['event_id']?.toString() ?? '')
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .toList();
 
           final templateMaps = await Future.wait([
             loadTemplateMap(
@@ -4906,15 +4906,15 @@ class EventService {
           final eventTemplateById = templateMaps[2];
           final eventTemplateByEvent = templateMaps[3];
 
-          sessionCerts = rawSessionCerts.map((row) {
-            final session = _asStringMap(row['event_sessions']);
-            final sessionId =
-                session['id']?.toString() ?? row['session_id']?.toString() ?? '';
+        sessionCerts = rawSessionCerts.map((row) {
+          final session = _asStringMap(row['event_sessions']);
+          final sessionId =
+              session['id']?.toString() ?? row['session_id']?.toString() ?? '';
             final sessionEventId = (session['event_id']?.toString() ?? '').trim();
             final rowEventId = (row['event_id']?.toString() ?? '').trim();
             final eventId =
                 sessionEventId.isNotEmpty ? sessionEventId : rowEventId;
-            final event = _asStringMap(session['events']);
+          final event = _asStringMap(session['events']);
             final liveSessionName = _sessionDisplayName(session);
             final snapSessionName = (row['session_title']?.toString() ?? '').trim();
             final sessionName = liveSessionName.isNotEmpty &&
@@ -4943,31 +4943,31 @@ class EventService {
                 eventTemplateByEvent[eventId] ??
                 <String, dynamic>{};
 
-            return {
-              ...row,
+          return {
+            ...row,
               ...selectedTemplate,
-              'session_id': sessionId,
-              'event_id': eventId,
-              'events': event,
-              'session': session,
-              'certificate_scope': 'session',
+            'session_id': sessionId,
+            'event_id': eventId,
+            'events': event,
+            'session': session,
+            'certificate_scope': 'session',
               'participant_name': participantName,
               'display_title': sessionName.isNotEmpty
                   ? '$eventTitle - $sessionName'
                   : eventTitle,
-            };
-          }).toList();
-        } catch (_) {
-          try {
-            sessionCerts = await _getSessionCertificatesFallback(userId);
+          };
+        }).toList();
+      } catch (_) {
+        try {
+          sessionCerts = await _getSessionCertificatesFallback(userId);
             sessionCerts = sessionCerts.map((row) {
               return {
-                ...row,
+                        ...row,
                 'participant_name': participantName,
               };
             }).toList();
-          } catch (_) {
-            sessionCerts = [];
+        } catch (_) {
+          sessionCerts = [];
           }
         }
       }
@@ -5145,7 +5145,7 @@ class EventService {
               .inFilter('id', assignedIds),
         );
         for (final event in assignedEvents) {
-          final eventId = event['id']?.toString() ?? '';
+        final eventId = event['id']?.toString() ?? '';
           if (eventId.isNotEmpty) merged[eventId] = event;
         }
       }
@@ -5154,16 +5154,16 @@ class EventService {
         return getTeacherEvents(teacherId);
       }
       // If this fails due to policy/schema, keep created events.
-    }
+      }
 
-    final list = merged.values.toList();
-    list.sort((a, b) {
-      final dateA = _toUtcDate(a['start_at']) ?? DateTime(2000).toUtc();
-      final dateB = _toUtcDate(b['start_at']) ?? DateTime(2000).toUtc();
-      return dateB.compareTo(dateA); // Descending (latest first)
-    });
+      final list = merged.values.toList();
+      list.sort((a, b) {
+        final dateA = _toUtcDate(a['start_at']) ?? DateTime(2000).toUtc();
+        final dateB = _toUtcDate(b['start_at']) ?? DateTime(2000).toUtc();
+        return dateB.compareTo(dateA); // Descending (latest first)
+      });
     _writeListCache(cacheKey, list);
-    return list;
+      return list;
   }
 
   // Get only UPCOMING accessible events for a specific teacher, max 5 limit
@@ -5200,7 +5200,7 @@ class EventService {
       try {
         assignmentRows = List<Map<String, dynamic>>.from(
           await _supabase
-              .from('event_teacher_assignments')
+          .from('event_teacher_assignments')
               .select('event_id,can_scan,can_manage_assistants')
               .eq('teacher_id', teacherId)
               .limit(200),
@@ -5210,8 +5210,8 @@ class EventService {
           await _supabase
               .from('event_teacher_assignments')
               .select('event_id,can_scan')
-              .eq('teacher_id', teacherId)
-              .eq('can_scan', true)
+          .eq('teacher_id', teacherId)
+          .eq('can_scan', true)
               .limit(200),
         );
       }
@@ -5271,20 +5271,43 @@ class EventService {
 
     final byId = <String, dynamic>{};
     final sessionByEvent = <String, String>{};
-    await Future.wait(ids.map((id) async {
-      try {
-        final res = await _mobileBackend.getEventEarlyOutStatus(eventId: id);
-        if (res['ok'] != true) return;
-        final earlyOut = res['early_out'];
-        if (earlyOut is! Map) return;
-        final enabled = earlyOut['enabled'] == true;
-        byId[id] = enabled ? earlyOut['enabled_at'] : null;
-        final sid = res['session_id']?.toString().trim() ?? '';
-        if (sid.isNotEmpty) {
-          sessionByEvent[id] = sid;
+    try {
+      final res = await _mobileBackend.getEventsEarlyOutBatch(eventIds: ids);
+      if (res['ok'] == true) {
+        final items = res['items'];
+        if (items is List) {
+          for (final raw in items) {
+            if (raw is! Map) continue;
+            final id = raw['event_id']?.toString() ?? '';
+            if (id.isEmpty) continue;
+            final earlyOut = raw['early_out'];
+            if (earlyOut is! Map) continue;
+            final enabled = earlyOut['enabled'] == true;
+            byId[id] = enabled ? earlyOut['enabled_at'] : null;
+            final sid = raw['session_id']?.toString().trim() ?? '';
+            if (sid.isNotEmpty) {
+              sessionByEvent[id] = sid;
+            }
+          }
         }
-      } catch (_) {}
-    }));
+      }
+    } catch (_) {
+      // Fall back to per-event status if batch endpoint unavailable.
+      await Future.wait(ids.map((id) async {
+        try {
+          final res = await _mobileBackend.getEventEarlyOutStatus(eventId: id);
+          if (res['ok'] != true) return;
+          final earlyOut = res['early_out'];
+          if (earlyOut is! Map) return;
+          final enabled = earlyOut['enabled'] == true;
+          byId[id] = enabled ? earlyOut['enabled_at'] : null;
+          final sid = res['session_id']?.toString().trim() ?? '';
+          if (sid.isNotEmpty) {
+            sessionByEvent[id] = sid;
+          }
+        } catch (_) {}
+      }));
+    }
 
     if (byId.isEmpty) return events;
     return events.map((event) {
@@ -5759,16 +5782,16 @@ class EventService {
       }
 
       final enrichedEvents = await _enrichEventsWithEarlyOut(events);
-      final nowUtc = DateTime.now().toUtc();
-      final contexts = <Map<String, dynamic>>[];
+        final nowUtc = DateTime.now().toUtc();
+        final contexts = <Map<String, dynamic>>[];
       for (final event in enrichedEvents) {
-        contexts.add(await _resolveSingleEventScanContext(event, nowUtc));
-      }
-      return _finalizeTeacherScanContext(
+          contexts.add(await _resolveSingleEventScanContext(event, nowUtc));
+        }
+        return _finalizeTeacherScanContext(
         events: enrichedEvents,
-        contexts: contexts,
-        nowUtc: nowUtc,
-      );
+          contexts: contexts,
+          nowUtc: nowUtc,
+        );
     } catch (e) {
       return {
         'ok': false,
@@ -5844,10 +5867,10 @@ class EventService {
       for (var attempt = 0; attempt < 8; attempt++) {
         try {
           createdEvent = await _supabase
-              .from('events')
+          .from('events')
               .insert(workingPayload)
-              .select()
-              .single();
+          .select()
+          .single();
           break;
         } catch (e) {
           if (!_isMissingColumnError(e, relation: 'events')) rethrow;
@@ -6055,15 +6078,15 @@ class EventService {
 
       try {
         // No users(...) embed — users table is locked from anon (048).
-        final response = await _supabase
-            .from('event_registrations')
-            .select(
+      final response = await _supabase
+          .from('event_registrations')
+          .select(
               'id, registered_at, student_id, tickets(*, attendance(*))',
-            )
-            .eq('event_id', eventId)
-            .order('registered_at', ascending: false);
+          )
+          .eq('event_id', eventId)
+          .order('registered_at', ascending: false);
 
-        final list = List<Map<String, dynamic>>.from(response);
+      final list = List<Map<String, dynamic>>.from(response);
         return _enrichParticipantsWithSeminarAttendance(eventId, list);
       } catch (_) {
         return <Map<String, dynamic>>[];
@@ -6198,12 +6221,12 @@ class EventService {
       try {
         final participants = await getEventParticipants(eventId);
         return buildFromParticipants(participants);
-      } catch (_) {
+    } catch (_) {
         return <Map<String, dynamic>>[];
       }
     }
 
-    try {
+      try {
       List<Map<String, dynamic>> registrations;
       try {
         final response = await _supabase
@@ -6363,7 +6386,7 @@ class EventService {
       try {
         rows = List<Map<String, dynamic>>.from(
           await _supabase
-              .from('event_teacher_assignments')
+          .from('event_teacher_assignments')
               .select('event_id,can_scan,can_manage_assistants')
               .eq('teacher_id', teacherId)
               .limit(50),
@@ -6373,8 +6396,8 @@ class EventService {
           await _supabase
               .from('event_teacher_assignments')
               .select('event_id,can_scan')
-              .eq('teacher_id', teacherId)
-              .eq('can_scan', true)
+          .eq('teacher_id', teacherId)
+          .eq('can_scan', true)
               .limit(50),
         );
       }
@@ -6829,19 +6852,19 @@ class EventService {
           return {
             'ok': true,
             'assistant': result['assistant'] ?? {
-              'event_id': eventId,
+      'event_id': eventId,
               'student_id': resolvedStudentId,
-              'allow_scan': allowScan,
-              'assigned_by_teacher_id': teacherId,
+      'allow_scan': allowScan,
+      'assigned_by_teacher_id': teacherId,
             },
           };
         }
-        return {
+      return {
           'ok': false,
           'error': result['error']?.toString() ??
               'Failed to assign assistant. Please try again.',
-        };
-      } catch (e) {
+      };
+    } catch (e) {
         return {
           'ok': false,
           'error': 'Failed to assign assistant. Please try again.',
@@ -6898,9 +6921,9 @@ class EventService {
       try {
         existing = List<Map<String, dynamic>>.from(
           await _supabase
-              .from('event_assistants')
-              .select('id, event_id, student_id, allow_scan, assigned_by_teacher_id')
-              .eq('event_id', eventId)
+            .from('event_assistants')
+            .select('id, event_id, student_id, allow_scan, assigned_by_teacher_id')
+            .eq('event_id', eventId)
               .eq('student_id', resolvedStudentId)
               .limit(1),
         );
@@ -6918,7 +6941,7 @@ class EventService {
         );
       }
 
-      if (existing.isNotEmpty) {
+        if (existing.isNotEmpty) {
         try {
           await _supabase
               .from('event_assistants')
@@ -6949,18 +6972,18 @@ class EventService {
           teacherId: teacherId,
           allowScan: allowScan,
         );
-        final item = Map<String, dynamic>.from(existing.first);
-        item['allow_scan'] = allowScan;
-        item['assigned_by_teacher_id'] = teacherId;
-        return {'ok': true, 'assistant': item};
-      }
+          final item = Map<String, dynamic>.from(existing.first);
+          item['allow_scan'] = allowScan;
+          item['assigned_by_teacher_id'] = teacherId;
+          return {'ok': true, 'assistant': item};
+        }
 
       List<Map<String, dynamic>> inserted;
       try {
         inserted = List<Map<String, dynamic>>.from(
           await _supabase
-              .from('event_assistants')
-              .insert(payload)
+            .from('event_assistants')
+            .insert(payload)
               .select('id, event_id, student_id, allow_scan, assigned_by_teacher_id'),
         );
       } catch (insertErr) {
@@ -6985,18 +7008,18 @@ class EventService {
         teacherId: teacherId,
         allowScan: allowScan,
       );
-      return {
-        'ok': true,
+        return {
+          'ok': true,
         'assistant': inserted.isNotEmpty ? inserted.first : legacyPayload,
-      };
+        };
     } catch (e) {
       if (_isMissingAssistantsTableError(e)) {
-        return {
-          'ok': false,
-          'error':
-              'Assistant feature is not set up yet in your database. Please apply the latest Supabase migration first.',
-        };
-      }
+          return {
+            'ok': false,
+            'error':
+                'Assistant feature is not set up yet in your database. Please apply the latest Supabase migration first.',
+          };
+        }
       if (_isMissingAssistantAssignedByTeacherColumnError(e)) {
         return {
           'ok': false,
@@ -7011,11 +7034,11 @@ class EventService {
               'Assistant assignment is blocked by database access policy. Please contact admin.',
         };
       }
-      return {
-        'ok': false,
-        'error': 'Failed to assign assistant. Please try again.',
-        'debug': e.toString(),
-      };
+        return {
+          'ok': false,
+          'error': 'Failed to assign assistant. Please try again.',
+          'debug': e.toString(),
+        };
     }
   }
 
@@ -7205,8 +7228,8 @@ class EventService {
           .toLowerCase();
       if (scanContext['ok'] != true || contextStatus != 'open') {
         if (!replayRequested) {
-          return {
-            'ok': false,
+        return {
+          'ok': false,
             'error':
                 scanContext['message']?.toString() ??
                 'Scanner is not open for this schedule.',
@@ -7222,8 +7245,8 @@ class EventService {
           scannedAtIso: scannedAtIso ?? '',
         );
         if (replayContext['ok'] != true) {
-          return {
-            'ok': false,
+        return {
+          'ok': false,
             'error':
                 replayContext['message']?.toString() ??
                 'Recorded offline scan is outside the allowed scan window.',
@@ -7242,8 +7265,8 @@ class EventService {
       final eventMap = eventMapRaw is Map<String, dynamic>
           ? eventMapRaw
           : (eventMapRaw is Map
-                ? Map<String, dynamic>.from(eventMapRaw)
-                : <String, dynamic>{});
+              ? Map<String, dynamic>.from(eventMapRaw)
+              : <String, dynamic>{});
       final activeEventId = eventMap['id']?.toString() ?? '';
       if (activeEventId.isEmpty) {
         return {
@@ -7333,7 +7356,7 @@ class EventService {
           .from('attendance')
           .select('id,status,check_in_at')
           .eq('ticket_id', ticketId)
-          .limit(1);
+            .limit(1);
       if (attendanceRows.isEmpty) {
         return {
           'ok': false,
@@ -7345,8 +7368,8 @@ class EventService {
       final attendance = Map<String, dynamic>.from(attendanceRows.first);
       final alreadyCheckedIn = _attendanceHasValidTimeIn(attendance);
       if (_isCheckOutScanMode(contextMap) && !alreadyCheckedIn) {
-        return {
-          'ok': false,
+          return {
+            'ok': false,
           'error':
               'Cannot time out — this student has no time-in (marked absent).',
           'status': 'absent_no_time_in',
@@ -7470,9 +7493,9 @@ class EventService {
       return {
         'ok': false,
         'error': 'Invalid QR Code Format',
-        'status': 'invalid',
-      };
-    }
+            'status': 'invalid',
+          };
+        }
 
     if (MobileBackendService.isConfigured) {
       try {
@@ -7608,8 +7631,8 @@ class EventService {
         final session = sessionRaw is Map<String, dynamic>
             ? sessionRaw
             : (sessionRaw is Map
-                  ? Map<String, dynamic>.from(sessionRaw)
-                  : <String, dynamic>{});
+                ? Map<String, dynamic>.from(sessionRaw)
+                : <String, dynamic>{});
         final sessionId = session['id']?.toString() ?? '';
         if (sessionId.isEmpty) {
           return {
@@ -8131,7 +8154,7 @@ class EventService {
   Future<Map<String, dynamic>> submitEvaluation({
     required String eventId,
     required String studentId,
-    required List<Map<String, dynamic>> answers,
+    required List<Map<String, dynamic>> answers, 
   }) async {
     try {
       final nowIso = DateTime.now().toIso8601String();
@@ -8165,7 +8188,7 @@ class EventService {
       }
 
       if (MobileBackendService.isConfigured) {
-        if (eventPayloads.isNotEmpty) {
+      if (eventPayloads.isNotEmpty) {
           final res = await _mobileBackend.secureWrite('evaluation_upsert', {
             'table': 'evaluation_answers',
             'rows': eventPayloads,
@@ -8176,8 +8199,8 @@ class EventService {
               'error': res['error']?.toString() ?? 'Evaluation submission failed.',
             };
           }
-        }
-        if (sessionPayloads.isNotEmpty) {
+      }
+      if (sessionPayloads.isNotEmpty) {
           final res = await _mobileBackend.secureWrite('evaluation_upsert', {
             'table': 'event_session_evaluation_answers',
             'rows': sessionPayloads,
@@ -8751,7 +8774,7 @@ class EventService {
 
         List<Map<String, dynamic>> sessions = const [];
         if (_eventUsesSessions(event)) {
-          sessions = await _fetchSessionsForEvent(eventId);
+          sessions = await getEventSessions(eventId);
         }
 
         final bundle = await getEvaluationBundle(
@@ -8771,7 +8794,7 @@ class EventService {
           ...event,
           if (sessions.isNotEmpty) 'sessions': sessions,
           if (effectiveEnd != null)
-            'effective_end_at': effectiveEnd.toIso8601String(),
+          'effective_end_at': effectiveEnd.toIso8601String(),
           'evaluation_bundle': bundle,
           'evaluation_complete': bundle['is_complete'] == true,
         };
@@ -8830,8 +8853,8 @@ class EventService {
         return [];
       }
     } else {
-      try {
-        final rows = await _supabase
+    try {
+      final rows = await _supabase
             .from('event_registrations')
             .select('id,event_id,registered_at')
             .eq('student_id', sid)
@@ -8916,10 +8939,10 @@ class EventService {
       } else {
         rows = List<Map<String, dynamic>>.from(
           await _supabase
-              .from('attendance_absence_reasons')
-              .select(
-                'id,event_id,session_id,reason_text,review_status,admin_note,submitted_at,reviewed_at',
-              )
+          .from('attendance_absence_reasons')
+          .select(
+            'id,event_id,session_id,reason_text,review_status,admin_note,submitted_at,reviewed_at',
+          )
               .eq('student_id', sid)
               .order('submitted_at', ascending: false),
         );
@@ -8989,7 +9012,7 @@ class EventService {
             ticketByRegistrationId.putIfAbsent(rid, () => tid);
           }
         }
-      } catch (_) {
+    } catch (_) {
         // Leave map empty — scopes still work without ticket_id fallbacks.
       }
     }
@@ -9011,9 +9034,9 @@ class EventService {
 
       var sessions = <Map<String, dynamic>>[];
       if (_eventUsesSessions(event)) {
-        sessions = await _fetchSessionsForEvent(eventId);
+        sessions = await getEventSessions(eventId);
       } else {
-        final discovered = await _fetchSessionsForEvent(eventId);
+        final discovered = await getEventSessions(eventId);
         if (discovered.isNotEmpty) {
           sessions = discovered;
         }
@@ -9073,7 +9096,7 @@ class EventService {
             try {
               attendanceRows = List<Map<String, dynamic>>.from(
                 await _supabase
-                    .from('event_session_attendance')
+              .from('event_session_attendance')
                     .select(sessionSelect)
                     .eq('registration_id', registrationId),
               );
@@ -9103,20 +9126,20 @@ class EventService {
             }
 
             for (final row in mergedRows) {
-              final sid = row['session_id']?.toString() ?? '';
-              if (sid.isEmpty) continue;
-              if (_attendanceRecordCountsAsPresent(row)) {
-                presentBySession[sid] = true;
+            final sid = row['session_id']?.toString() ?? '';
+            if (sid.isEmpty) continue;
+            if (_attendanceRecordCountsAsPresent(row)) {
+              presentBySession[sid] = true;
               } else if ((row['status']?.toString().toLowerCase() ?? '') ==
                   'absent') {
                 absentBySession[sid] = true;
-              }
+            }
               if (_attendanceHasCheckOut(row)) {
                 checkedOutBySession[sid] = true;
-              }
+          }
             }
             attendanceStateResolved = true;
-          } catch (_) {
+        } catch (_) {
             // Continue to fallback storage if available.
           }
         }
@@ -9208,8 +9231,8 @@ class EventService {
         }
 
         if (sessionMeta.isEmpty) {
-          continue;
-        }
+            continue;
+          }
 
         // Absence lock: after all seminar time-in windows close.
         // Timeout lock: only after ALL seminars (incl. time-out windows) are done.
@@ -9286,11 +9309,11 @@ class EventService {
           for (final meta in missedTimeInSessions) {
             final sessionId = meta['session_id']?.toString() ?? '';
             if (sessionId.isEmpty) continue;
-            final scopeKey = _absenceScopeKey(eventId, sessionId: sessionId);
-            if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
-              continue;
-            }
-            seenKeys.add(scopeKey);
+          final scopeKey = _absenceScopeKey(eventId, sessionId: sessionId);
+          if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
+            continue;
+          }
+          seenKeys.add(scopeKey);
             final session = Map<String, dynamic>.from(
               meta['session'] as Map<String, dynamic>,
             );
@@ -9298,25 +9321,25 @@ class EventService {
             final closesAt = meta['closes_at'] as DateTime;
             final windowMinutes = meta['window_minutes'] as int;
             final sessionTitle = _sessionDisplayName(session);
-            pending.add({
-              'scope_key': scopeKey,
-              'scope_type': 'session',
+          pending.add({
+            'scope_key': scopeKey,
+            'scope_type': 'session',
               'lock_reason': 'absent',
               'lock_message':
                   'You did not time in for $sessionTitle. Submit your reason to continue.',
-              'event_id': eventId,
-              'event_title': eventTitle,
-              'event_location': eventLocation,
-              'event_start_at': event['start_at'],
-              'event_end_at': event['end_at'],
-              'session_id': sessionId,
+            'event_id': eventId,
+            'event_title': eventTitle,
+            'event_location': eventLocation,
+            'event_start_at': event['start_at'],
+            'event_end_at': event['end_at'],
+            'session_id': sessionId,
               'session_title': sessionTitle,
-              'session_start_at': session['start_at'],
-              'session_end_at': session['end_at'],
-              'window_minutes': windowMinutes,
-              'window_opens_at': startAt.toIso8601String(),
-              'window_closes_at': closesAt.toIso8601String(),
-            });
+            'session_start_at': session['start_at'],
+            'session_end_at': session['end_at'],
+            'window_minutes': windowMinutes,
+            'window_opens_at': startAt.toIso8601String(),
+            'window_closes_at': closesAt.toIso8601String(),
+          });
           }
         }
 
@@ -9407,7 +9430,7 @@ class EventService {
           }
           attendanceStateResolved = true;
           checkOutStateResolved = true;
-        } catch (_) {
+      } catch (_) {
           try {
             final attendanceRows = await _supabase
                 .from('attendance')
@@ -9437,30 +9460,30 @@ class EventService {
         // once the grace window is closed and there is no present record,
         // treat the registration as missed/absent even if the explicit absent
         // row has not been materialized yet.
-        final scopeKey = _absenceScopeKey(eventId);
-        if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
-          continue;
-        }
-        seenKeys.add(scopeKey);
+      final scopeKey = _absenceScopeKey(eventId);
+      if (reasonMap.containsKey(scopeKey) || seenKeys.contains(scopeKey)) {
+        continue;
+      }
+      seenKeys.add(scopeKey);
 
-        pending.add({
-          'scope_key': scopeKey,
-          'scope_type': 'event',
+      pending.add({
+        'scope_key': scopeKey,
+        'scope_type': 'event',
           'lock_reason': 'absent',
           'lock_message':
               'You did not time in for this event. Submit your reason to continue.',
-          'event_id': eventId,
-          'event_title': eventTitle,
-          'event_location': eventLocation,
-          'event_start_at': event['start_at'],
-          'event_end_at': event['end_at'],
-          'session_id': null,
-          'session_title': null,
-          'session_start_at': null,
-          'session_end_at': null,
-          'window_minutes': 30,
-          'window_opens_at': eventStartAt.toIso8601String(),
-          'window_closes_at': closesAt.toIso8601String(),
+        'event_id': eventId,
+        'event_title': eventTitle,
+        'event_location': eventLocation,
+        'event_start_at': event['start_at'],
+        'event_end_at': event['end_at'],
+        'session_id': null,
+        'session_title': null,
+        'session_start_at': null,
+        'session_end_at': null,
+        'window_minutes': 30,
+        'window_opens_at': eventStartAt.toIso8601String(),
+        'window_closes_at': closesAt.toIso8601String(),
         });
         continue;
       }
@@ -9553,10 +9576,10 @@ class EventService {
       } else {
         existingRows = List<Map<String, dynamic>>.from(
           await _supabase
-              .from('attendance_absence_reasons')
-              .select('id,session_id')
-              .eq('student_id', studentId)
-              .eq('event_id', eventId)
+          .from('attendance_absence_reasons')
+          .select('id,session_id')
+          .eq('student_id', studentId)
+          .eq('event_id', eventId)
               .limit(100),
         );
       }
@@ -9596,7 +9619,7 @@ class EventService {
                 'Failed to submit your reason. Please try again.',
           };
         }
-        return {'ok': true};
+      return {'ok': true};
       }
 
       // Anon writes revoked (051) — require BFF.
@@ -9661,7 +9684,7 @@ class EventService {
         },
       });
       if (res['ok'] == true) {
-        return {'ok': true, 'message': 'Check-out recorded!'};
+      return {'ok': true, 'message': 'Check-out recorded!'};
       }
       return {
         'ok': false,

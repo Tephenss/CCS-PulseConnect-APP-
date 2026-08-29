@@ -540,8 +540,14 @@ class MobileBackendService {
     String? deviceKey,
     String? platform,
     String? deviceLabel,
+    String purpose = 'login',
   }) {
-    final body = <String, dynamic>{'code': code.trim()};
+    final resolvedPurpose =
+        purpose.trim().isEmpty ? 'login' : purpose.trim().toLowerCase();
+    final body = <String, dynamic>{
+      'code': code.trim(),
+      'purpose': resolvedPurpose,
+    };
     final id = (userId ?? '').trim();
     if (id.isNotEmpty) body['user_id'] = id;
     final key = (deviceKey ?? '').trim();
@@ -550,7 +556,12 @@ class MobileBackendService {
     if (plat.isNotEmpty) body['platform'] = plat;
     final label = (deviceLabel ?? '').trim();
     if (label.isNotEmpty) body['device_label'] = label;
-    return post('/api/mobile_email_verification_verify.php', body);
+    return post(
+      '/api/mobile_email_verification_verify.php',
+      body,
+      // Signup has no session for the new account; don't send a stale one.
+      withSession: resolvedPurpose != 'signup',
+    );
   }
 
   Future<Map<String, dynamic>> trustDevice({
@@ -690,6 +701,20 @@ class MobileBackendService {
       'action': 'status',
       if (sessionId != null && sessionId.trim().isNotEmpty)
         'session_id': sessionId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> getEventsEarlyOutBatch({
+    required List<String> eventIds,
+  }) {
+    final ids = eventIds
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .take(40)
+        .toList();
+    return post('/api/mobile_events_early_out_batch.php', {
+      'event_ids': ids,
     });
   }
 
@@ -1027,15 +1052,21 @@ class MobileBackendService {
     required String userId,
     required String email,
     required String fullName,
+    String purpose = 'login',
   }) {
+    final resolvedPurpose =
+        purpose.trim().isEmpty ? 'login' : purpose.trim().toLowerCase();
     return post(
       '/api/mobile_email_verification_send.php',
       {
         'user_id': userId,
         'email': email.trim().toLowerCase(),
         'full_name': fullName.trim(),
+        'purpose': resolvedPurpose,
       },
       timeout: _emailTimeout,
+      // Signup must not attach a leftover login session from another user.
+      withSession: resolvedPurpose != 'signup',
     );
   }
 

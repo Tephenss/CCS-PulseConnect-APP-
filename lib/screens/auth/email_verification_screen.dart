@@ -52,6 +52,10 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   Color get _accentColor =>
       _isTeacher ? TeacherThemeUtils.mid : const Color(0xFFBE123C);
 
+  /// Signup OTP and login OTP are separate codes/cooldowns.
+  String get _otpPurpose =>
+      widget.postRegistrationReviewFlow ? 'signup' : 'login';
+
   @override
   void initState() {
     super.initState();
@@ -66,9 +70,13 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   }
 
   Future<void> _initialize() async {
-    // Keep verification as a pre-login step, but keep the login session token
-    // so avatar/FCM/inbox work after OTP (clearing the token caused "Mobile session required").
-    await _authService.clearLocalSessionMarkers(keepMobileSession: true);
+    // Login OTP: keep the opaque session so post-verify APIs still work.
+    // Signup OTP: clear any leftover session from a previous account — otherwise
+    // send/verify attach that session + the new user_id and the BFF rejects with
+    // "user_id does not match mobile session."
+    await _authService.clearLocalSessionMarkers(
+      keepMobileSession: !widget.postRegistrationReviewFlow,
+    );
     if (!mounted) return;
     if (_userId.isEmpty || _email.isEmpty) {
       setState(() => _error = 'Missing account email. Please login again.');
@@ -80,7 +88,10 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
   }
 
   Future<void> _refreshCooldown() async {
-    final remaining = await _service.getRemainingCooldownSeconds(_userId);
+    final remaining = await _service.getRemainingCooldownSeconds(
+      _userId,
+      purpose: _otpPurpose,
+    );
     if (!mounted) return;
     setState(() => _cooldownSeconds = remaining);
     _startCooldownTicker();
@@ -169,6 +180,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
         email: _email,
         fullName: _name.isEmpty ? 'User' : _name,
         forceResend: forceResend,
+        purpose: _otpPurpose,
       );
       if (!mounted) return;
       if (result['ok'] == true) {
@@ -210,6 +222,7 @@ class _EmailVerificationScreenState extends State<EmailVerificationScreen> {
         userId: _userId,
         enteredCode: code,
         persistLocalUser: !widget.postRegistrationReviewFlow,
+        purpose: _otpPurpose,
       );
       if (!mounted) return;
       if (result['ok'] == true) {

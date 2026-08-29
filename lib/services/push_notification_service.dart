@@ -134,6 +134,41 @@ class PushNotificationService {
     return payload.trim().toLowerCase() == 'route:certificates';
   }
 
+  bool _isCertificateData(Map<String, String> data) {
+    final route = (data['route'] ?? '').trim().toLowerCase();
+    final type = (data['type'] ?? '').trim().toLowerCase();
+    return route == 'certificates' ||
+        type == 'certificate_ready' ||
+        type == 'certificate' ||
+        type == 'certificates';
+  }
+
+  Future<void> _navigateWhenReady(
+    Future<void> Function(NavigatorState nav) action, {
+    int maxAttempts = 40,
+  }) async {
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      final nav = PulseConnectApp.navigatorKey.currentState;
+      if (nav != null) {
+        await action(nav);
+        return;
+      }
+      await Future<void>.delayed(
+        Duration(milliseconds: attempt < 6 ? 50 : 100),
+      );
+    }
+    debugPrint('[FCM] Navigator not ready for push navigation.');
+  }
+
+  Future<void> _openCertificatesScreen() async {
+    await EventService.invalidateCertificatesCache();
+    await _navigateWhenReady((nav) async {
+      await nav.push(
+        AppPageRoute(builder: (context) => const StudentCertificates()),
+      );
+    });
+  }
+
   bool _isProposalRequirementsPayload(String payload) {
     return payload.trim().toLowerCase().startsWith(
       'proposal_requirements_requested:',
@@ -147,14 +182,6 @@ class PushNotificationService {
       return '';
     }
     return trimmed.substring(prefix.length).trim();
-  }
-
-  void _openCertificatesScreen() {
-    PulseConnectApp.navigatorKey.currentState?.push(
-      MaterialPageRoute(
-        builder: (context) => const StudentCertificates(),
-      ),
-    );
   }
 
   Future<void> initialize() async {
@@ -178,10 +205,14 @@ class PushNotificationService {
       // 3. Handle notification taps (When app is in background but not terminated)
       FirebaseMessaging.onMessageOpenedApp.listen(_handleNotificationClick);
 
-      // 4. Handle notification taps (When app is completely terminated)
-      RemoteMessage? initialMessage = await _firebaseMessaging.getInitialMessage();
+      // 4. Cold start from notification — stash until navigator + session are ready.
+      final RemoteMessage? initialMessage =
+          await _firebaseMessaging.getInitialMessage();
       if (initialMessage != null) {
-        _handleNotificationClick(initialMessage);
+        final data = _normalizePushData(initialMessage.data);
+        if (data.isNotEmpty) {
+          await _stashPendingTapData(data);
+        }
       }
 
       // 5. Initialize Local Notifications for foreground popups
@@ -256,7 +287,9 @@ class PushNotificationService {
 
         await _cacheRegistrationApprovalIfNeeded(message.data);
         RemoteNotification? notification = message.notification;
-        final payload = route == 'certificates'
+        final payload = route == 'certificates' ||
+                type == 'certificate_ready' ||
+                type == 'certificate'
             ? 'route:certificates'
             : (eventId.isNotEmpty
                   ? (type == 'proposal_requirements_requested'
@@ -492,6 +525,14 @@ class PushNotificationService {
   }
 
   /// After login + OTP, open the notification the user tapped while logged out.
+  Map<String, String> _normalizePushData(Map<String, dynamic> raw) {
+    final data = <String, String>{};
+    raw.forEach((key, value) {
+      data[key.toString()] = value?.toString() ?? '';
+    });
+    return data;
+  }
+
   Future<void> consumePendingTap() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(AuthService.pendingFcmTapKey);
@@ -513,13 +554,16 @@ class PushNotificationService {
     dataRaw.forEach((key, value) {
       data[key.toString()] = value?.toString() ?? '';
     });
-    await _routePushData(data);
+    final navigated = await _routePushData(data);
+    if (!navigated) {
+      await _stashPendingTapData(data);
+    }
   }
 
   Future<void> _handleLocalNotificationPayload(String payload) async {
     final Map<String, String> data;
     if (_isCertificatePayload(payload)) {
-      data = {'route': 'certificates'};
+      data = {'route': 'certificates', 'type': 'certificate_ready'};
     } else if (_isProposalRequirementsPayload(payload)) {
       data = {
         'type': 'proposal_requirements_requested',
@@ -532,26 +576,31 @@ class PushNotificationService {
       await _stashPendingTapData(data);
       return;
     }
-    await _routePushData(data);
+    final navigated = await _routePushData(data);
+    if (!navigated) {
+      await _stashPendingTapData(data);
+    }
   }
 
   /// Navigate to a specific event if the notification contains an event_id.
   /// Teachers are routed to TeacherEventManage, students to StudentEventDetails.
   Future<void> _handleNotificationClick(RemoteMessage message) async {
-    final data = <String, String>{};
-    message.data.forEach((key, value) {
-      data[key] = value.toString();
-    });
+    final data = _normalizePushData(message.data);
+    if (data.isEmpty) return;
     if (await _shouldDeferPushTap()) {
       await _stashPendingTapData(data);
       return;
     }
-    await _routePushData(data);
+    final navigated = await _routePushData(data);
+    if (!navigated) {
+      await _stashPendingTapData(data);
+    }
   }
 
-  Future<void> _routePushData(Map<String, String> data) async {
+  Future<bool> _routePushData(Map<String, String> data) async {
     await _cacheRegistrationApprovalIfNeeded(data);
     final type = (data['type'] ?? '').trim().toLowerCase();
+    final route = (data['route'] ?? '').trim().toLowerCase();
     final tappedEventId = (data['event_id'] ?? '').trim();
     // Tapping a push from tray means the underlying data already changed —
     // refresh in-app state immediately when returning to the app.
@@ -570,66 +619,74 @@ class PushNotificationService {
       );
     }
 
-    final route = (data['route'] ?? '').trim().toLowerCase();
-    if (route == 'certificates') {
-      _openCertificatesScreen();
-      return;
+    if (_isCertificateData(data)) {
+      await _openCertificatesScreen();
+      return true;
     }
 
     final eventId = (data['event_id'] ?? '').trim();
     if (eventId.isNotEmpty) {
       debugPrint('[FCM] Tapped notification for event_id: $eventId');
 
-      try {
-        final user = await _authService.getCurrentUser();
-        final role = (user?['role']?.toString() ?? '').toLowerCase();
+      var navigated = false;
+      await _navigateWhenReady((nav) async {
+        try {
+          final user = await _authService.getCurrentUser();
+          final role = (user?['role']?.toString() ?? '').toLowerCase();
 
-        if (role == 'teacher') {
-          final event = await _eventService.getEventById(eventId);
-          if (event != null) {
-            if (type == 'proposal_requirements_requested') {
-              PulseConnectApp.navigatorKey.currentState?.push(
+          if (role == 'teacher') {
+            final event = await _eventService.getEventById(eventId);
+            if (event != null) {
+              if (type == 'proposal_requirements_requested') {
+                await nav.push(
+                  MaterialPageRoute(
+                    builder: (context) =>
+                        TeacherProposalRequirementsPage(event: event),
+                  ),
+                );
+                navigated = true;
+                return;
+              }
+              await nav.push(
                 MaterialPageRoute(
-                  builder: (context) =>
-                      TeacherProposalRequirementsPage(event: event),
+                  builder: (context) => TeacherEventManage(event: event),
                 ),
               );
+              navigated = true;
               return;
             }
-            PulseConnectApp.navigatorKey.currentState?.push(
-              MaterialPageRoute(
-                builder: (context) => TeacherEventManage(event: event),
-              ),
-            );
-            return;
           }
-        }
 
-        if (role == 'student' &&
-            (type == 'eval_open' || route == 'evaluation')) {
-          final studentId = (user?['id']?.toString() ?? '').trim();
-          if (studentId.isNotEmpty) {
-            PulseConnectApp.navigatorKey.currentState?.push(
-              AppPageRoute(
-                builder: (context) => StudentEventEvaluationScreen(
-                  eventId: eventId,
-                  studentId: studentId,
+          if (role == 'student' &&
+              (type == 'eval_open' || route == 'evaluation')) {
+            final studentId = (user?['id']?.toString() ?? '').trim();
+            if (studentId.isNotEmpty) {
+              await nav.push(
+                AppPageRoute(
+                  builder: (context) => StudentEventEvaluationScreen(
+                    eventId: eventId,
+                    studentId: studentId,
+                  ),
                 ),
-              ),
-            );
-            return;
+              );
+              navigated = true;
+              return;
+            }
           }
+        } catch (e) {
+          debugPrint('[FCM] Notification route fallback: $e');
         }
-      } catch (e) {
-        debugPrint('[FCM] Notification route fallback: $e');
-      }
 
-      PulseConnectApp.navigatorKey.currentState?.push(
-        AppPageRoute(
-          builder: (context) => StudentEventDetails(eventId: eventId),
-        ),
-      );
+        await nav.push(
+          AppPageRoute(
+            builder: (context) => StudentEventDetails(eventId: eventId),
+          ),
+        );
+        navigated = true;
+      });
+      return navigated;
     }
+    return false;
   }
 }
 

@@ -502,8 +502,8 @@ class _TeacherEventManageState extends State<TeacherEventManage>
       setState(() => _isLoadingRoster = true);
     }
 
-    final user = await _authService.getCurrentUser();
-    final teacherId = user?['id']?.toString() ?? '';
+      final user = await _authService.getCurrentUser();
+      final teacherId = user?['id']?.toString() ?? '';
     final cachedData = await _loadCachedEventData(
       eventId: eventId,
       teacherId: teacherId,
@@ -1685,11 +1685,11 @@ class _TeacherEventManageState extends State<TeacherEventManage>
 
                                         final res = await _eventService
                                             .assignEventAssistant(
-                                              eventId: eventId,
-                                              studentId: sid,
-                                              teacherId: _currentTeacherId,
-                                              allowScan: true,
-                                            );
+                                          eventId: eventId,
+                                          studentId: sid,
+                                          teacherId: _currentTeacherId,
+                                          allowScan: true,
+                                        );
 
                                         if (!mounted) return;
                                         setSheetState(
@@ -1853,8 +1853,8 @@ class _TeacherEventManageState extends State<TeacherEventManage>
         .map((row) {
           return row
               .map((cell) {
-                final s = cell.toString().replaceAll('"', '""');
-                return '"$s"';
+        final s = cell.toString().replaceAll('"', '""');
+        return '"$s"';
               })
               .join(',');
         })
@@ -1909,8 +1909,8 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                       isApproved
                           ? 'Event is approved! It will be visible to students once published.'
                           : (isPending
-                                ? 'This event is pending admin approval.'
-                                : 'This event was rejected. Reason: Conflict with schedule.'),
+                              ? 'This event is pending admin approval.'
+                              : 'This event was rejected. Reason: Conflict with schedule.'),
                       style: TextStyle(
                         color: isApproved
                             ? Colors.blue.shade900
@@ -1928,7 +1928,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
           if (!_isApprovalPhase)
             Container(
               decoration: const BoxDecoration(
-                color: Colors.white,
+              color: Colors.white,
                 border: Border(
                   bottom: BorderSide(color: Color(0xFFF3F4F6)),
                 ),
@@ -2082,7 +2082,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                   ),
                 ),
               ),
-            ),
+                  ),
           ),
         ],
       ),
@@ -2285,7 +2285,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
         border: Border.all(color: const Color(0xFFE5E7EB)),
       ),
       child: Row(
-        children: [
+      children: [
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -2294,7 +2294,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                   title,
                   style: const TextStyle(
                     fontSize: 15,
-                    fontWeight: FontWeight.w800,
+            fontWeight: FontWeight.w800,
                     color: Color(0xFF111827),
                   ),
                 ),
@@ -2304,9 +2304,9 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                   style: const TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w600,
-                    color: Color(0xFF6B7280),
-                  ),
-                ),
+            color: Color(0xFF6B7280),
+          ),
+        ),
               ],
             ),
           ),
@@ -2341,7 +2341,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
-      children: [
+            children: [
         if (eventType.isNotEmpty) ...[
           Align(
             alignment: Alignment.centerLeft,
@@ -2351,7 +2351,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 color: _getEventTypeColor(eventType).withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: Row(
+                  child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
@@ -2360,17 +2360,17 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                     color: _getEventTypeColor(eventType),
                   ),
                   const SizedBox(width: 6),
-                  Text(
+                      Text(
                     eventType,
-                    style: TextStyle(
+                        style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w700,
                       color: _getEventTypeColor(eventType),
-                    ),
+                        ),
+                      ),
+                    ],
                   ),
-                ],
-              ),
-            ),
+                ),
           ),
           const SizedBox(height: 16),
         ],
@@ -2412,15 +2412,15 @@ class _TeacherEventManageState extends State<TeacherEventManage>
         ],
         if (isSeminarBased) ...[
           const SizedBox(height: 12),
-          const Text(
+        const Text(
             'Seminar Sessions',
-            style: TextStyle(
+          style: TextStyle(
               fontSize: 16,
-              fontWeight: FontWeight.w800,
+            fontWeight: FontWeight.w800,
               color: Color(0xFF1F2937),
-            ),
           ),
-          const SizedBox(height: 12),
+        ),
+        const SizedBox(height: 12),
           _buildSessionScheduleSection(),
         ],
         if (description.isNotEmpty) ...[
@@ -2440,8 +2440,8 @@ class _TeacherEventManageState extends State<TeacherEventManage>
               fontSize: 14,
               color: Colors.grey.shade700,
               height: 1.6,
-            ),
           ),
+        ),
         ],
         const SizedBox(height: 16),
       ],
@@ -2992,7 +2992,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                   _eventSessions.first['id']?.toString() ?? '',
                 ),
               )
-              .length
+            .length
         : 0;
     final seminarTwoCount = _eventSessions.length > 1
         ? _participants
@@ -3002,7 +3002,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                   _eventSessions[1]['id']?.toString() ?? '',
                 ),
               )
-              .length
+            .length
         : 0;
 
     return Column(
@@ -3026,8 +3026,8 @@ class _TeacherEventManageState extends State<TeacherEventManage>
               if (isSeminarBased) ...[
                 if (_eventSessions.isNotEmpty) ...[
                   const SizedBox(width: 8),
-                  Expanded(
-                    child: _buildStatChip(
+              Expanded(
+                child: _buildStatChip(
                       'Seminar 1',
                       '$seminarOneCount',
                       const Color(0xFF60A5FA),
@@ -3037,11 +3037,11 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 ],
                 if (_eventSessions.length > 1) ...[
                   const SizedBox(width: 8),
-                  Expanded(
-                    child: _buildStatChip(
+              Expanded(
+                child: _buildStatChip(
                       'Seminar 2',
                       '$seminarTwoCount',
-                      const Color(0xFF1D4ED8),
+                  const Color(0xFF1D4ED8),
                       Icons.looks_two_rounded,
                     ),
                   ),
@@ -3327,9 +3327,9 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 backgroundColor: avatarColor,
                 textColor: Colors.white,
                 textStyle: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w800,
-                  fontSize: 16,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
                 ),
               ),
             ),
@@ -3505,11 +3505,11 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                             color: Color(0xFFD97706),
                             fontWeight: FontWeight.w700,
                             fontSize: 10.5,
-                          ),
-                        ),
-                      ],
-                    ),
                   ),
+                ),
+              ],
+                    ),
+            ),
                 ],
               ],
             ),
@@ -3523,10 +3523,10 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
               padding: const EdgeInsets.all(24),
               decoration: BoxDecoration(
                 color: const Color(0xFFF0F9FF),
@@ -3546,7 +3546,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 height: 1.4,
               ),
             ),
-            const SizedBox(height: 8),
+          const SizedBox(height: 8),
             Text(
               'Pull down to refresh',
               style: TextStyle(
@@ -3589,8 +3589,8 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                       isExpired
                           ? 'This event is completed. Assistant management is disabled.'
                           : _canManageAssistants
-                          ? 'These students can scan tickets on your behalf.'
-                          : 'Assistant management is limited to teachers assigned by admin.',
+                              ? 'These students can scan tickets on your behalf.'
+                              : 'Assistant management is limited to teachers assigned by admin.',
                       style: const TextStyle(
                         color: Color(0xFF6B7280),
                         fontSize: 12,
@@ -3641,16 +3641,16 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                       height: MediaQuery.of(context).size.height * 0.5,
                       alignment: Alignment.center,
                       child: _buildEmptyState(
-                        isExpired
+                        isExpired 
                             ? 'No assistants were assigned to this event.'
                             : _canManageAssistants
-                            ? 'No assistants assigned yet.'
-                            : 'Only assigned teachers can manage assistants.',
+                                ? 'No assistants assigned yet.'
+                                : 'Only assigned teachers can manage assistants.',
                         isExpired
                             ? Icons.person_off_rounded
                             : _canManageAssistants
-                            ? Icons.person_off_rounded
-                            : Icons.lock_outline_rounded,
+                                ? Icons.person_off_rounded
+                                : Icons.lock_outline_rounded,
                       ),
                     ),
                   ),
@@ -3665,7 +3665,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                     final assistantName = _getAssistantName(a);
                     final assistantIdNumber = _getAssistantStudentNumber(a);
                     final initials = _getInitials(assistantName);
-
+                    
                     const avatarColors = [
                       TeacherThemeUtils.primary,
                       Color(0xFF1D4ED8),
@@ -3734,7 +3734,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                                     fontWeight: FontWeight.w800,
                                     fontSize: 15,
                                     color: Color(0xFF111827),
-                                  ),
+                                ),
                                 ),
                                 const SizedBox(height: 3),
                                 Text(

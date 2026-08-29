@@ -16,6 +16,7 @@ import '../../services/offline_backup_service.dart';
 import '../../services/offline_sync_service.dart';
 import '../../widgets/notifications_modal.dart';
 import '../../widgets/animated_greeting_text.dart';
+import '../../services/showcase_service.dart';
 import '../../widgets/card_swap_widget.dart';
 import '../../widgets/custom_loader.dart';
 import '../../widgets/pulseconnect_splash_screen.dart';
@@ -48,6 +49,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   /// does not remount and flash the full-screen loader every time.
   bool _scanVisited = false;
   bool _isLoading = true;
+  List<CardSwapItem> _showcaseItems = ShowcaseService.instance.bundledItems();
   bool _usingCachedUpcomingEvents = false;
   int _unreadCount = 0;
   bool _isOpeningNotifications = false;
@@ -78,6 +80,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
       unawaited(_refreshTeacherHomeLive(reason));
     });
     _loadData();
+    _loadShowcaseSlides();
     _subscribeToNotifications();
   }
 
@@ -254,6 +257,23 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     return filtered;
   }
 
+  Future<void> _loadShowcaseSlides({bool forceFresh = false}) async {
+    final items = await ShowcaseService.instance.getItems(
+      forceFresh: forceFresh,
+      onUpdated: (fresh) {
+        if (!mounted) return;
+        setState(() => _showcaseItems = fresh.isNotEmpty ? fresh : ShowcaseService.instance.bundledItems());
+        if (fresh.isEmpty) return;
+        unawaited(ShowcaseService.instance.prefetchImages(context, fresh));
+      },
+    );
+    if (!mounted) return;
+    setState(() => _showcaseItems = items.isNotEmpty ? items : ShowcaseService.instance.bundledItems());
+    if (items.isEmpty) return;
+    if (!mounted) return;
+    unawaited(ShowcaseService.instance.prefetchImages(context, items));
+  }
+
   Future<void> _loadData({bool forceFresh = false}) async {
     final user = await _authService.getCurrentUser();
     unawaited(_primeOfflineReadiness(user));
@@ -427,7 +447,8 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
         body: Stack(
           children: [
             _isLoading
-                ? const PulseConnectSplashScreen(
+                ? PulseConnectSplashScreen.aligned(
+                    role: 'teacher',
                     statusMessage: 'Loading faculty dashboard & events...',
                   )
                 : IndexedStack(
@@ -879,26 +900,9 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
             ),
           ),
           const SizedBox(height: 32),
-          // Card swap widget - Max ZOOM version
           CardSwapWidget(
-            items: const [
-              CardSwapItem(
-                imagePath: 'assets/sample summit/image1.jpg',
-                label: 'CCS SUMMIT',
-              ),
-              CardSwapItem(
-                imagePath: 'assets/sample GA/image1.jpg',
-                label: 'GENERAL ASSEMBLY',
-              ),
-              CardSwapItem(
-                imagePath: 'assets/sample exhibit/image1.jpg',
-                label: 'CCS EXHIBIT',
-              ),
-              CardSwapItem(
-                imagePath: 'assets/sample CV/image1.jpg',
-                label: 'COMPANY VISIT',
-              ),
-            ],
+            key: ValueKey(ShowcaseService.instance.itemsKey(_showcaseItems)),
+            items: _showcaseItems,
             cardWidth: 250,
             cardHeight: 140,
             cardDistance: 20,

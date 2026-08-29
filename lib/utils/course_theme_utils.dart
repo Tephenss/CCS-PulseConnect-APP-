@@ -3,8 +3,19 @@ import 'package:flutter/material.dart';
 class CourseThemeUtils {
   static String normalizeCourse(dynamic rawCourse) {
     final value = rawCourse?.toString().trim().toUpperCase() ?? '';
-    if (value == 'BSCS') return 'CS';
-    if (value == 'BSIT') return 'IT';
+    if (value.isEmpty) return '';
+    if (value == 'CS' ||
+        value == 'BSCS' ||
+        value.contains('COMPUTER SCIENCE') ||
+        value.startsWith('BSCS')) {
+      return 'CS';
+    }
+    if (value == 'IT' ||
+        value == 'BSIT' ||
+        value.contains('INFORMATION TECHNOLOGY') ||
+        value.startsWith('BSIT')) {
+      return 'IT';
+    }
     return value;
   }
 

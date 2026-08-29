@@ -3,21 +3,180 @@ import 'package:flutter/material.dart';
 import 'custom_loader.dart';
 import 'shiny_text.dart';
 import '../services/device_performance_service.dart';
+import '../utils/course_theme_utils.dart';
+import '../utils/teacher_theme_utils.dart';
+
+/// Visual family for the branded loading splash.
+enum PulseConnectSplashVariant {
+  /// BSIT / default CCS maroon.
+  maroon,
+
+  /// BSCS / CS emerald theme.
+  cs,
+
+  /// Faculty / teacher sky-blue theme.
+  teacher,
+}
 
 class PulseConnectSplashScreen extends StatefulWidget {
   final String? statusMessage;
   final VoidCallback? onFinished;
   final Duration? minimumDuration;
+  final PulseConnectSplashVariant variant;
 
   const PulseConnectSplashScreen({
     super.key,
     this.statusMessage,
     this.onFinished,
     this.minimumDuration,
+    this.variant = PulseConnectSplashVariant.maroon,
   });
 
+  /// Picks maroon for BSIT/unknown and emerald for BSCS/CS.
+  factory PulseConnectSplashScreen.forStudentCourse({
+    Key? key,
+    dynamic course,
+    String? statusMessage,
+    VoidCallback? onFinished,
+    Duration? minimumDuration,
+  }) {
+    final isCs = CourseThemeUtils.isComputerScienceCourse(course);
+    return PulseConnectSplashScreen(
+      key: key,
+      statusMessage: statusMessage,
+      onFinished: onFinished,
+      minimumDuration: minimumDuration,
+      variant: isCs
+          ? PulseConnectSplashVariant.cs
+          : PulseConnectSplashVariant.maroon,
+    );
+  }
+
+  /// Aligns splash with role theme: teacher → blue, BSCS → green, else maroon.
+  factory PulseConnectSplashScreen.aligned({
+    Key? key,
+    required String role,
+    dynamic course,
+    String? statusMessage,
+    VoidCallback? onFinished,
+    Duration? minimumDuration,
+  }) {
+    if (role.trim().toLowerCase() == 'teacher') {
+      return PulseConnectSplashScreen(
+        key: key,
+        statusMessage: statusMessage,
+        onFinished: onFinished,
+        minimumDuration: minimumDuration,
+        variant: PulseConnectSplashVariant.teacher,
+      );
+    }
+    return PulseConnectSplashScreen.forStudentCourse(
+      key: key,
+      course: course,
+      statusMessage: statusMessage,
+      onFinished: onFinished,
+      minimumDuration: minimumDuration,
+    );
+  }
+
+  /// Uses the active MaterialApp theme primary (set by role/course).
+  factory PulseConnectSplashScreen.fromTheme(
+    BuildContext context, {
+    Key? key,
+    String? statusMessage,
+    VoidCallback? onFinished,
+    Duration? minimumDuration,
+  }) {
+    final primary = Theme.of(context).colorScheme.primary;
+    late final PulseConnectSplashVariant variant;
+    if (primary.toARGB32() == TeacherThemeUtils.primary.toARGB32()) {
+      variant = PulseConnectSplashVariant.teacher;
+    } else if (CourseThemeUtils.isGreenStudentPrimary(primary)) {
+      variant = PulseConnectSplashVariant.cs;
+    } else {
+      variant = PulseConnectSplashVariant.maroon;
+    }
+    return PulseConnectSplashScreen(
+      key: key,
+      statusMessage: statusMessage,
+      onFinished: onFinished,
+      minimumDuration: minimumDuration,
+      variant: variant,
+    );
+  }
+
   @override
-  State<PulseConnectSplashScreen> createState() => _PulseConnectSplashScreenState();
+  State<PulseConnectSplashScreen> createState() =>
+      _PulseConnectSplashScreenState();
+}
+
+class _SplashPalette {
+  final Color scaffold;
+  final List<Color> backgroundGradient;
+  final Color ambientTop;
+  final Color ambientBottom;
+  final Color ringBorder;
+  final Color logoGlowInner;
+
+  /// Brand chrome — match GitHub splash on every role.
+  /// PulseCONNECT uses ShinyText defaults (soft gray + white shine), not solid white/cream.
+  /// Tagline + equalizer loader stay gold (#D4A843).
+  static const Color brandAccent = Color(0xFFD4A843);
+  static const Color brandLoader = Color(0xFFD4A843);
+
+  const _SplashPalette({
+    required this.scaffold,
+    required this.backgroundGradient,
+    required this.ambientTop,
+    required this.ambientBottom,
+    required this.ringBorder,
+    required this.logoGlowInner,
+  });
+
+  static _SplashPalette forVariant(PulseConnectSplashVariant variant) {
+    switch (variant) {
+      case PulseConnectSplashVariant.cs:
+        return const _SplashPalette(
+          scaffold: Color(0xFF021A14),
+          backgroundGradient: [
+            Color(0xFF065F46),
+            Color(0xFF047857),
+            Color(0xFF03281F),
+            Color(0xFF011510),
+          ],
+          ambientTop: Color(0xFF10B981),
+          ambientBottom: Color(0xFF059669),
+          ringBorder: Color(0xFF34D399),
+          logoGlowInner: Color(0xFF6EE7B7),
+        );
+      case PulseConnectSplashVariant.teacher:
+        return const _SplashPalette(
+          scaffold: Color(0xFF020B14),
+          backgroundGradient: [
+            Color(0xFF0C4A6E),
+            Color(0xFF082F49),
+            Color(0xFF041624),
+          ],
+          ambientTop: Color(0xFF0369A1),
+          ambientBottom: Color(0xFFD4A843),
+          ringBorder: Color(0xFFD4A843),
+          logoGlowInner: Color(0xFFD4A843),
+        );
+      case PulseConnectSplashVariant.maroon:
+        return const _SplashPalette(
+          scaffold: Color(0xFF0F0505),
+          backgroundGradient: [
+            Color(0xFF220808),
+            Color(0xFF140505),
+            Color(0xFF090202),
+          ],
+          ambientTop: Color(0xFF7F1D1D),
+          ambientBottom: Color(0xFFD4A843),
+          ringBorder: Color(0xFFD4A843),
+          logoGlowInner: Color(0xFFD4A843),
+        );
+    }
+  }
 }
 
 class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
@@ -48,7 +207,6 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
 
     final enableMotion = DevicePerformance.instance.enableDecorativeMotion;
 
-    // 1. Logo Entrance Animation (Scale + Fade in with elastic feel)
     _logoEntranceController = AnimationController(
       vsync: this,
       duration: Duration(milliseconds: enableMotion ? 800 : 300),
@@ -64,7 +222,6 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
       curve: const Interval(0.0, 0.5, curve: Curves.easeIn),
     );
 
-    // 2. Continuous Glowing Aura Pulse behind logo
     _glowPulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
@@ -81,7 +238,6 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
       CurvedAnimation(parent: _glowPulseController, curve: Curves.easeInOut),
     );
 
-    // 3. Shimmer gradient flow
     _shimmerController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2500),
@@ -92,7 +248,6 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
 
     _logoEntranceController.forward();
 
-    // Cycle messages periodically if custom statusMessage is not locked
     _messageTimer = Timer.periodic(const Duration(milliseconds: 1800), (_) {
       if (mounted && widget.statusMessage == null) {
         setState(() {
@@ -122,29 +277,24 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
   @override
   Widget build(BuildContext context) {
     final displayMsg = widget.statusMessage ?? _defaultMessages[_messageIndex];
+    final palette = _SplashPalette.forVariant(widget.variant);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0505),
+      backgroundColor: palette.scaffold,
       body: Stack(
         children: [
-          // Background Gradient with ambient glows
           Positioned.fill(
             child: Container(
-              decoration: const BoxDecoration(
+              decoration: BoxDecoration(
                 gradient: LinearGradient(
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
-                  colors: [
-                    Color(0xFF220808),
-                    Color(0xFF140505),
-                    Color(0xFF090202),
-                  ],
+                  colors: palette.backgroundGradient,
                 ),
               ),
             ),
           ),
 
-          // Top Right Ambient Crimson Glow
           Positioned(
             top: -80,
             right: -80,
@@ -156,14 +306,15 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
                   height: 260 * _glowScaleAnimation.value,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: const Color(0xFF7F1D1D).withValues(alpha: 0.25 * _glowOpacityAnimation.value),
+                    color: palette.ambientTop.withValues(
+                      alpha: 0.28 * _glowOpacityAnimation.value,
+                    ),
                   ),
                 );
               },
             ),
           ),
 
-          // Bottom Left Ambient Gold Glow
           Positioned(
             bottom: -100,
             left: -100,
@@ -175,21 +326,21 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
                   height: 300 * _glowScaleAnimation.value,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: const Color(0xFFD4A843).withValues(alpha: 0.15 * _glowOpacityAnimation.value),
+                    color: palette.ambientBottom.withValues(
+                      alpha: 0.22 * _glowOpacityAnimation.value,
+                    ),
                   ),
                 );
               },
             ),
           ),
 
-          // Center Splash Content
           Center(
             child: SingleChildScrollView(
               padding: const EdgeInsets.symmetric(horizontal: 32),
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  // Logo with Pulsing Aura Ring
                   AnimatedBuilder(
                     animation: Listenable.merge([
                       _logoEntranceController,
@@ -203,7 +354,6 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
                           child: Stack(
                             alignment: Alignment.center,
                             children: [
-                              // Outer Glowing Ring
                               Transform.scale(
                                 scale: _glowScaleAnimation.value,
                                 child: Container(
@@ -213,11 +363,13 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
                                     shape: BoxShape.circle,
                                     gradient: RadialGradient(
                                       colors: [
-                                        const Color(0xFFD4A843).withValues(
-                                          alpha: 0.45 * _glowOpacityAnimation.value,
+                                        palette.logoGlowInner.withValues(
+                                          alpha:
+                                              0.45 * _glowOpacityAnimation.value,
                                         ),
-                                        const Color(0xFF7F1D1D).withValues(
-                                          alpha: 0.25 * _glowOpacityAnimation.value,
+                                        palette.ambientTop.withValues(
+                                          alpha:
+                                              0.25 * _glowOpacityAnimation.value,
                                         ),
                                         Colors.transparent,
                                       ],
@@ -226,8 +378,6 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
                                   ),
                                 ),
                               ),
-
-                              // Inner Glass Backdrop for Logo
                               Container(
                                 width: 110,
                                 height: 110,
@@ -235,16 +385,23 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
                                   shape: BoxShape.circle,
                                   color: Colors.white.withValues(alpha: 0.08),
                                   border: Border.all(
-                                    color: const Color(0xFFD4A843).withValues(alpha: 0.4),
+                                    color: palette.ringBorder.withValues(
+                                      alpha: 0.4,
+                                    ),
                                     width: 2,
                                   ),
                                   boxShadow: [
                                     BoxShadow(
-                                      color: const Color(0xFF7F1D1D).withValues(
-                                        alpha: DevicePerformance.instance.shadowOpacity(0.5),
+                                      color: palette.ambientTop.withValues(
+                                        alpha: DevicePerformance.instance
+                                            .shadowOpacity(0.5),
                                       ),
-                                      blurRadius: DevicePerformance.instance.shadowBlur(24),
-                                      spreadRadius: DevicePerformance.instance.enableHeavyShadows ? 2 : 0,
+                                      blurRadius: DevicePerformance.instance
+                                          .shadowBlur(24),
+                                      spreadRadius: DevicePerformance
+                                              .instance.enableHeavyShadows
+                                          ? 2
+                                          : 0,
                                     ),
                                   ],
                                 ),
@@ -273,7 +430,7 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
 
                   const SizedBox(height: 32),
 
-                  // Animated Shiny Brand Title
+                  // Same as GitHub: ShinyText defaults (soft gray + white shine).
                   const ShinyText(
                     text: 'PulseCONNECT',
                     fontSize: 28,
@@ -283,20 +440,21 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
 
                   const SizedBox(height: 6),
 
-                  // Subtitle Badge
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Container(
                         height: 1,
                         width: 24,
-                        color: const Color(0xFFD4A843).withValues(alpha: 0.5),
+                        color: _SplashPalette.brandAccent.withValues(alpha: 0.5),
                       ),
                       const SizedBox(width: 8),
                       Text(
                         'CCS EVENT SYSTEM',
                         style: TextStyle(
-                          color: const Color(0xFFD4A843).withValues(alpha: 0.9),
+                          color: _SplashPalette.brandAccent.withValues(
+                            alpha: 0.9,
+                          ),
                           fontSize: 11,
                           fontWeight: FontWeight.w800,
                           letterSpacing: 2.5,
@@ -306,23 +464,21 @@ class _PulseConnectSplashScreenState extends State<PulseConnectSplashScreen>
                       Container(
                         height: 1,
                         width: 24,
-                        color: const Color(0xFFD4A843).withValues(alpha: 0.5),
+                        color: _SplashPalette.brandAccent.withValues(alpha: 0.5),
                       ),
                     ],
                   ),
 
                   const SizedBox(height: 48),
 
-                  // Animated Equalizer Loader with Gold Theme
                   const PulseConnectLoader(
                     size: 22,
                     strokeWidth: 4.5,
-                    color: Color(0xFFD4A843),
+                    color: _SplashPalette.brandLoader,
                   ),
 
                   const SizedBox(height: 20),
 
-                  // Status Message with Smooth Cross-Fade
                   AnimatedSwitcher(
                     duration: const Duration(milliseconds: 400),
                     transitionBuilder: (child, animation) {

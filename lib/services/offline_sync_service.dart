@@ -14,6 +14,12 @@ import 'offline_backup_service.dart';
 import 'offline_scan_store.dart';
 
 class OfflineSyncService {
+  /// Min interval for background snapshot warmups (Home / main ticker).
+  /// On-demand Scan / post-sync callers should pass force: true.
+  static const Duration _backgroundSnapshotMinInterval = Duration(minutes: 2);
+  DateTime? _lastBackgroundSnapshotAt;
+  Future<Map<String, dynamic>>? _inFlightSnapshot;
+
   OfflineSyncService({
     EventService? eventService,
     OfflineScanStore? store,
@@ -872,6 +878,54 @@ class OfflineSyncService {
   }
 
   Future<Map<String, dynamic>> refreshSnapshotForCurrentScanner({
+    required String actorId,
+    required bool isTeacher,
+    bool force = false,
+  }) async {
+    if (!force) {
+      final last = _lastBackgroundSnapshotAt;
+      if (last != null &&
+          DateTime.now().toUtc().difference(last) < _backgroundSnapshotMinInterval) {
+        final cached = await getCachedScannerContext(
+          actorId: actorId.trim(),
+          isTeacher: isTeacher,
+        );
+        if (cached != null) {
+          return {
+            'ok': true,
+            'status': cached['status']?.toString() ?? 'closed',
+            'ticket_count': 0,
+            'roster_ready': true,
+            'coalesced': true,
+          };
+        }
+      }
+      if (_inFlightSnapshot != null) {
+        return _inFlightSnapshot!;
+      }
+    }
+
+    final run = _refreshSnapshotForCurrentScannerBody(
+      actorId: actorId,
+      isTeacher: isTeacher,
+    );
+    if (!force) {
+      _inFlightSnapshot = run;
+    }
+    try {
+      final result = await run;
+      if (!force) {
+        _lastBackgroundSnapshotAt = DateTime.now().toUtc();
+      }
+      return result;
+    } finally {
+      if (!force && identical(_inFlightSnapshot, run)) {
+        _inFlightSnapshot = null;
+      }
+    }
+  }
+
+  Future<Map<String, dynamic>> _refreshSnapshotForCurrentScannerBody({
     required String actorId,
     required bool isTeacher,
   }) async {

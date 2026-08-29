@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../widgets/app_snackbar.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:image_picker/image_picker.dart';
@@ -13,6 +14,7 @@ import '../../services/device_performance_service.dart';
 import '../../widgets/custom_loader.dart';
 import '../../widgets/safe_circle_avatar.dart';
 import '../../widgets/performance_mode_sheet.dart';
+import '../../main.dart';
 import '../welcome_screen.dart';
 import '../auth/change_password_screen.dart';
 import '../../utils/teacher_theme_utils.dart';
@@ -76,15 +78,18 @@ class _TeacherProfileState extends State<TeacherProfile> {
       if (croppedFile == null) return;
 
       setState(() => _isUploading = true);
-      
+
       // Save to local storage for immediate preview
       final directory = await getApplicationDocumentsDirectory();
-      final fileName = 'profile_${DateTime.now().millisecondsSinceEpoch}${path.extension(croppedFile.path)}';
-      final savedImage = await File(croppedFile.path).copy('${directory.path}/$fileName');
+      final fileName =
+          'profile_${DateTime.now().millisecondsSinceEpoch}${path.extension(croppedFile.path)}';
+      final savedImage = await File(
+        croppedFile.path,
+      ).copy('${directory.path}/$fileName');
 
       // Update AuthService (Uploads to Supabase Storage)
       final res = await _authService.uploadAvatar(savedImage);
-      
+
       if (mounted) {
         setState(() {
           _isUploading = false;
@@ -92,11 +97,16 @@ class _TeacherProfileState extends State<TeacherProfile> {
             _user = res['user'];
           }
         });
-        
+
         if (res['ok']) {
           final warning = res['warning']?.toString();
           if (widget.onUpdate != null) widget.onUpdate!();
-          AppSnackBar.info(context, (warning != null && warning.isNotEmpty) ? warning : 'Profile picture cloud-synced!');
+          AppSnackBar.info(
+            context,
+            (warning != null && warning.isNotEmpty)
+                ? warning
+                : 'Profile picture cloud-synced!',
+          );
         } else {
           AppSnackBar.error(context, res['error'] ?? 'Upload failed');
         }
@@ -110,29 +120,57 @@ class _TeacherProfileState extends State<TeacherProfile> {
   }
 
   Future<CroppedFile?> _cropImage(String filePath) async {
-    return await ImageCropper().cropImage(
-      sourcePath: filePath,
-      maxWidth: 384,
-      maxHeight: 384,
-      aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1), // Square for circular avatar
-      compressQuality: 72,
-      uiSettings: [
-        AndroidUiSettings(
-          toolbarTitle: 'Edit Profle Picture',
-          toolbarColor: TeacherThemeUtils.primary,
-          toolbarWidgetColor: Colors.white,
-          initAspectRatio: CropAspectRatioPreset.square,
-          lockAspectRatio: true,
-          hideBottomControls: false,
-        ),
-        IOSUiSettings(
-          title: 'Edit Profile Picture',
-          rotateButtonsHidden: false,
-          rotateClockwiseButtonHidden: false,
-          aspectRatioLockEnabled: true,
-        ),
-      ],
+    const toolbarColor = TeacherThemeUtils.primary;
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: toolbarColor,
+        statusBarIconBrightness: Brightness.light,
+        systemNavigationBarColor: Colors.black,
+        systemNavigationBarIconBrightness: Brightness.light,
+      ),
     );
+    try {
+      return await ImageCropper().cropImage(
+        sourcePath: filePath,
+        maxWidth: 384,
+        maxHeight: 384,
+        aspectRatio: const CropAspectRatio(ratioX: 1, ratioY: 1),
+        compressQuality: 72,
+        uiSettings: [
+          AndroidUiSettings(
+            toolbarTitle: 'Edit Profile Picture',
+            toolbarColor: toolbarColor,
+            toolbarWidgetColor: Colors.white,
+            activeControlsWidgetColor: toolbarColor,
+            cropFrameColor: Colors.white.withValues(alpha: 0.9),
+            showCropGrid: false,
+            dimmedLayerColor: Colors.black.withValues(alpha: 0.85),
+            cropStyle: CropStyle.circle,
+            initAspectRatio: CropAspectRatioPreset.square,
+            lockAspectRatio: true,
+            hideBottomControls: true,
+          ),
+          IOSUiSettings(
+            title: 'Edit Profile Picture',
+            rotateButtonsHidden: false,
+            rotateClockwiseButtonHidden: false,
+            aspectRatioLockEnabled: true,
+            resetAspectRatioEnabled: false,
+            cropStyle: CropStyle.circle,
+          ),
+        ],
+      );
+    } finally {
+      SystemChrome.setSystemUIOverlayStyle(
+        const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness: Brightness.light,
+          systemNavigationBarColor: Colors.white,
+          systemNavigationBarDividerColor: Colors.transparent,
+          systemNavigationBarIconBrightness: Brightness.dark,
+        ),
+      );
+    }
   }
 
   Future<void> _loadUser() async {
@@ -237,10 +275,8 @@ class _TeacherProfileState extends State<TeacherProfile> {
     if (status == null) {
       return 'Open to view scanner cache, queue, and last sync details.';
     }
-    final pending = int.tryParse(
-          status['pending_queue_count']?.toString() ?? '',
-        ) ??
-        0;
+    final pending =
+        int.tryParse(status['pending_queue_count']?.toString() ?? '') ?? 0;
     final refreshError = (status['refresh_error']?.toString() ?? '').trim();
     final lastSynced = _formatOfflineDateTime(
       _parseOfflineDate(status['last_synced_at']?.toString()),
@@ -339,10 +375,7 @@ class _TeacherProfileState extends State<TeacherProfile> {
     );
   }
 
-  Widget _buildOfflineChecklistItem(
-    Map<String, dynamic> item,
-    Color accent,
-  ) {
+  Widget _buildOfflineChecklistItem(Map<String, dynamic> item, Color accent) {
     final label = (item['label']?.toString() ?? '').trim();
     final detail = (item['detail']?.toString() ?? '').trim();
     final state = (item['state']?.toString() ?? 'missing').trim().toLowerCase();
@@ -387,18 +420,20 @@ class _TeacherProfileState extends State<TeacherProfile> {
     );
   }
 
-    Widget _buildOfflineCacheCoverageCard(
+  Widget _buildOfflineCacheCoverageCard(
     Map<String, dynamic>? status,
     Color accent,
   ) {
     final eventTitle = (status?['event_title']?.toString() ?? '').trim();
     final scopeLabel = (status?['cache_scope_label']?.toString() ?? '').trim();
     final participantCount =
-        int.tryParse(status?['cached_participant_count']?.toString() ?? '') ?? 0;
+        int.tryParse(status?['cached_participant_count']?.toString() ?? '') ??
+        0;
     final ticketCount =
         int.tryParse(status?['cached_ticket_count']?.toString() ?? '') ?? 0;
     final localAvatarCount =
-        int.tryParse(status?['cached_local_avatar_count']?.toString() ?? '') ?? 0;
+        int.tryParse(status?['cached_local_avatar_count']?.toString() ?? '') ??
+        0;
     final sessionCount =
         int.tryParse(status?['cached_session_count']?.toString() ?? '') ?? 0;
     final checklist = status?['cache_checklist'] is List
@@ -421,7 +456,8 @@ class _TeacherProfileState extends State<TeacherProfile> {
       '$participantCount participant${participantCount == 1 ? '' : 's'}',
       '$ticketCount ticket${ticketCount == 1 ? '' : 's'}',
       '$localAvatarCount avatar${localAvatarCount == 1 ? '' : 's'}',
-      if (sessionCount > 0) '$sessionCount seminar${sessionCount == 1 ? '' : 's'}',
+      if (sessionCount > 0)
+        '$sessionCount seminar${sessionCount == 1 ? '' : 's'}',
     ];
 
     return Container(
@@ -515,7 +551,8 @@ class _TeacherProfileState extends State<TeacherProfile> {
                 spacing: 8,
                 runSpacing: 8,
                 children: sessions.map((session) {
-                  final title = (session['title']?.toString() ?? 'Seminar').trim();
+                  final title = (session['title']?.toString() ?? 'Seminar')
+                      .trim();
                   return Container(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 10,
@@ -549,13 +586,16 @@ class _TeacherProfileState extends State<TeacherProfile> {
                 ),
               ),
               const SizedBox(height: 10),
-              ...checklist.map((item) => _buildOfflineChecklistItem(item, accent)),
+              ...checklist.map(
+                (item) => _buildOfflineChecklistItem(item, accent),
+              ),
             ],
           ],
         ),
       ),
     );
   }
+
   Future<void> _showOfflineStatusSheet() async {
     if (!mounted) return;
 
@@ -639,13 +679,17 @@ class _TeacherProfileState extends State<TeacherProfile> {
               _parseOfflineDate(status?['last_synced_at']?.toString()),
             );
             final pending =
-                int.tryParse(status?['pending_queue_count']?.toString() ?? '') ??
+                int.tryParse(
+                  status?['pending_queue_count']?.toString() ?? '',
+                ) ??
                 0;
             final refreshError = (status?['refresh_error']?.toString() ?? '')
                 .trim();
             final refreshAttempted = status?['refresh_attempted'] == true;
             final connectionLabel =
-                (status?['connection_label']?.toString() ?? '').trim().isNotEmpty
+                (status?['connection_label']?.toString() ?? '')
+                    .trim()
+                    .isNotEmpty
                 ? status!['connection_label'].toString().trim()
                 : (sheetOffline ? 'Offline' : 'Online');
             final statusLabel = () {
@@ -661,7 +705,8 @@ class _TeacherProfileState extends State<TeacherProfile> {
               }
               return sheetOffline ? 'Offline mode active' : 'Offline ready';
             }();
-            final accent = (status?['has_snapshot'] == true &&
+            final accent =
+                (status?['has_snapshot'] == true &&
                     status?['snapshot_stale'] != true)
                 ? (sheetOffline
                       ? Colors.orange.shade700
@@ -738,10 +783,15 @@ class _TeacherProfileState extends State<TeacherProfile> {
                       if (refreshAttempted)
                         _buildOfflineStatusRow(
                           'Latest refresh',
-                          refreshError.isEmpty ? 'Successful' : 'Needs attention',
+                          refreshError.isEmpty
+                              ? 'Successful'
+                              : 'Needs attention',
                         ),
                       _buildOfflineStatusRow('Last synced', lastSynced),
-                      _buildOfflineStatusRow('Pending offline scans', '$pending'),
+                      _buildOfflineStatusRow(
+                        'Pending offline scans',
+                        '$pending',
+                      ),
                       _buildOfflineStatusRow(
                         'Scanner status',
                         _scannerStatusLabel(
@@ -775,7 +825,10 @@ class _TeacherProfileState extends State<TeacherProfile> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: const Text(
           'Sign Out?',
-          style: TextStyle(fontWeight: FontWeight.w800, color: Color(0xFF111827)),
+          style: TextStyle(
+            fontWeight: FontWeight.w800,
+            color: Color(0xFF111827),
+          ),
         ),
         content: const Text(
           'Are you sure you want to sign out of your account?',
@@ -786,7 +839,10 @@ class _TeacherProfileState extends State<TeacherProfile> {
             onPressed: () => Navigator.pop(context, false),
             child: const Text(
               'Cancel',
-              style: TextStyle(color: Color(0xFF6B7280), fontWeight: FontWeight.w700),
+              style: TextStyle(
+                color: Color(0xFF6B7280),
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
           ElevatedButton(
@@ -794,7 +850,9 @@ class _TeacherProfileState extends State<TeacherProfile> {
             style: ElevatedButton.styleFrom(
               backgroundColor: TeacherThemeUtils.primary,
               foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
             ),
             child: const Text('Sign Out'),
           ),
@@ -813,6 +871,7 @@ class _TeacherProfileState extends State<TeacherProfile> {
     try {
       await _authService.logout();
       if (mounted) {
+        PulseConnectApp.of(context).clearSessionAfterLogout();
         Navigator.pushAndRemoveUntil(
           context,
           MaterialPageRoute(builder: (_) => const WelcomeScreen()),
@@ -835,10 +894,12 @@ class _TeacherProfileState extends State<TeacherProfile> {
     final firstName = _user?['first_name'] as String? ?? 'Teacher';
     final lastName = _user?['last_name'] as String? ?? '';
     final email = _user?['email'] as String? ?? 'No email';
-    final contactNumber = _user?['contact_number'] as String? ?? 'Not specified';
+    final contactNumber =
+        _user?['contact_number'] as String? ?? 'Not specified';
     final birthday = _user?['birthday'] as String? ?? 'Not specified';
     final gradeAdvisorRaw = _user?['grade_advisor'] as String?;
-    final gradeAdvisor = (gradeAdvisorRaw == null || gradeAdvisorRaw.trim().isEmpty)
+    final gradeAdvisor =
+        (gradeAdvisorRaw == null || gradeAdvisorRaw.trim().isEmpty)
         ? 'Not Assigned'
         : gradeAdvisorRaw;
 
@@ -852,241 +913,329 @@ class _TeacherProfileState extends State<TeacherProfile> {
             child: SingleChildScrollView(
               physics: const AlwaysScrollableScrollPhysics(),
               child: Column(
-              children: [
-            // Curved Header with Profile Info
-            Stack(
-              clipBehavior: Clip.none,
-              children: [
-                // Teacher Green Curved Background
-                Container(
-                  height: 220,
-                  width: double.infinity,
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: TeacherThemeUtils.chromeGradient,
-                    ),
-                    borderRadius: BorderRadius.vertical(bottom: Radius.circular(40)),
-                  ),
-                ),
-                
-                // Content over background
-                SafeArea(
-                  bottom: false,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                    child: Column(
-                      children: [
-                        // Header Row
-                        Row(
-                          children: [
-                            const Expanded(child: Text('My Profile', style: TextStyle(fontSize: 24, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: -0.5))),
-                            IconButton(
-                              icon: Container(
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.2), shape: BoxShape.circle),
-                                child: const Icon(Icons.logout_rounded, color: Colors.white, size: 20),
-                              ),
-                              onPressed: (_isUploading || _isLoggingOut) ? null : _confirmLogout,
-                            ),
-                          ],
+                children: [
+                  // Curved Header with Profile Info
+                  Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      // Teacher Green Curved Background
+                      Container(
+                        height: 220,
+                        width: double.infinity,
+                        decoration: const BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: TeacherThemeUtils.chromeGradient,
+                          ),
+                          borderRadius: BorderRadius.vertical(
+                            bottom: Radius.circular(40),
+                          ),
                         ),
-                        const SizedBox(height: 30),
-                        
-                        // Centered Avatar
-                        GestureDetector(
-                          onTap: (_isUploading || _isLoggingOut) ? null : _pickProfilePic,
-                          child: Stack(
+                      ),
+
+                      // Content over background
+                      SafeArea(
+                        bottom: false,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 24,
+                            vertical: 16,
+                          ),
+                          child: Column(
                             children: [
-                              Container(
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  border: Border.all(color: Colors.white, width: 4),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withValues(alpha: 0.1),
-                                      blurRadius: 20,
-                                      spreadRadius: 5,
+                              // Header Row
+                              Row(
+                                children: [
+                                  const Expanded(
+                                    child: Text(
+                                      'My Profile',
+                                      style: TextStyle(
+                                        fontSize: 24,
+                                        fontWeight: FontWeight.w900,
+                                        color: Colors.white,
+                                        letterSpacing: -0.5,
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    icon: Container(
+                                      padding: const EdgeInsets.all(8),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withValues(
+                                          alpha: 0.2,
+                                        ),
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: const Icon(
+                                        Icons.logout_rounded,
+                                        color: Colors.white,
+                                        size: 20,
+                                      ),
+                                    ),
+                                    onPressed: (_isUploading || _isLoggingOut)
+                                        ? null
+                                        : _confirmLogout,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 30),
+
+                              // Centered Avatar
+                              GestureDetector(
+                                onTap: (_isUploading || _isLoggingOut)
+                                    ? null
+                                    : _pickProfilePic,
+                                child: Stack(
+                                  children: [
+                                    Container(
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                          color: Colors.white,
+                                          width: 4,
+                                        ),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black.withValues(
+                                              alpha: 0.1,
+                                            ),
+                                            blurRadius: 20,
+                                            spreadRadius: 5,
+                                          ),
+                                        ],
+                                      ),
+                                      child: SafeCircleAvatar(
+                                        size: 120,
+                                        imagePathOrUrl: _user?['photo_url']
+                                            ?.toString(),
+                                        fallbackText: firstName.isNotEmpty
+                                            ? firstName[0].toUpperCase()
+                                            : 'T',
+                                        backgroundColor: const Color(
+                                          0xFFECFDF5,
+                                        ),
+                                        textColor: TeacherThemeUtils.dark,
+                                        borderColor: const Color(0xFFD4A843),
+                                        borderWidth: 2,
+                                        textStyle: const TextStyle(
+                                          color: TeacherThemeUtils.dark,
+                                          fontSize: 44,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                                      ),
+                                    ),
+                                    if (_isUploading)
+                                      Positioned.fill(
+                                        child: Container(
+                                          decoration: BoxDecoration(
+                                            color: Colors.black.withValues(
+                                              alpha: 0.3,
+                                            ),
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: const Center(
+                                            child: PulseConnectLoader(
+                                              size: 14,
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    Positioned(
+                                      bottom: 4,
+                                      right: 4,
+                                      child: Container(
+                                        padding: const EdgeInsets.all(8),
+                                        decoration: BoxDecoration(
+                                          color: const Color(
+                                            0xFFD4A843,
+                                          ), // Gold camera button
+                                          shape: BoxShape.circle,
+                                          border: Border.all(
+                                            color: Colors.white,
+                                            width: 2,
+                                          ),
+                                        ),
+                                        child: const Icon(
+                                          Icons.camera_alt_rounded,
+                                          color: Colors.white,
+                                          size: 16,
+                                        ),
+                                      ),
                                     ),
                                   ],
-                                ),
-                                child: SafeCircleAvatar(
-                                  size: 120,
-                                  imagePathOrUrl:
-                                      _user?['photo_url']?.toString(),
-                                  fallbackText: firstName.isNotEmpty
-                                      ? firstName[0].toUpperCase()
-                                      : 'T',
-                                  backgroundColor: const Color(0xFFECFDF5),
-                                  textColor: TeacherThemeUtils.dark,
-                                  borderColor: const Color(0xFFD4A843),
-                                  borderWidth: 2,
-                                  textStyle: const TextStyle(
-                                    color: TeacherThemeUtils.dark,
-                                    fontSize: 44,
-                                    fontWeight: FontWeight.w900,
-                                  ),
-                                ),
-                              ),
-                              if (_isUploading)
-                                Positioned.fill(
-                                  child: Container(
-                                    decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.3), shape: BoxShape.circle),
-                                    child: const Center(child: PulseConnectLoader(size: 14, color: Colors.white)),
-                                  ),
-                                ),
-                              Positioned(
-                                bottom: 4,
-                                right: 4,
-                                child: Container(
-                                  padding: const EdgeInsets.all(8),
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFFD4A843), // Gold camera button
-                                    shape: BoxShape.circle,
-                                    border: Border.all(color: Colors.white, width: 2),
-                                  ),
-                                  child: const Icon(Icons.camera_alt_rounded, color: Colors.white, size: 16),
                                 ),
                               ),
                             ],
                           ),
                         ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            
-            // Bottom Content
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 24, 24, 40),
-              child: Column(
-                children: [
-                  SizedBox(
-                    width: double.infinity,
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: Text(
-                        '$firstName $lastName',
-                        textAlign: TextAlign.center,
-                        maxLines: 1,
-                        softWrap: false,
-                        style: const TextStyle(
-                          fontSize: 26,
-                          fontWeight: FontWeight.w900,
-                          color: Color(0xFF111827),
-                          letterSpacing: -0.5,
-                        ),
                       ),
-                    ),
+                    ],
                   ),
-                  const SizedBox(height: 4),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                    decoration: BoxDecoration(color: TeacherThemeUtils.primary.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(100)),
-                    child: Text(email, textAlign: TextAlign.center, style: const TextStyle(color: TeacherThemeUtils.dark, fontSize: 13, fontWeight: FontWeight.w700)),
-                  ),
-                  
-                  const SizedBox(height: 32),
-                  
-                  // My Information Card
-                  const Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text('MY INFORMATION', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w900, color: Color(0xFF6B7280), letterSpacing: 1.2)),
-                  ),
-                  const SizedBox(height: 16),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      color: Colors.white,
-                      borderRadius: BorderRadius.circular(24),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.03),
-                          blurRadius: 20,
-                          offset: const Offset(0, 10),
-                        ),
-                      ],
-                    ),
+
+                  // Bottom Content
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 24, 24, 40),
                     child: Column(
                       children: [
-                        _buildProfileDetailRow('Contact', contactNumber),
-                        const Divider(height: 24, thickness: 1, color: Color(0xFFF3F4F6)),
-                        _buildProfileDetailRow('Birthday', birthday),
-                        const Divider(height: 24, thickness: 1, color: Color(0xFFF3F4F6)),
-                        _buildProfileDetailRow('Advisor', gradeAdvisor),
+                        SizedBox(
+                          width: double.infinity,
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              '$firstName $lastName',
+                              textAlign: TextAlign.center,
+                              maxLines: 1,
+                              softWrap: false,
+                              style: const TextStyle(
+                                fontSize: 26,
+                                fontWeight: FontWeight.w900,
+                                color: Color(0xFF111827),
+                                letterSpacing: -0.5,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 4,
+                          ),
+                          decoration: BoxDecoration(
+                            color: TeacherThemeUtils.primary.withValues(
+                              alpha: 0.12,
+                            ),
+                            borderRadius: BorderRadius.circular(100),
+                          ),
+                          child: Text(
+                            email,
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(
+                              color: TeacherThemeUtils.dark,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+
+                        const SizedBox(height: 32),
+
+                        // My Information Card
+                        const Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            'MY INFORMATION',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w900,
+                              color: Color(0xFF6B7280),
+                              letterSpacing: 1.2,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(24),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(24),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.03),
+                                blurRadius: 20,
+                                offset: const Offset(0, 10),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            children: [
+                              _buildProfileDetailRow('Contact', contactNumber),
+                              const Divider(
+                                height: 24,
+                                thickness: 1,
+                                color: Color(0xFFF3F4F6),
+                              ),
+                              _buildProfileDetailRow('Birthday', birthday),
+                              const Divider(
+                                height: 24,
+                                thickness: 1,
+                                color: Color(0xFFF3F4F6),
+                              ),
+                              _buildProfileDetailRow('Advisor', gradeAdvisor),
+                            ],
+                          ),
+                        ),
+
+                        const SizedBox(height: 32),
+
+                        // Security
+                        const Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            'SECURITY',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w900,
+                              color: Color(0xFF6B7280),
+                              letterSpacing: 1.2,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        _buildActionCard(
+                          icon: Icons.lock_person_rounded,
+                          title: 'Change Password',
+                          onTap: () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) =>
+                                  const ChangePasswordScreen(role: 'Teacher'),
+                            ),
+                          ),
+                        ),
+
+                        const SizedBox(height: 28),
+
+                        // App & device
+                        const Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            'APP & DEVICE',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w900,
+                              color: Color(0xFF6B7280),
+                              letterSpacing: 1.2,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        _buildActionCard(
+                          icon: Icons.offline_bolt_rounded,
+                          title: 'Offline Status',
+                          subtitle: _offlineSummarySubtitle(),
+                          onTap: _showOfflineStatusSheet,
+                        ),
+                        const SizedBox(height: 12),
+                        _buildActionCard(
+                          icon: Icons.speed_rounded,
+                          title: 'Performance Mode',
+                          subtitle: DevicePerformance.instance.settingsSubtitle,
+                          onTap: () => showPerformanceModeSheet(
+                            context,
+                            accent: TeacherThemeUtils.primary,
+                          ),
+                        ),
+                        const SizedBox(
+                          height: 120,
+                        ), // Extra space for bottom nav
                       ],
                     ),
                   ),
-                  
-                  const SizedBox(height: 32),
-
-                  // Security
-                  const Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      'SECURITY',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w900,
-                        color: Color(0xFF6B7280),
-                        letterSpacing: 1.2,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _buildActionCard(
-                    icon: Icons.lock_person_rounded,
-                    title: 'Change Password',
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) =>
-                            const ChangePasswordScreen(role: 'Teacher'),
-                      ),
-                    ),
-                  ),
-
-                  const SizedBox(height: 28),
-
-                  // App & device
-                  const Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      'APP & DEVICE',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w900,
-                        color: Color(0xFF6B7280),
-                        letterSpacing: 1.2,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _buildActionCard(
-                    icon: Icons.offline_bolt_rounded,
-                    title: 'Offline Status',
-                    subtitle: _offlineSummarySubtitle(),
-                    onTap: _showOfflineStatusSheet,
-                  ),
-                  const SizedBox(height: 12),
-                  _buildActionCard(
-                    icon: Icons.speed_rounded,
-                    title: 'Performance Mode',
-                    subtitle: DevicePerformance.instance.settingsSubtitle,
-                    onTap: () => showPerformanceModeSheet(
-                      context,
-                      accent: TeacherThemeUtils.primary,
-                    ),
-                  ),
-                  const SizedBox(height: 120), // Extra space for bottom nav
                 ],
-              ),
-            ),
-          ],
               ),
             ),
           ),
@@ -1143,7 +1292,10 @@ class _TeacherProfileState extends State<TeacherProfile> {
           children: [
             Container(
               padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(color: TeacherThemeUtils.primary.withValues(alpha: 0.1), shape: BoxShape.circle),
+              decoration: BoxDecoration(
+                color: TeacherThemeUtils.primary.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
               child: Icon(icon, color: TeacherThemeUtils.mid, size: 20),
             ),
             const SizedBox(width: 16),
@@ -1218,11 +1370,24 @@ class _TeacherProfileState extends State<TeacherProfile> {
   Widget _buildProfileDetailRow(String label, String value) {
     return Row(
       children: [
-        Text(label, style: TextStyle(color: Colors.grey.shade500, fontSize: 13, fontWeight: FontWeight.w700)),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.grey.shade500,
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
         const Spacer(),
-        Text(value, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14, color: Color(0xFF111827))),
+        Text(
+          value,
+          style: const TextStyle(
+            fontWeight: FontWeight.w800,
+            fontSize: 14,
+            color: Color(0xFF111827),
+          ),
+        ),
       ],
     );
   }
 }
-

@@ -12,6 +12,7 @@ import 'student_event_details.dart';
 import 'student_profile.dart';
 import 'student_scan.dart';
 import '../welcome_screen.dart';
+import '../../main.dart';
 import '../../services/notification_service.dart';
 import '../../services/event_live_service.dart';
 import '../../utils/app_page_routes.dart';
@@ -19,6 +20,7 @@ import '../../services/offline_backup_service.dart';
 import '../../services/offline_sync_service.dart';
 import '../../widgets/notifications_modal.dart';
 import '../../widgets/animated_greeting_text.dart';
+import '../../services/showcase_service.dart';
 import '../../widgets/card_swap_widget.dart';
 import '../../widgets/shiny_text.dart';
 import '../../widgets/custom_loader.dart';
@@ -69,6 +71,7 @@ class _StudentHomeState extends State<StudentHome>
   /// Delay Events/Tickets mount so home critical path is not a request storm.
   bool _eventsTabMounted = false;
   bool _ticketsTabMounted = false;
+  List<CardSwapItem> _showcaseItems = ShowcaseService.instance.bundledItems();
 
   // Section Selection Gate
   List<Map<String, dynamic>> _sections = [];
@@ -85,15 +88,31 @@ class _StudentHomeState extends State<StudentHome>
   bool _isGateLoggingOut = false;
 
   Color _studentPrimary(BuildContext context) =>
-      CourseThemeUtils.studentPrimaryForCourse(_user?['course']);
+      CourseThemeUtils.studentPrimaryForCourse(_resolveStudentCourse(context));
   Color _studentDark(BuildContext context) =>
-      CourseThemeUtils.studentDarkForCourse(_user?['course']);
+      CourseThemeUtils.studentDarkForCourse(_resolveStudentCourse(context));
   Color _studentSoft(BuildContext context) =>
-      CourseThemeUtils.studentSoftForCourse(_user?['course']);
+      CourseThemeUtils.studentSoftForCourse(_resolveStudentCourse(context));
   Color _studentAction(BuildContext context) =>
-      CourseThemeUtils.studentActionForCourse(_user?['course']);
+      CourseThemeUtils.studentActionForCourse(_resolveStudentCourse(context));
   Color _studentChrome(BuildContext context) =>
       CourseThemeUtils.studentChromeFromPrimary(_studentPrimary(context));
+
+  /// Prefer loaded user course; fall back to app theme cache / Material primary
+  /// so CS splash stays green on first paint (before getCurrentUser finishes).
+  String? _resolveStudentCourse(BuildContext context) {
+    final fromUser = (_user?['course']?.toString() ?? '').trim();
+    if (fromUser.isNotEmpty) return fromUser;
+    try {
+      final fromApp = PulseConnectApp.of(context).currentStudentCourse.trim();
+      if (fromApp.isNotEmpty) return fromApp;
+    } catch (_) {}
+    try {
+      final primary = Theme.of(context).colorScheme.primary;
+      if (CourseThemeUtils.isGreenStudentPrimary(primary)) return 'CS';
+    } catch (_) {}
+    return null;
+  }
 
   @override
   void initState() {
@@ -105,6 +124,7 @@ class _StudentHomeState extends State<StudentHome>
       unawaited(_refreshHomeLive(reason));
     });
     _loadData();
+    _loadShowcaseSlides();
     _subscribeToNotifications();
     _scanMenuController = AnimationController(
       vsync: this,
@@ -317,7 +337,7 @@ class _StudentHomeState extends State<StudentHome>
 
   Future<void> _refreshUnreadCount() async {
     try {
-      final unread = await _notifService.getUnreadCount(forceRefresh: true);
+      final unread = await _notifService.getUnreadCount(forceRefresh: false);
       if (mounted && unread != _unreadCount) {
         setState(() => _unreadCount = unread);
       }
@@ -409,6 +429,23 @@ class _StudentHomeState extends State<StudentHome>
     );
   }
 
+  Future<void> _loadShowcaseSlides({bool forceFresh = false}) async {
+    final items = await ShowcaseService.instance.getItems(
+      forceFresh: forceFresh,
+      onUpdated: (fresh) {
+        if (!mounted) return;
+        setState(() => _showcaseItems = fresh.isNotEmpty ? fresh : ShowcaseService.instance.bundledItems());
+        if (fresh.isEmpty) return;
+        unawaited(ShowcaseService.instance.prefetchImages(context, fresh));
+      },
+    );
+    if (!mounted) return;
+    setState(() => _showcaseItems = items.isNotEmpty ? items : ShowcaseService.instance.bundledItems());
+    if (items.isEmpty) return;
+    if (!mounted) return;
+    unawaited(ShowcaseService.instance.prefetchImages(context, items));
+  }
+
   Future<void> _loadData({bool forceFresh = false}) async {
     final user = await _authService.getCurrentUser();
     final userId = user?['id']?.toString() ?? '';
@@ -455,6 +492,25 @@ class _StudentHomeState extends State<StudentHome>
 
     yearLevel ??= await _authService.getStudentYearLevel();
     courseCode ??= await _authService.getStudentCourseCode();
+
+    // Keep MaterialApp + splash green for BSCS even when users.course is empty
+    // but section/scope already says CS.
+    if (mounted) {
+      final resolvedCourse =
+          CourseThemeUtils.normalizeCourse(courseCode ?? user?['course']);
+      if (resolvedCourse == 'CS' || resolvedCourse == 'IT') {
+        try {
+          PulseConnectApp.of(context).updateTheme(
+            'student',
+            course: resolvedCourse,
+          );
+        } catch (_) {}
+        if (user != null &&
+            CourseThemeUtils.normalizeCourse(user['course']).isEmpty) {
+          user['course'] = resolvedCourse;
+        }
+      }
+    }
 
     // Critical path: one events fetch. Calendar on home is derived from it
     // so we do not pay a second near-duplicate PostgREST round-trip.
@@ -515,7 +571,7 @@ class _StudentHomeState extends State<StudentHome>
         yearLevel: yearLevel,
         courseCode: courseCode,
         specialization: specialization,
-        forceFresh: true,
+        forceFresh: false,
       );
       if (!mounted) return;
       final offline = await _hasNoConnectivity();
@@ -591,16 +647,8 @@ class _StudentHomeState extends State<StudentHome>
   }
 
   void _scheduleDeferredTabMount() {
-    if (_eventsTabMounted && _ticketsTabMounted) return;
-    _deferredTabsTimer?.cancel();
-    _deferredTabsTimer = Timer(const Duration(milliseconds: 600), () {
-      if (!mounted) return;
-      if (_eventsTabMounted && _ticketsTabMounted) return;
-      setState(() {
-        _eventsTabMounted = true;
-        _ticketsTabMounted = true;
-      });
-    });
+    // Intentionally no-op: Events/Tickets mount only on first visit
+    // via _ensureTabMounted to avoid eval/ticket request storms on Home open.
   }
 
   void _ensureTabMounted(int index) {
@@ -736,6 +784,7 @@ class _StudentHomeState extends State<StudentHome>
     try {
       await _authService.logout();
       if (!mounted) return;
+      PulseConnectApp.of(context).clearSessionAfterLogout();
       Navigator.pushAndRemoveUntil(
         context,
         MaterialPageRoute(builder: (_) => const WelcomeScreen()),
@@ -945,7 +994,9 @@ class _StudentHomeState extends State<StudentHome>
           clipBehavior: Clip.hardEdge,
           children: [
             _isLoading
-                ? const PulseConnectSplashScreen(
+                ? PulseConnectSplashScreen.aligned(
+                    role: 'student',
+                    course: _resolveStudentCourse(context) ?? 'IT',
                     statusMessage: 'Loading student portal & events...',
                   )
                 : tabBody,
@@ -2074,14 +2125,9 @@ class _StudentHomeState extends State<StudentHome>
             ),
           ),
           const SizedBox(height: 32),
-          // Card swap widget - Max ZOOM version
           CardSwapWidget(
-            items: const [
-              CardSwapItem(imagePath: 'assets/sample summit/image1.jpg', label: 'CCS SUMMIT'),
-              CardSwapItem(imagePath: 'assets/sample GA/image1.jpg', label: 'GENERAL ASSEMBLY'),
-              CardSwapItem(imagePath: 'assets/sample exhibit/image1.jpg', label: 'CCS EXHIBIT'),
-              CardSwapItem(imagePath: 'assets/sample CV/image1.jpg', label: 'COMPANY VISIT'),
-            ],
+            key: ValueKey(ShowcaseService.instance.itemsKey(_showcaseItems)),
+            items: _showcaseItems,
             cardWidth: 250,
             cardHeight: 140,
             cardDistance: 20,

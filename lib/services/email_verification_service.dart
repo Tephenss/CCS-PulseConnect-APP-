@@ -10,21 +10,45 @@ class EmailVerificationService {
   /// Prevents double-mount (home+route) from sending two different codes.
   static final Map<String, Future<Map<String, dynamic>>> _inFlightSend = {};
 
-  String _cooldownKey(String userId) => 'email_verify_cooldown_until_$userId';
+  /// Cooldown is per user+purpose so signup OTP never blocks login OTP.
+  String _cooldownKey(String userId, String purpose) =>
+      'email_verify_cooldown_until_${purpose}_$userId';
 
-  Future<int> getRemainingCooldownSeconds(String userId) async {
+  String _flightKey(String userId, String purpose) => '$purpose:$userId';
+
+  String normalizePurpose(String? raw) {
+    final p = (raw ?? '').trim().toLowerCase();
+    if (p == 'signup' ||
+        p == 'register' ||
+        p == 'registration' ||
+        p == 'create') {
+      return 'signup';
+    }
+    return 'login';
+  }
+
+  Future<int> getRemainingCooldownSeconds(
+    String userId, {
+    String purpose = 'login',
+  }) async {
     final prefs = await SharedPreferences.getInstance();
-    final untilMs = prefs.getInt(_cooldownKey(userId)) ?? 0;
+    final key = _cooldownKey(userId, normalizePurpose(purpose));
+    final untilMs = prefs.getInt(key) ?? 0;
     final now = DateTime.now().millisecondsSinceEpoch;
     if (untilMs <= now) return 0;
     return ((untilMs - now) / 1000).ceil();
   }
 
-  Future<void> _setCooldown(String userId, {int? seconds}) async {
+  Future<void> _setCooldown(
+    String userId, {
+    required String purpose,
+    int? seconds,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
-    final wait = Duration(seconds: (seconds ?? resendCooldown.inSeconds).clamp(1, 300));
+    final wait =
+        Duration(seconds: (seconds ?? resendCooldown.inSeconds).clamp(1, 300));
     final until = DateTime.now().add(wait).millisecondsSinceEpoch;
-    await prefs.setInt(_cooldownKey(userId), until);
+    await prefs.setInt(_cooldownKey(userId, purpose), until);
   }
 
   Future<Map<String, dynamic>> sendCode({
@@ -32,8 +56,13 @@ class EmailVerificationService {
     required String email,
     required String fullName,
     required bool forceResend,
+    String purpose = 'login',
   }) async {
-    final remaining = await getRemainingCooldownSeconds(userId);
+    final resolvedPurpose = normalizePurpose(purpose);
+    final remaining = await getRemainingCooldownSeconds(
+      userId,
+      purpose: resolvedPurpose,
+    );
     if (remaining > 0) {
       if (forceResend) {
         return {
@@ -47,11 +76,13 @@ class EmailVerificationService {
         'ok': true,
         'cooldown_seconds': remaining,
         'skipped': true,
+        'purpose': resolvedPurpose,
       };
     }
 
-    // Coalesce concurrent auto-sends for the same user (back → login remount).
-    final existing = _inFlightSend[userId];
+    // Coalesce concurrent auto-sends for the same user+purpose.
+    final flightKey = _flightKey(userId, resolvedPurpose);
+    final existing = _inFlightSend[flightKey];
     if (existing != null && !forceResend) {
       return existing;
     }
@@ -61,6 +92,7 @@ class EmailVerificationService {
         userId: userId,
         email: email,
         fullName: fullName,
+        purpose: resolvedPurpose,
       );
       if (delivery['ok'] != true) {
         return {
@@ -75,25 +107,30 @@ class EmailVerificationService {
           ? serverCooldown.toInt()
           : int.tryParse(serverCooldown?.toString() ?? '') ??
               resendCooldown.inSeconds;
-      await _setCooldown(userId, seconds: cooldownSecs);
+      await _setCooldown(
+        userId,
+        purpose: resolvedPurpose,
+        seconds: cooldownSecs,
+      );
       final skipped = delivery['skipped'] == true;
       final expiresAtRaw = delivery['expires_at']?.toString() ?? '';
       final expiresAt = DateTime.tryParse(expiresAtRaw)?.toUtc();
       return {
         'ok': true,
         'skipped': skipped,
+        'purpose': resolvedPurpose,
         'cooldown_seconds': cooldownSecs,
         'expires_at': (expiresAt ?? DateTime.now().toUtc().add(codeTtl))
             .toIso8601String(),
       };
     }();
 
-    _inFlightSend[userId] = future;
+    _inFlightSend[flightKey] = future;
     try {
       return await future;
     } finally {
-      if (identical(_inFlightSend[userId], future)) {
-        _inFlightSend.remove(userId);
+      if (identical(_inFlightSend[flightKey], future)) {
+        _inFlightSend.remove(flightKey);
       }
     }
   }
@@ -120,15 +157,18 @@ class EmailVerificationService {
     required String userId,
     required String enteredCode,
     bool persistLocalUser = true,
+    String purpose = 'login',
   }) async {
     final trimmed = enteredCode.trim();
     if (trimmed.length != 6 || int.tryParse(trimmed) == null) {
       return {'ok': false, 'error': 'Verification code must be 6 digits.'};
     }
 
+    final resolvedPurpose = normalizePurpose(purpose);
     final result = await _mobileBackend.verifyEmailCode(
       code: trimmed,
       userId: userId,
+      purpose: resolvedPurpose,
     );
     if (result['ok'] != true) {
       return {
@@ -153,6 +193,6 @@ class EmailVerificationService {
       await AuthService().persistUserAfterOtp(updatedUser);
     }
 
-    return {'ok': true, 'user': updatedUser};
+    return {'ok': true, 'user': updatedUser, 'purpose': resolvedPurpose};
   }
 }

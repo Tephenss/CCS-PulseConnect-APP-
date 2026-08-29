@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 
+import '../../services/app_cache_service.dart';
 import '../../services/event_service.dart';
 import '../../services/mobile_backend_service.dart';
 import '../../utils/teacher_theme_utils.dart';
@@ -20,11 +22,17 @@ class TeacherSectionStudents extends StatefulWidget {
   @override
   State<TeacherSectionStudents> createState() => _TeacherSectionStudentsState();
 }
+
 class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
+  final _appCacheService = AppCacheService();
+  final Connectivity _connectivity = Connectivity();
   bool _isLoading = true;
+  bool _usingCachedStudents = false;
   List<Map<String, dynamic>> _students = [];
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
+
+  String get _cacheKey => 'teacher_block_students_${widget.sectionId}';
 
   @override
   void initState() {
@@ -38,8 +46,54 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
     super.dispose();
   }
 
-  Future<void> _fetchStudents() async {
+  Future<List<Map<String, dynamic>>> _resolveStudentAvatars(
+    List<Map<String, dynamic>> rows,
+  ) async {
+    final eventService = EventService();
+    final resolved = <Map<String, dynamic>>[];
+    for (final student in rows) {
+      final copy = Map<String, dynamic>.from(student);
+      final photo = (copy['photo_url']?.toString() ?? '').trim();
+      if (photo.isNotEmpty) {
+        copy['photo_url'] = await eventService.resolveAvatarDisplayUrl(photo);
+      }
+      resolved.add(copy);
+    }
+    return resolved;
+  }
+
+  Future<void> _fetchStudents({bool forceFresh = false}) async {
+    final cacheKey = _cacheKey;
     try {
+      final connectivity = await _connectivity.checkConnectivity();
+      final isOffline =
+          connectivity.isEmpty ||
+          connectivity.every((result) => result == ConnectivityResult.none);
+
+      if (!forceFresh) {
+        final warm = await _appCacheService.loadJsonList(cacheKey);
+        if (warm.isNotEmpty && mounted) {
+          final resolved = await _resolveStudentAvatars(warm);
+          setState(() {
+            _students = resolved;
+            _usingCachedStudents = true;
+            _isLoading = false;
+          });
+        }
+      }
+
+      if (isOffline) {
+        final cached = await _appCacheService.loadJsonList(cacheKey);
+        final resolved = await _resolveStudentAvatars(cached);
+        if (!mounted) return;
+        setState(() {
+          _students = resolved;
+          _usingCachedStudents = true;
+          _isLoading = false;
+        });
+        return;
+      }
+
       if (!MobileBackendService.isConfigured) {
         throw Exception(
           'Hosted backend is not configured. Student lists load through the server.',
@@ -61,31 +115,48 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
             )
           : <Map<String, dynamic>>[];
 
-      final eventService = EventService();
-      for (final student in rows) {
-        final photo = (student['photo_url']?.toString() ?? '').trim();
-        if (photo.isEmpty) continue;
-        student['photo_url'] = await eventService.resolveAvatarDisplayUrl(photo);
-      }
+      await _appCacheService.saveJsonList(
+        cacheKey,
+        rows,
+        preserveNonEmptyOnEmpty: !forceFresh,
+      );
 
+      final resolved = await _resolveStudentAvatars(rows);
       if (!mounted) return;
       setState(() {
-        _students = rows;
+        _students = resolved;
+        _usingCachedStudents = false;
         _isLoading = false;
       });
     } catch (e) {
+      final cached = await _appCacheService.loadJsonList(cacheKey);
+      final resolved = await _resolveStudentAvatars(cached);
       if (!mounted) return;
-      setState(() => _isLoading = false);
-      AppSnackBar.error(context, 'Failed to load students: $e');
+      setState(() {
+        _students = resolved;
+        _usingCachedStudents = cached.isNotEmpty;
+        _isLoading = false;
+      });
+      if (cached.isEmpty) {
+        AppSnackBar.error(context, 'Failed to load students: $e');
+      }
     }
   }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
-        title: Text(widget.sectionName, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: Colors.white)),
-        backgroundColor: TeacherThemeUtils.primary,
+        title: Text(
+          widget.sectionName,
+          style: const TextStyle(
+            fontWeight: FontWeight.w800,
+            fontSize: 18,
+            color: Colors.white,
+          ),
+        ),
+        backgroundColor: TeacherThemeUtils.dark,
         centerTitle: true,
         iconTheme: const IconThemeData(color: Colors.white),
         elevation: 0,
@@ -97,9 +168,15 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
             padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
             decoration: BoxDecoration(
               color: TeacherThemeUtils.dark,
-              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(28)),
+              borderRadius: const BorderRadius.vertical(
+                bottom: Radius.circular(28),
+              ),
               boxShadow: [
-                BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 10, offset: const Offset(0, 4)),
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.1),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
+                ),
               ],
             ),
             child: Column(
@@ -107,12 +184,21 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
               children: [
                 const Text(
                   'Student Masterlist',
-                  style: TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w800),
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  'Showing students with PulseConnect accounts in ${widget.sectionName}.',
-                  style: TextStyle(color: Colors.white.withValues(alpha: 0.8), fontSize: 14),
+                  _usingCachedStudents
+                      ? 'Showing cached students in ${widget.sectionName}. Pull down to refresh.'
+                      : 'Showing students with PulseConnect accounts in ${widget.sectionName}.',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.8),
+                    fontSize: 14,
+                  ),
                 ),
                 const SizedBox(height: 20),
                 // Search Bar
@@ -122,11 +208,19 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
                     hintText: 'Search by name, student no, or email...',
-                    hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.6)),
-                    prefixIcon: Icon(Icons.search_rounded, color: Colors.white.withValues(alpha: 0.7)),
+                    hintStyle: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.6),
+                    ),
+                    prefixIcon: Icon(
+                      Icons.search_rounded,
+                      color: Colors.white.withValues(alpha: 0.7),
+                    ),
                     filled: true,
                     fillColor: Colors.white.withValues(alpha: 0.15),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 20),
+                    contentPadding: const EdgeInsets.symmetric(
+                      vertical: 0,
+                      horizontal: 20,
+                    ),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(16),
                       borderSide: BorderSide.none,
@@ -138,7 +232,7 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
           ),
           Expanded(
             child: RefreshIndicator(
-              onRefresh: _fetchStudents,
+              onRefresh: () => _fetchStudents(forceFresh: true),
               color: TeacherThemeUtils.primary,
               child: Builder(
                 builder: (context) {
@@ -146,8 +240,8 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                   final filteredStudents = _students.where((s) {
                     if (query.isEmpty) return true;
                     final name = (s['name']?.toString() ?? '').toLowerCase();
-                    final studentNo =
-                        (s['student_id']?.toString() ?? '').toLowerCase();
+                    final studentNo = (s['student_id']?.toString() ?? '')
+                        .toLowerCase();
                     final email = (s['email']?.toString() ?? '').toLowerCase();
                     return name.contains(query) ||
                         studentNo.contains(query) ||
@@ -176,18 +270,31 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.center,
                               children: [
-                                Icon(Icons.person_search_rounded, size: 64, color: Colors.grey.shade300),
+                                Icon(
+                                  Icons.person_search_rounded,
+                                  size: 64,
+                                  color: Colors.grey.shade300,
+                                ),
                                 const SizedBox(height: 16),
                                 const Text(
                                   'No students found',
-                                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: Color(0xFF1F2937)),
+                                  style: TextStyle(
+                                    fontSize: 18,
+                                    fontWeight: FontWeight.w800,
+                                    color: Color(0xFF1F2937),
+                                  ),
                                 ),
                                 const SizedBox(height: 8),
                                 Text(
                                   _students.isEmpty
-                                      ? 'No students have created an account in this block yet.'
+                                      ? (_usingCachedStudents
+                                            ? 'No cached students found for this block.'
+                                            : 'No students have created an account in this block yet.')
                                       : 'No student matches your search.',
-                                  style: TextStyle(color: Colors.grey.shade500, fontSize: 14),
+                                  style: TextStyle(
+                                    color: Colors.grey.shade500,
+                                    fontSize: 14,
+                                  ),
                                   textAlign: TextAlign.center,
                                 ),
                               ],
@@ -205,7 +312,8 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                     itemBuilder: (context, index) {
                       final student = filteredStudents[index];
                       final name = (student['name']?.toString() ?? '').trim();
-                      final photoUrl = (student['photo_url']?.toString() ?? '').trim();
+                      final photoUrl = (student['photo_url']?.toString() ?? '')
+                          .trim();
 
                       return Container(
                         margin: const EdgeInsets.only(bottom: 16),
@@ -217,7 +325,8 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                           boxShadow: [
                             BoxShadow(
                               color: Colors.black.withValues(alpha: 0.04),
-                              blurRadius: 10, offset: const Offset(0, 4),
+                              blurRadius: 10,
+                              offset: const Offset(0, 4),
                             ),
                           ],
                         ),
@@ -225,12 +334,13 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                           children: [
                             SafeCircleAvatar(
                               size: 52,
-                              imagePathOrUrl: photoUrl.isEmpty ? null : photoUrl,
+                              imagePathOrUrl: photoUrl.isEmpty
+                                  ? null
+                                  : photoUrl,
                               fallbackText: (name.isNotEmpty ? name[0] : 'S')
                                   .toUpperCase(),
-                              backgroundColor: TeacherThemeUtils.primary.withValues(
-                                alpha: 0.1,
-                              ),
+                              backgroundColor: TeacherThemeUtils.primary
+                                  .withValues(alpha: 0.1),
                               textColor: TeacherThemeUtils.primary,
                               textStyle: const TextStyle(
                                 color: TeacherThemeUtils.primary,
@@ -254,10 +364,17 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                                   const SizedBox(height: 4),
                                   Row(
                                     children: [
-                                      const Icon(Icons.badge_rounded, size: 14, color: Colors.grey),
+                                      const Icon(
+                                        Icons.badge_rounded,
+                                        size: 14,
+                                        color: Colors.grey,
+                                      ),
                                       const SizedBox(width: 4),
                                       Text(
-                                        (student['student_id']?.toString() ?? '').trim().isEmpty
+                                        (student['student_id']?.toString() ??
+                                                    '')
+                                                .trim()
+                                                .isEmpty
                                             ? 'No ID'
                                             : student['student_id'].toString(),
                                         style: TextStyle(
