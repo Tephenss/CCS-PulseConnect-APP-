@@ -970,16 +970,23 @@ class _TeacherEventManageState extends State<TeacherEventManage>
     for (final row in rows) {
       final next = Map<String, dynamic>.from(row);
       final raw = _participantPhotoRaw(next);
-      if (raw.isEmpty) {
+      final userId = (next['student_id']?.toString() ??
+              (next['users'] is Map
+                  ? (next['users'] as Map)['id']?.toString()
+                  : null) ??
+              '')
+          .trim();
+      if (raw.isEmpty && userId.isEmpty) {
         out.add(next);
         continue;
       }
-      final cached = _signedAvatarCache[raw];
+      final cacheKey = raw.isNotEmpty ? raw : userId;
+      final cached = _signedAvatarCache[cacheKey];
       final signed = (cached != null && cached.isNotEmpty)
           ? cached
-          : await _eventService.resolveAvatarDisplayUrl(raw);
+          : await _eventService.resolveAvatarDisplayUrl(raw, userId: userId);
       if (signed.isNotEmpty) {
-        _signedAvatarCache[raw] = signed;
+        _signedAvatarCache[cacheKey] = signed;
         next['photo_url'] = signed;
         final users = next['users'];
         if (users is Map) {
@@ -994,24 +1001,37 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   }
 
   String _getName(Map<String, dynamic> p) {
-    final displayName = (p['display_name']?.toString() ?? '').trim();
-    if (displayName.isNotEmpty) return displayName;
     final u = p['users'];
     if (u is Map) {
       final user = Map<String, dynamic>.from(u);
-      final composed = _eventService.composeParticipantDisplayName(user);
+      final composed = _eventService.composeParticipantListName(user);
       if (composed.isNotEmpty) return composed;
       final fullName = (user['full_name']?.toString() ?? '').trim();
       if (fullName.isNotEmpty) return fullName;
       final mappedDisplay = (user['display_name']?.toString() ?? '').trim();
       if (mappedDisplay.isNotEmpty) return mappedDisplay;
     }
+    final displayName = (p['display_name']?.toString() ?? '').trim();
+    if (displayName.isNotEmpty) return displayName;
     return 'Unknown Student';
   }
 
   // â”€â”€â”€ Helper: initials (max 2 chars) â”€â”€â”€
   String _getInitials(String name) {
-    final parts = name.trim().split(' ').where((p) => p.isNotEmpty).toList();
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return '?';
+    if (trimmed.contains(',')) {
+      final pieces = trimmed.split(',');
+      final last = pieces.first.trim();
+      final first = pieces.length > 1
+          ? pieces[1].trim().split(RegExp(r'\s+')).first
+          : '';
+      if (first.isNotEmpty && last.isNotEmpty) {
+        return '${first[0]}${last[0]}'.toUpperCase();
+      }
+      if (last.isNotEmpty) return last[0].toUpperCase();
+    }
+    final parts = trimmed.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
     if (parts.isEmpty) return '?';
     if (parts.length == 1) return parts[0][0].toUpperCase();
     return '${parts[0][0]}${parts[parts.length - 1][0]}'.toUpperCase();
@@ -1020,7 +1040,7 @@ class _TeacherEventManageState extends State<TeacherEventManage>
   String _getAssistantName(Map<String, dynamic> assistant) {
     final u = assistant['users'];
     if (u is Map) {
-      final composed = _eventService.composeParticipantDisplayName(
+      final composed = _eventService.composeParticipantListName(
         Map<String, dynamic>.from(u),
       );
       if (composed.isNotEmpty) return composed;
@@ -2003,7 +2023,9 @@ class _TeacherEventManageState extends State<TeacherEventManage>
                 fit: BoxFit.cover,
                 fadeInDuration: Duration.zero,
                 fadeOutDuration: Duration.zero,
-                memCacheWidth: DevicePerformance.instance.imageCacheWidth,
+                filterQuality: FilterQuality.high,
+                memCacheWidth:
+                    DevicePerformance.instance.heroImageCacheWidth(context),
                 placeholder: (context, url) => _coverLoadingPlaceholder(),
                 errorWidget: (context, url, error) => _coverFallback(),
               ),

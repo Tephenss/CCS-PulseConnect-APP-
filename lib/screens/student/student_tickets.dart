@@ -1,7 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
 
-import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -25,21 +23,9 @@ class StudentTickets extends StatefulWidget {
 class _StudentTicketsState extends State<StudentTickets>
     with WidgetsBindingObserver {
   final _eventService = EventService();
-  final Connectivity _connectivity = Connectivity();
-  static const String _downloadedTicketKeyPrefix = 'downloaded_tickets_';
   List<Map<String, dynamic>> _tickets = [];
   bool _isLoading = true;
   StreamSubscription<String>? _eventLiveSubscription;
-
-  Future<bool> _isOfflineNow() async {
-    try {
-      final connectivity = await _connectivity.checkConnectivity();
-      return connectivity.isEmpty ||
-          connectivity.every((result) => result == ConnectivityResult.none);
-    } catch (_) {
-      return true;
-    }
-  }
 
   bool _isTicketsLiveReason(String reason) {
     final offlinePulse = reason.startsWith('offline:');
@@ -65,8 +51,32 @@ class _StudentTicketsState extends State<StudentTickets>
       final offlinePulse = reason.startsWith('offline:');
       unawaited(_loadTickets(forceFresh: !offlinePulse));
     });
-    // Cache-first init; network only if cache empty/stale.
-    _loadTickets();
+    unawaited(_bootstrapTickets());
+  }
+
+  Future<void> _bootstrapTickets() async {
+    final prefs = await SharedPreferences.getInstance();
+    final userId = (prefs.getString('user_id') ?? '').trim();
+    if (userId.isEmpty) {
+      await _loadTickets();
+      return;
+    }
+
+    final cached = await _eventService.getMyTicketsCached(userId);
+    if (cached.isNotEmpty && mounted) {
+      final active = _activeTicketsFrom(
+        cached,
+        offline: true,
+        fetchFailed: true,
+      );
+      if (active.isNotEmpty) {
+        setState(() {
+          _tickets = active;
+          _isLoading = false;
+        });
+      }
+    }
+    await _loadTickets();
   }
 
   @override
@@ -90,8 +100,8 @@ class _StudentTicketsState extends State<StudentTickets>
     }
 
     final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString('user_id') ?? '';
-    final offline = await _isOfflineNow();
+    final userId = (prefs.getString('user_id') ?? '').trim();
+    final offline = await EventService.isEffectivelyOffline();
     final effectiveForceFresh = forceFresh && !offline;
 
     List<Map<String, dynamic>> allTickets = <Map<String, dynamic>>[];
@@ -109,12 +119,42 @@ class _StudentTicketsState extends State<StudentTickets>
       allTickets = <Map<String, dynamic>>[];
     }
 
+    if (allTickets.isEmpty && userId.isNotEmpty && (offline || fetchFailed)) {
+      allTickets = await _eventService.getMyTicketsCached(userId);
+    }
+
     debugPrint('[tickets] fetched ${allTickets.length} rows, forceFresh=$effectiveForceFresh');
 
-    // Keep online list behavior: show active events only.
-    // Also require an actual ticket id from Supabase; registration rows without
-    // a ticket should not appear here (prevents "ghost" tickets).
-    final activeOnlineTickets = allTickets
+    final activeTickets = _activeTicketsFrom(
+      allTickets,
+      offline: offline,
+      fetchFailed: fetchFailed,
+    );
+
+    // Keep prior list only when offline or the fetch failed — never when online
+    // successfully returns/filters to empty (deleted/ended tickets must clear).
+    if (activeTickets.isEmpty && hadCachedTickets && (offline || fetchFailed)) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _tickets = activeTickets;
+        _isLoading = false;
+      });
+    }
+  }
+
+  List<Map<String, dynamic>> _activeTicketsFrom(
+    List<Map<String, dynamic>> allTickets, {
+    required bool offline,
+    required bool fetchFailed,
+  }) {
+    final localCached = offline || fetchFailed;
+    final activeTickets = allTickets
         .where((t) {
           final active = _isTicketActive(t);
           final hasId = _hasTicketId(t);
@@ -125,30 +165,15 @@ class _StudentTicketsState extends State<StudentTickets>
         })
         .map((ticket) {
           final normalized = Map<String, dynamic>.from(ticket);
-          normalized['local_cached'] = offline || fetchFailed;
+          normalized['local_cached'] = localCached;
           return normalized;
         })
         .toList();
 
-    // Downloaded tickets are kept in app storage and shown even offline.
-    final offlineTickets = _readOfflineTickets(prefs, userId);
-    final mergedTickets = _mergeTickets(activeOnlineTickets, offlineTickets);
-
-    // Keep prior list only when offline or the fetch failed — never when online
-    // successfully returns/filters to empty (deleted/ended tickets must clear).
-    if (mergedTickets.isEmpty && hadCachedTickets && (offline || fetchFailed)) {
-      if (mounted) {
-        setState(() => _isLoading = false);
-      }
-      return;
-    }
-
-    if (mounted) {
-      setState(() {
-        _tickets = mergedTickets;
-        _isLoading = false;
-      });
-    }
+    activeTickets.sort(
+      (a, b) => _extractSortDate(b).compareTo(_extractSortDate(a)),
+    );
+    return activeTickets;
   }
 
   String _ticketTypeLabel(Map<String, dynamic> event) {
@@ -195,24 +220,6 @@ class _StudentTicketsState extends State<StudentTickets>
     return ticketId.trim().isNotEmpty;
   }
 
-  String _ticketUniqueKey(Map<String, dynamic> ticketMap) {
-    final ticketData = ticketMap['tickets'];
-    final ticketId = ticketData is List && ticketData.isNotEmpty
-        ? (ticketData[0]['id'] ?? '').toString()
-        : ticketData is Map
-        ? (ticketData['id'] ?? '').toString()
-        : '';
-    if (ticketId.isNotEmpty) return 'ticket:$ticketId';
-
-    final event = ticketMap['events'];
-    final eventId = event is Map ? (event['id'] ?? '').toString() : '';
-    if (eventId.isNotEmpty) return 'event:$eventId';
-
-    final registeredAt = (ticketMap['registered_at'] ?? '').toString();
-    if (registeredAt.isNotEmpty) return 'registered:$registeredAt';
-    return '';
-  }
-
   DateTime _extractSortDate(Map<String, dynamic> ticketMap) {
     final event = ticketMap['events'];
     final startAt = event is Map ? (event['start_at'] ?? '').toString() : '';
@@ -224,71 +231,7 @@ class _StudentTicketsState extends State<StudentTickets>
       if (registeredAt.isNotEmpty) return DateTime.parse(registeredAt);
     } catch (_) {}
 
-    try {
-      final downloadedAt = (ticketMap['downloaded_at_local'] ?? '').toString();
-      if (downloadedAt.isNotEmpty) return DateTime.parse(downloadedAt);
-    } catch (_) {}
-
     return DateTime.fromMillisecondsSinceEpoch(0);
-  }
-
-  List<Map<String, dynamic>> _readOfflineTickets(
-    SharedPreferences prefs,
-    String userId,
-  ) {
-    if (userId.isEmpty) return <Map<String, dynamic>>[];
-
-    final rows =
-        prefs.getStringList('$_downloadedTicketKeyPrefix$userId') ?? <String>[];
-    final parsed = <Map<String, dynamic>>[];
-    for (final row in rows) {
-      try {
-        final decoded = jsonDecode(row);
-        if (decoded is! Map) continue;
-        final ticket = Map<String, dynamic>.from(decoded);
-        // Only treat tickets as offline-saved when user explicitly tapped
-        // the Download Ticket button. This prevents legacy/accidental cache
-        // entries from making the download feature pointless.
-        if (ticket['downloaded_explicit'] != true) continue;
-        ticket['local_cached'] = true;
-        parsed.add(ticket);
-      } catch (_) {
-        // Skip malformed cached tickets safely.
-      }
-    }
-    return parsed;
-  }
-
-  List<Map<String, dynamic>> _mergeTickets(
-    List<Map<String, dynamic>> online,
-    List<Map<String, dynamic>> offline,
-  ) {
-    final merged = <String, Map<String, dynamic>>{};
-    int fallback = 0;
-
-    for (final ticket in offline) {
-      final normalized = Map<String, dynamic>.from(ticket);
-      final key = _ticketUniqueKey(normalized).isNotEmpty
-          ? _ticketUniqueKey(normalized)
-          : 'offline_${fallback++}';
-      normalized['local_cached'] = true;
-      merged[key] = normalized;
-    }
-
-    for (final ticket in online) {
-      final normalized = Map<String, dynamic>.from(ticket);
-      final key = _ticketUniqueKey(normalized).isNotEmpty
-          ? _ticketUniqueKey(normalized)
-          : 'online_${fallback++}';
-      final alreadyOffline = merged.containsKey(key);
-      normalized['local_cached'] =
-          alreadyOffline || normalized['local_cached'] == true;
-      merged[key] = normalized;
-    }
-
-    final list = merged.values.toList();
-    list.sort((a, b) => _extractSortDate(a).compareTo(_extractSortDate(b)));
-    return list;
   }
 
   @override
@@ -551,13 +494,13 @@ class _StudentTicketsState extends State<StudentTickets>
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
                                       Icon(
-                                        Icons.download_done_rounded,
+                                        Icons.offline_pin_rounded,
                                         size: 11,
                                         color: Colors.white,
                                       ),
                                       SizedBox(width: 3),
                                       Text(
-                                        'Offline',
+                                        'Cached',
                                         style: TextStyle(
                                           color: Colors.white,
                                           fontSize: 9,

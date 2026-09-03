@@ -119,7 +119,10 @@ class EventLiveService {
   /// Tickets tab only — skip notification/catalog side effects.
   void pulseTicketsUi() {
     unawaited(() async {
-      await EventService().invalidateMyTicketsCache();
+      final offline = await _isOfflineNow();
+      if (!offline) {
+        await EventService().invalidateMyTicketsCache();
+      }
       AppCacheService().cancelInFlightPrefix('fetch:tickets:');
       if (!_controller.isClosed) {
         _controller.add('tickets');

@@ -52,6 +52,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
   bool _isSyncing = false;
   bool _offlineSnapshotReady = false;
   bool _offlineSnapshotStale = false;
+  bool _offlineWarmFailed = false;
   DateTime? _offlineLastSyncedAt;
   Map<String, dynamic>? _offlinePinnedOpenContext;
   bool _isRefreshingContext = false;
@@ -545,17 +546,30 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     super.dispose();
   }
 
+  bool _shouldRefreshScanContextForLiveReason(String reason) {
+    final core = reason.startsWith('offline:')
+        ? reason.substring('offline:'.length)
+        : reason;
+    return core == 'events' ||
+        core.startsWith('events') ||
+        core == 'teacher_assignments' ||
+        core.startsWith('teacher_assignments') ||
+        core == 'assistants' ||
+        core.startsWith('assistants') ||
+        core == 'sessions' ||
+        core.startsWith('sessions');
+  }
+
   void _startContextRefreshTimer() {
     _contextRefreshTimer?.cancel();
     if (_teacherId.isEmpty || !widget.isActive) return;
     _contextRefreshTimer = Timer.periodic(
-      // Backup to realtime — keep quiet enough for Free-plan egress.
-      const Duration(seconds: 20),
+      // Realtime is primary. This is only a quiet backup for window/access.
+      const Duration(seconds: 45),
       (_) {
         if (!widget.isActive) return;
         _enforceLocalOfflineWindowGuard();
         unawaited(_refreshScanContext(silent: true));
-        unawaited(_refreshAttendanceStats());
         unawaited(_syncQueueWhenOnline(showSnack: false));
       },
     );
@@ -775,6 +789,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           _isScanning = false;
           _offlineSnapshotReady = false;
           _offlineSnapshotStale = false;
+          _offlineWarmFailed = false;
           _offlineLastSyncedAt = null;
           _offlinePinnedOpenContext = null;
           _scanStatus = 'Checking scanner assignment...';
@@ -828,6 +843,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           _teacherId = '';
           _offlineSnapshotReady = false;
           _offlineSnapshotStale = false;
+          _offlineWarmFailed = false;
           _offlineLastSyncedAt = null;
           _offlinePinnedOpenContext = null;
           _scanContext = {
@@ -852,7 +868,10 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     }
   }
 
-  Future<void> _refreshScanContext({bool silent = false}) async {
+  Future<void> _refreshScanContext({
+    bool silent = false,
+    bool forceFresh = false,
+  }) async {
     if (_teacherId.isEmpty || _isRefreshingContext) return;
     _isRefreshingContext = true;
 
@@ -880,7 +899,10 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         }
       }
 
-      final result = await _eventService.getTeacherScanContext(_teacherId);
+      final result = await _eventService.getTeacherScanContext(
+        _teacherId,
+        forceFresh: forceFresh || !silent,
+      );
       if (!mounted) return;
 
       final context = result['context'];
@@ -944,7 +966,8 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         }
       }
 
-      if (!_isOffline &&
+      if (!silent &&
+          !_isOffline &&
           result['ok'] == true &&
           normalizedStatus != 'no_assignment' &&
           normalizedStatus != 'error' &&
@@ -1050,11 +1073,11 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       if (result['ok'] == true &&
           normalizedStatus != 'no_assignment' &&
           normalizedStatus != 'error') {
-        unawaited(_refreshAttendanceStats());
-        if (silent) {
-          unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
-        } else {
+        if (!silent) {
+          unawaited(_refreshAttendanceStats());
           await _refreshOfflineReadiness(refreshSnapshot: true);
+        } else {
+          unawaited(_refreshOfflineReadiness());
         }
       } else {
         if (silent) {
@@ -1207,15 +1230,16 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         value: id,
       ),
       callback: (_) {
-        unawaited(_refreshScanContext(silent: true));
+        unawaited(_refreshScanContext(silent: true, forceFresh: true));
       },
     );
     _assignmentChannel!.subscribe();
 
     _eventLiveSubscription?.cancel();
-    _eventLiveSubscription = EventLiveService.instance.changes.listen((_) {
+    _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
       if (!mounted || _isOffline) return;
-      unawaited(_refreshScanContext(silent: true));
+      if (!_shouldRefreshScanContextForLiveReason(reason)) return;
+      unawaited(_refreshScanContext(silent: true, forceFresh: true));
     });
   }
 
@@ -1243,7 +1267,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           value: id,
         ),
         callback: (_) {
-          unawaited(_refreshScanContext(silent: true));
+          unawaited(_refreshScanContext(silent: true, forceFresh: true));
         },
       )
       ..onPostgresChanges(
@@ -1256,7 +1280,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
           value: id,
         ),
         callback: (_) {
-          unawaited(_refreshScanContext(silent: true));
+          unawaited(_refreshScanContext(silent: true, forceFresh: true));
         },
       )
       ..subscribe();
@@ -1711,6 +1735,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       setState(() {
         _offlineSnapshotReady = false;
         _offlineSnapshotStale = false;
+        _offlineWarmFailed = false;
         _offlineLastSyncedAt = null;
       });
       return;
@@ -1726,6 +1751,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     setState(() {
       _offlineSnapshotReady = monitor['offline_ready'] == true;
       _offlineSnapshotStale = monitor['snapshot_stale'] == true;
+      _offlineWarmFailed = monitor['warm_failed'] == true;
       _offlineLastSyncedAt = _parseOfflineSyncDate(
         monitor['last_synced_at']?.toString(),
       );
@@ -1750,8 +1776,6 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
         _isScanning = true;
         _isProcessingScan = false;
       });
-      // Context refresh stays background — do not block the next detect.
-      unawaited(_refreshScanContext(silent: true));
     });
   }
 
@@ -1863,6 +1887,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
 
   Widget _buildOfflinePreparedHeaderChip() {
     final ready = _offlineSnapshotReady && !_offlineSnapshotStale;
+    final stale = (_offlineSnapshotStale || _offlineWarmFailed) && !ready;
     final String label;
     final IconData icon;
     if (_isOffline && ready) {
@@ -1871,7 +1896,7 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     } else if (ready) {
       label = 'Prepared';
       icon = Icons.cloud_done_rounded;
-    } else if (_offlineSnapshotStale) {
+    } else if (stale) {
       label = 'Refresh';
       icon = Icons.sync_problem_rounded;
     } else if (_isOffline) {
@@ -1900,34 +1925,43 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
               : 'Offline pack saved. You can scan without internet later.')
           : (_isOffline
               ? 'No offline pack yet. Connect once while assigned to prepare.'
-              : 'Saving offline pack… keep this screen open with internet.'),
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 118),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: fill,
-          borderRadius: BorderRadius.circular(999),
-          border: Border.all(color: accent.withValues(alpha: 0.45)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 14, color: accent),
-            const SizedBox(width: 5),
-            Flexible(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
-                  color: accent,
-                  letterSpacing: 0.1,
+              : (_offlineWarmFailed
+                  ? 'Could not save offline pack. Tap to retry.'
+                  : 'Saving offline pack… keep this screen open with internet.')),
+      child: GestureDetector(
+        onTap: (!_isOffline && (stale || !ready))
+            ? () {
+                unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
+              }
+            : null,
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 118),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            color: fill,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: accent.withValues(alpha: 0.45)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 14, color: accent),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: accent,
+                    letterSpacing: 0.1,
+                  ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

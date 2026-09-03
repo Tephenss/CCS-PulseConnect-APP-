@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 
@@ -46,6 +48,11 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
     super.dispose();
   }
 
+  bool _isDisplayablePhoto(String photo) {
+    final value = photo.trim().toLowerCase();
+    return value.startsWith('http://') || value.startsWith('https://');
+  }
+
   Future<List<Map<String, dynamic>>> _resolveStudentAvatars(
     List<Map<String, dynamic>> rows,
   ) async {
@@ -54,43 +61,62 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
     for (final student in rows) {
       final copy = Map<String, dynamic>.from(student);
       final photo = (copy['photo_url']?.toString() ?? '').trim();
-      if (photo.isNotEmpty) {
-        copy['photo_url'] = await eventService.resolveAvatarDisplayUrl(photo);
+      if (!_isDisplayablePhoto(photo)) {
+        copy['photo_url'] = await eventService.resolveAvatarDisplayUrl(
+          photo,
+          userId: copy['id']?.toString(),
+        );
       }
       resolved.add(copy);
     }
     return resolved;
   }
 
+  Future<void> _hydrateAvatarsInBackground(
+    List<Map<String, dynamic>> rows,
+  ) async {
+    final needsSign = rows.any((row) {
+      final photo = (row['photo_url']?.toString() ?? '').trim();
+      return !_isDisplayablePhoto(photo);
+    });
+    if (!needsSign) return;
+
+    final resolved = await _resolveStudentAvatars(rows);
+    if (!mounted) return;
+    setState(() => _students = resolved);
+  }
+
   Future<void> _fetchStudents({bool forceFresh = false}) async {
     final cacheKey = _cacheKey;
     try {
+      if (!forceFresh) {
+        final warm = await _appCacheService.loadJsonList(cacheKey);
+        if (warm.isNotEmpty && mounted) {
+          setState(() {
+            _students = warm;
+            _usingCachedStudents = true;
+            _isLoading = false;
+          });
+          unawaited(_hydrateAvatarsInBackground(warm));
+        }
+      }
+
       final connectivity = await _connectivity.checkConnectivity();
       final isOffline =
           connectivity.isEmpty ||
           connectivity.every((result) => result == ConnectivityResult.none);
 
-      if (!forceFresh) {
-        final warm = await _appCacheService.loadJsonList(cacheKey);
-        if (warm.isNotEmpty && mounted) {
-          final resolved = await _resolveStudentAvatars(warm);
+      if (isOffline) {
+        if (_students.isEmpty) {
+          final cached = await _appCacheService.loadJsonList(cacheKey);
+          if (!mounted) return;
           setState(() {
-            _students = resolved;
+            _students = cached;
             _usingCachedStudents = true;
             _isLoading = false;
           });
+          unawaited(_hydrateAvatarsInBackground(cached));
         }
-      }
-
-      if (isOffline) {
-        final cached = await _appCacheService.loadJsonList(cacheKey);
-        final resolved = await _resolveStudentAvatars(cached);
-        if (!mounted) return;
-        setState(() {
-          _students = resolved;
-          _usingCachedStudents = true;
-          _isLoading = false;
-        });
         return;
       }
 
@@ -121,24 +147,31 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
         preserveNonEmptyOnEmpty: !forceFresh,
       );
 
-      final resolved = await _resolveStudentAvatars(rows);
       if (!mounted) return;
       setState(() {
-        _students = resolved;
+        _students = rows.isNotEmpty || forceFresh ? rows : _students;
         _usingCachedStudents = false;
         _isLoading = false;
       });
+      unawaited(_hydrateAvatarsInBackground(
+        rows.isNotEmpty || forceFresh ? rows : _students,
+      ));
     } catch (e) {
+      if (_students.isNotEmpty) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
       final cached = await _appCacheService.loadJsonList(cacheKey);
-      final resolved = await _resolveStudentAvatars(cached);
       if (!mounted) return;
       setState(() {
-        _students = resolved;
+        _students = cached;
         _usingCachedStudents = cached.isNotEmpty;
         _isLoading = false;
       });
       if (cached.isEmpty) {
         AppSnackBar.error(context, 'Failed to load students: $e');
+      } else {
+        unawaited(_hydrateAvatarsInBackground(cached));
       }
     }
   }
@@ -248,7 +281,7 @@ class _TeacherSectionStudentsState extends State<TeacherSectionStudents> {
                         email.contains(query);
                   }).toList();
 
-                  if (_isLoading) {
+                  if (_isLoading && _students.isEmpty) {
                     return ListView(
                       physics: const AlwaysScrollableScrollPhysics(),
                       children: const [

@@ -1,10 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import '../../widgets/app_snackbar.dart';
 import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
-import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../utils/event_time_utils.dart';
 import '../../services/event_service.dart';
@@ -21,10 +18,7 @@ class StudentTicketView extends StatefulWidget {
 
 class _StudentTicketViewState extends State<StudentTicketView>
     with WidgetsBindingObserver {
-  static const String _downloadedTicketKeyPrefix = 'downloaded_tickets_';
   final EventService _eventService = EventService();
-  bool _isDownloading = false;
-  bool _isAlreadyDownloaded = false;
   bool _isLoadingSeminarAttendance = false;
   List<Map<String, dynamic>> _seminarAttendance = [];
   /// Live simple-event attendance (refreshed while this screen is open).
@@ -66,7 +60,6 @@ class _StudentTicketViewState extends State<StudentTicketView>
     WidgetsBinding.instance.addObserver(this);
     _liveAttendance = _attendanceFromTicket(widget.ticket);
     _seminarAttendance = _seedSeminarRows(widget.ticket);
-    _loadDownloadedState();
     _loadSeminarAttendance();
     unawaited(_refreshAttendanceLive(force: true));
     _bindAttendanceRealtime();
@@ -296,189 +289,6 @@ class _StudentTicketViewState extends State<StudentTicketView>
       _seminarAttendance = rows;
       _isLoadingSeminarAttendance = false;
     });
-  }
-
-  Future<void> _loadDownloadedState() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('user_id') ?? 'guest';
-      final storageKey = '$_downloadedTicketKeyPrefix$userId';
-      final currentKey = _ticketUniqueKey(widget.ticket);
-
-      if (currentKey.isEmpty) {
-        if (mounted) setState(() => _isAlreadyDownloaded = false);
-        return;
-      }
-
-      final rows = prefs.getStringList(storageKey) ?? <String>[];
-      bool found = false;
-      for (final row in rows) {
-        try {
-          final decoded = jsonDecode(row);
-          if (decoded is! Map) continue;
-          final map = Map<String, dynamic>.from(decoded);
-          if (_ticketUniqueKey(map) == currentKey) {
-            found = true;
-            break;
-          }
-        } catch (_) {
-          // Ignore malformed rows.
-        }
-      }
-
-      if (mounted) {
-        setState(() => _isAlreadyDownloaded = found);
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() => _isAlreadyDownloaded = false);
-      }
-    }
-  }
-
-  String _ticketUniqueKey(Map<String, dynamic> ticketMap) {
-    final ticketData = ticketMap['tickets'];
-    final ticketId = ticketData is List && ticketData.isNotEmpty
-        ? (ticketData[0]['id'] ?? '').toString()
-        : ticketData is Map
-            ? (ticketData['id'] ?? '').toString()
-            : '';
-    if (ticketId.isNotEmpty) return 'ticket:$ticketId';
-
-    final event = ticketMap['events'];
-    final eventId = event is Map ? (event['id'] ?? '').toString() : '';
-    if (eventId.isNotEmpty) return 'event:$eventId';
-    return '';
-  }
-
-  Future<void> _downloadTicket(String ticketIdDisplay) async {
-    if (_isDownloading) return;
-    if (_isAlreadyDownloaded) {
-      AppSnackBar.info(context, 'Ticket already saved offline.');
-      return;
-    }
-    if (ticketIdDisplay.trim().isEmpty) {
-      AppSnackBar.warning(context, 'Ticket is not available yet.');
-      return;
-    }
-
-    setState(() => _isDownloading = true);
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final userId = prefs.getString('user_id') ?? 'guest';
-      final storageKey = '$_downloadedTicketKeyPrefix$userId';
-
-      final currentTicket = Map<String, dynamic>.from(widget.ticket);
-      currentTicket['local_cached'] = true;
-      currentTicket['downloaded_at_local'] = DateTime.now().toIso8601String();
-      currentTicket['downloaded_explicit'] = true;
-      if (_seminarAttendance.isNotEmpty) {
-        currentTicket['seminar_attendance'] = _seminarAttendance;
-        final eventMap = currentTicket['events'];
-        if (eventMap is Map) {
-          final patched = Map<String, dynamic>.from(eventMap);
-          patched['sessions'] = _seminarAttendance;
-          patched['event_mode'] = 'seminar_based';
-          patched['uses_sessions'] = true;
-          patched['session_count'] = _seminarAttendance.length;
-          currentTicket['events'] = patched;
-        }
-      }
-      final currentKey = _ticketUniqueKey(currentTicket);
-
-      final existingRows = prefs.getStringList(storageKey) ?? <String>[];
-      final updatedRows = <String>[];
-      bool replaced = false;
-
-      for (final row in existingRows) {
-        try {
-          final decoded = jsonDecode(row);
-          if (decoded is! Map) {
-            continue;
-          }
-          final decodedMap = Map<String, dynamic>.from(decoded);
-          final decodedKey = _ticketUniqueKey(decodedMap);
-          if (!replaced && currentKey.isNotEmpty && decodedKey == currentKey) {
-            updatedRows.add(jsonEncode(currentTicket));
-            replaced = true;
-          } else {
-            updatedRows.add(jsonEncode(decodedMap));
-          }
-        } catch (_) {
-          // Skip malformed cached rows safely.
-        }
-      }
-
-      if (!replaced) {
-        updatedRows.insert(0, jsonEncode(currentTicket));
-      }
-
-      await prefs.setStringList(storageKey, updatedRows.take(150).toList());
-
-      if (!mounted) return;
-      AppSnackBar.success(context, 'Ticket saved in app. You can open it offline in My Tickets.');
-      setState(() => _isAlreadyDownloaded = true);
-    } catch (e) {
-      if (!mounted) return;
-      AppSnackBar.error(context, 'Failed to save ticket offline: $e');
-    } finally {
-      if (mounted) {
-        setState(() => _isDownloading = false);
-      }
-    }
-  }
-
-  Widget _buildDownloadActionIcon() {
-    if (_isDownloading) {
-      return const SizedBox(
-        key: ValueKey('loading-icon'),
-        width: 18,
-        height: 18,
-        child: CircularProgressIndicator(
-          strokeWidth: 2.2,
-          valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFD4A843)),
-        ),
-      );
-    }
-
-    if (_isAlreadyDownloaded) {
-      return const Icon(
-        Icons.download_done_rounded,
-        key: ValueKey('saved-icon'),
-        size: 18,
-        color: Color(0xFFD4A843),
-      );
-    }
-
-    return const Icon(
-      Icons.download_rounded,
-      key: ValueKey('default-icon'),
-      size: 18,
-    );
-  }
-
-  Widget _buildDownloadActionLabel() {
-    if (_isAlreadyDownloaded) {
-      return const Text(
-        'SAVED OFFLINE',
-        key: ValueKey('saved-label'),
-        style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 0.4),
-      );
-    }
-
-    if (_isDownloading) {
-      return const Text(
-        'SAVING OFFLINE...',
-        key: ValueKey('loading-label'),
-        style: TextStyle(fontWeight: FontWeight.w800, letterSpacing: 0.4),
-      );
-    }
-
-    return const Text(
-      'DOWNLOAD TICKET',
-      key: ValueKey('default-label'),
-      style: TextStyle(fontWeight: FontWeight.w700, letterSpacing: 0.35),
-    );
   }
 
   @override
@@ -1011,62 +821,6 @@ class _StudentTicketViewState extends State<StudentTicketView>
                           ),
                         ),
                       ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            // Fixed Download Button at bottom
-            Container(
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.05),
-                    blurRadius: 10,
-                    offset: const Offset(0, -4),
-                  ),
-                ],
-              ),
-              child: SafeArea(
-                top: false,
-                child: SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: (_isDownloading || _isAlreadyDownloaded)
-                        ? null
-                        : () => _downloadTicket(ticketIdDisplay),
-                    icon: AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 220),
-                      switchInCurve: Curves.easeOutCubic,
-                      switchOutCurve: Curves.easeInCubic,
-                      child: _buildDownloadActionIcon(),
-                    ),
-                    label: AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 220),
-                      switchInCurve: Curves.easeOutCubic,
-                      switchOutCurve: Curves.easeInCubic,
-                      child: _buildDownloadActionLabel(),
-                    ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: chromeColor,
-                      disabledBackgroundColor: chromeColor,
-                      foregroundColor: Colors.white,
-                      disabledForegroundColor: _isAlreadyDownloaded
-                          ? const Color(0xFFD4A843)
-                          : Colors.white,
-                      elevation: _isDownloading ? 0 : 2,
-                      padding: const EdgeInsets.symmetric(vertical: 18),
-                      side: BorderSide(
-                        color: _isAlreadyDownloaded
-                            ? const Color(0xFFD4A843).withValues(alpha: 0.55)
-                            : Colors.transparent,
-                        width: 1.0,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
                     ),
                   ),
                 ),

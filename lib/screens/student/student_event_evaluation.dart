@@ -154,8 +154,11 @@ class _StudentEventEvaluationScreenState
       // ignore: avoid_print
       debugPrint('[eval] submit ok issued=$issued skipped=$skipped');
       // Eval answers already saved — never surface cert pool as a hard failure.
+      // Only mention certificates when this event actually has cert setup.
       final String message;
-      if (issued > 0 || skipped == 'already_issued') {
+      if (skipped == 'not_configured' || skipped == 'certs_not_linked') {
+        message = 'Evaluation submitted successfully.';
+      } else if (issued > 0 || skipped == 'already_issued') {
         message =
             'Evaluation submitted. Your certificate is ready — open My Certificates.';
       } else if (skipped == 'checkout_required') {
@@ -171,8 +174,7 @@ class _StudentEventEvaluationScreenState
         message =
             'Evaluation submitted. Certificate save failed — ask your teacher to resend from Event Details.';
       } else {
-        message =
-            'Evaluation submitted successfully.';
+        message = 'Evaluation submitted successfully.';
       }
       AppSnackBar.success(context, message);
       Navigator.pop(context, true);

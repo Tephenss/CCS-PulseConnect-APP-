@@ -1811,8 +1811,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                             alignment: Alignment.center,
                             fadeInDuration: Duration.zero,
                             fadeOutDuration: Duration.zero,
-                            memCacheWidth:
-                                DevicePerformance.instance.imageCacheWidth,
+                            filterQuality: FilterQuality.high,
+                            memCacheWidth: DevicePerformance.instance
+                                .heroImageCacheWidth(context),
                             placeholder: (context, url) =>
                                 _coverLoadingPlaceholder(context),
                             errorWidget: (context, url, error) =>

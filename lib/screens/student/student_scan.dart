@@ -159,7 +159,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
             (res['participant_name']?.toString() ?? '').trim();
         final action = (res['action']?.toString() ?? '').toLowerCase();
         final queuedLabel =
-            action == 'check_out' ? 'Timed out' : 'Present';
+            action == 'check_out' ? 'Timed out' : 'Timed in';
         _scanStatus = participantName.isNotEmpty
             ? 'Queued offline: $participantName — $queuedLabel'
             : (res['message']?.toString() ??
@@ -200,7 +200,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
               ? '$participantName — Timed in'
               : (res['message']?.toString() ?? 'Timed in successfully!');
           _statusColor = successColor;
-          _rememberVerifiedParticipant(res, statusLabel: 'Present');
+          _rememberVerifiedParticipant(res, statusLabel: 'Timed in');
           _playSuccessScanSound();
         }
       } else if (status == 'already_checked_in' || status == 'used') {
@@ -630,26 +630,36 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     super.dispose();
   }
 
+  bool _shouldRefreshScanContextForLiveReason(String reason) {
+    final core = reason.startsWith('offline:')
+        ? reason.substring('offline:'.length)
+        : reason;
+    return core == 'events' ||
+        core.startsWith('events') ||
+        core == 'teacher_assignments' ||
+        core.startsWith('teacher_assignments') ||
+        core == 'assistants' ||
+        core.startsWith('assistants') ||
+        core == 'sessions' ||
+        core.startsWith('sessions');
+  }
+
   void _startContextRefreshTimer() {
     _contextRefreshTimer?.cancel();
     if (_studentId.isEmpty || !widget.isActive) return;
     _contextRefreshTimer = Timer.periodic(
-      // Backup to realtime — keep quiet enough for Free-plan egress.
-      const Duration(seconds: 20),
+      // Realtime is primary. This is only a quiet backup for window/access.
+      const Duration(seconds: 45),
       (_) {
         if (!widget.isActive) return;
         if (_selectedMode == StudentScanMode.assist) {
           _enforceLocalOfflineWindowGuard();
           unawaited(_refreshScanContext(silent: true));
-          unawaited(_refreshAttendanceStats());
         } else if (_selectedMode == StudentScanMode.takeAttendance &&
             mounted) {
           setState(() {
             _applyTakeAttendanceUiState(hasScanResult: _hasScanResult);
           });
-          if (!_isOffline) {
-            unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
-          }
         }
         // Auto-drain queue whenever a link exists (assist + self).
         unawaited(_syncQueueWhenOnline(showSnack: false));
@@ -741,6 +751,11 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       if (isTakeAttendance) {
         if (studentId.isNotEmpty) {
           await _refreshPendingSyncCount();
+          if (startOffline) {
+            await _offlineSyncService.ensureSelfAttendancePackFromLocalTickets(
+              studentId: studentId,
+            );
+          }
           await _refreshOfflineReadiness(refreshSnapshot: !startOffline);
           if (mounted) {
             setState(() {
@@ -838,7 +853,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     }
   }
 
-  Future<void> _refreshScanContext({bool silent = false}) async {
+  Future<void> _refreshScanContext({
+    bool silent = false,
+    bool forceFresh = false,
+  }) async {
     if (_studentId.isEmpty || _isRefreshingContext) return;
 
     // Self check-in never depends on QR scanner assignment.
@@ -870,7 +888,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         }
       }
 
-      final result = await _eventService.getStudentScanContext(_studentId);
+      final result = await _eventService.getStudentScanContext(
+        _studentId,
+        forceFresh: forceFresh || !silent,
+      );
       if (!mounted) return;
 
       final context = result['context'];
@@ -998,12 +1019,12 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       if (result['ok'] == true &&
           normalizedStatus != 'no_assignment' &&
           normalizedStatus != 'error') {
-        if (_selectedMode == StudentScanMode.assist) {
+        if (_selectedMode == StudentScanMode.assist && !silent) {
           unawaited(_refreshAttendanceStats());
         }
         if (silent) {
-          unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
-            } else {
+          unawaited(_refreshOfflineReadiness());
+        } else {
           await _refreshOfflineReadiness(refreshSnapshot: true);
         }
       } else {
@@ -1169,16 +1190,17 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       ),
       callback: (_) {
         if (_selectedMode != StudentScanMode.assist) return;
-        unawaited(_refreshScanContext(silent: true));
+        unawaited(_refreshScanContext(silent: true, forceFresh: true));
       },
     );
     _assignmentChannel!.subscribe();
 
     _eventLiveSubscription?.cancel();
-    _eventLiveSubscription = EventLiveService.instance.changes.listen((_) {
+    _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
       if (!mounted || _isOffline) return;
       if (_selectedMode != StudentScanMode.assist) return;
-      unawaited(_refreshScanContext(silent: true));
+      if (!_shouldRefreshScanContextForLiveReason(reason)) return;
+      unawaited(_refreshScanContext(silent: true, forceFresh: true));
     });
   }
 
@@ -1207,7 +1229,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         ),
         callback: (_) {
           if (_selectedMode != StudentScanMode.assist) return;
-          unawaited(_refreshScanContext(silent: true));
+          unawaited(_refreshScanContext(silent: true, forceFresh: true));
         },
       )
       ..onPostgresChanges(
@@ -1221,7 +1243,7 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         ),
         callback: (_) {
           if (_selectedMode != StudentScanMode.assist) return;
-          unawaited(_refreshScanContext(silent: true));
+          unawaited(_refreshScanContext(silent: true, forceFresh: true));
         },
       )
       ..subscribe();
@@ -1833,31 +1855,8 @@ class _StudentScanScreenState extends State<StudentScanScreen>
     return DateTime.tryParse(value)?.toLocal();
   }
 
-  bool _liveAssistContextHasEvent() {
-    if (_selectedMode != StudentScanMode.assist) return false;
-    final status = (_scanContext?['status']?.toString() ?? '').trim().toLowerCase();
-    if (status == 'no_assignment' ||
-        status == 'error' ||
-        status == 'forbidden' ||
-        status == 'checking') {
-      return false;
-    }
-    final raw = _scanContext?['context'];
-    final contextMap = raw is Map<String, dynamic>
-        ? raw
-        : (raw is Map ? Map<String, dynamic>.from(raw) : null);
-    if (contextMap == null) return false;
-    final event = contextMap['event'];
-    if (event is Map) {
-      return (event['id']?.toString() ?? '').trim().isNotEmpty;
-    }
-    // Some payloads nest the event fields directly on context.
-    return (contextMap['id']?.toString() ?? '').trim().isNotEmpty;
-  }
-
   bool get _offlinePackChipReady =>
-      (_offlineSnapshotReady && !_offlineSnapshotStale) ||
-      (_selectedMode == StudentScanMode.assist && _liveAssistContextHasEvent());
+      _offlineSnapshotReady && !_offlineSnapshotStale;
 
   Future<void> _refreshOfflineReadiness({
     bool refreshSnapshot = false,
@@ -1902,12 +1901,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       isOffline: _isOffline,
     );
     if (!mounted) return;
-    final monitorReady = monitor['offline_ready'] == true;
-    final liveReady = _liveAssistContextHasEvent();
     setState(() {
-      _offlineSnapshotReady = monitorReady || liveReady;
-      _offlineSnapshotStale =
-          monitor['snapshot_stale'] == true && !liveReady && !monitorReady;
+      _offlineSnapshotReady = monitor['offline_ready'] == true;
+      _offlineSnapshotStale = monitor['snapshot_stale'] == true;
+      _offlineWarmFailed = monitor['warm_failed'] == true;
       _offlineLastSyncedAt = _parseOfflineSyncDate(
         monitor['last_synced_at']?.toString(),
       );
@@ -1934,9 +1931,6 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         _isScanning = true;
         _isProcessingScan = false;
       });
-      if (_selectedMode == StudentScanMode.assist) {
-        unawaited(_refreshScanContext(silent: true));
-      }
     });
   }
 
@@ -2141,6 +2135,10 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       _lastScannedAt = null;
       if (mode == StudentScanMode.takeAttendance) {
         _clearAttendanceStats();
+        // Assist pack must not keep the Event QR camera open.
+        _offlineSnapshotReady = false;
+        _offlineSnapshotStale = false;
+        _offlineWarmFailed = false;
         _applyTakeAttendanceUiState(hasScanResult: false);
       } else {
         final rawContext = _scanContext?['context'];
@@ -2169,7 +2167,15 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       unawaited(_refreshScanContext(silent: true));
       unawaited(_refreshOfflineReadiness(refreshSnapshot: true));
     } else if (mode == StudentScanMode.takeAttendance) {
-      unawaited(_refreshOfflineReadiness(refreshSnapshot: !_isOffline));
+      unawaited(() async {
+        if (_studentId.isNotEmpty) {
+          await _offlineSyncService.ensureSelfAttendancePackFromLocalTickets(
+            studentId: _studentId,
+          );
+        }
+        if (!mounted) return;
+        await _refreshOfflineReadiness(refreshSnapshot: !_isOffline);
+      }());
       if (!_isOffline && _pendingSyncCount > 0) {
         unawaited(_performQueueSync(showSnack: false));
       }
@@ -2618,7 +2624,8 @@ class _StudentScanScreenState extends State<StudentScanScreen>
         lower.contains('time-out opens at') ||
         lower.contains('wait for the scheduled start') ||
         lower.contains('time-in grace ended at') ||
-        lower.contains('already timed in');
+        lower.contains('already timed in') ||
+        lower.contains('too early to time out');
 
     final schedule = skipSchedule ? '' : _formatEventScheduleLine(res);
     if (title.isEmpty && schedule.isEmpty) return base;

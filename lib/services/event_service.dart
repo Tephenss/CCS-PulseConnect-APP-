@@ -28,6 +28,9 @@ class EventService {
   static final Map<String, _CachedStudentRequirements> _studentRequirementsCache =
       {};
   static final Map<String, _ListCacheEntry> _listCache = {};
+  static const Duration _scanContextMemTtl = Duration(seconds: 25);
+  static final Map<String, Map<String, dynamic>> _scanContextMem = {};
+  static final Map<String, DateTime> _scanContextMemAt = {};
   /// Signed avatar URLs (private bucket) — cuts repeat BFF/storage egress.
   static final Map<String, _CachedSignedAvatar> _signedAvatarCache = {};
   static final Map<String, Future<String>> _signedAvatarInFlight = {};
@@ -566,6 +569,11 @@ class EventService {
     return _composeDisplayName(user);
   }
 
+  /// Surname first, no middle name. Used by teacher participant lists.
+  String composeParticipantListName(Map<String, dynamic>? user) {
+    return _composeSurnameFirstDisplayName(user);
+  }
+
   String _composeDisplayName(Map<String, dynamic>? user) {
     if (user == null || user.isEmpty) return '';
 
@@ -591,14 +599,10 @@ class EventService {
     if (user == null || user.isEmpty) return '';
 
     final firstName = (user['first_name']?.toString() ?? '').trim();
-    final middleName = (user['middle_name']?.toString() ?? '').trim();
     final lastName = (user['last_name']?.toString() ?? '').trim();
     final suffix = (user['suffix']?.toString() ?? '').trim();
 
-    final given = <String>[
-      if (firstName.isNotEmpty) firstName,
-      if (middleName.isNotEmpty) middleName,
-    ].join(' ');
+    final given = firstName;
     var fullName = '';
     if (lastName.isNotEmpty && given.isNotEmpty) {
       fullName = '$lastName, $given';
@@ -672,8 +676,18 @@ class EventService {
     return '';
   }
 
-  Future<String> _resolveAvatarDisplayUrl(String rawPhotoUrl) async {
-    final raw = rawPhotoUrl.trim();
+  Future<String> _resolveAvatarDisplayUrl(
+    String rawPhotoUrl, {
+    String? userId,
+  }) async {
+    var raw = rawPhotoUrl.trim();
+    final uid = (userId ?? '').trim().toLowerCase();
+    final uuidRe = RegExp(
+      r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    );
+    if (raw.isEmpty && uuidRe.hasMatch(uid)) {
+      raw = 'media/avatars/profiles/$uid.jpg';
+    }
     if (raw.isEmpty) return '';
 
     final lower = raw.toLowerCase();
@@ -681,62 +695,86 @@ class EventService {
       return raw;
     }
 
+    Future<String> signPath(String path) async {
+      final cacheKey = path;
+      final cached = _signedAvatarCache[cacheKey];
+      if (cached != null &&
+          DateTime.now().toUtc().difference(cached.cachedAtUtc) <
+              _signedAvatarTtl &&
+          cached.url.trim().isNotEmpty) {
+        return cached.url;
+      }
+      final inFlight = _signedAvatarInFlight[cacheKey];
+      if (inFlight != null) {
+        return inFlight;
+      }
+      final future = () async {
+        if (MobileBackendService.isConfigured) {
+          try {
+            final token = await MobileBackendService.getSessionToken();
+            if (token != null && token.isNotEmpty) {
+              final res = await MobileBackendService().createSignedStorageUrl(
+                bucket: 'avatars',
+                path: path,
+                expiresIn: 60 * 60 * 12,
+              );
+              final signed = (res['signed_url']?.toString() ?? '').trim();
+              if (res['ok'] == true && signed.isNotEmpty) {
+                _signedAvatarCache[cacheKey] = _CachedSignedAvatar(
+                  url: signed,
+                  cachedAtUtc: DateTime.now().toUtc(),
+                );
+                return signed;
+              }
+            }
+          } catch (_) {}
+        }
+        return '';
+      }();
+      _signedAvatarInFlight[cacheKey] = future;
+      try {
+        return await future;
+      } finally {
+        _signedAvatarInFlight.remove(cacheKey);
+      }
+    }
+
     final avatarPath = _extractAvatarStoragePath(raw);
     if (avatarPath.isEmpty) {
-      // Non-storage URL (or already usable) — no BFF sign needed.
       return raw;
     }
 
-    final cacheKey = avatarPath;
-    final cached = _signedAvatarCache[cacheKey];
-    if (cached != null &&
-        DateTime.now().toUtc().difference(cached.cachedAtUtc) <
-            _signedAvatarTtl &&
-        cached.url.trim().isNotEmpty) {
-      return cached.url;
+    final lowerHttp = raw.toLowerCase();
+    if (lowerHttp.startsWith('http') &&
+        (lowerHttp.contains('/api/media_serve.php') ||
+            lowerHttp.contains('/storage/v1/object/sign/'))) {
+      return raw;
     }
 
-    final inFlight = _signedAvatarInFlight[cacheKey];
-    if (inFlight != null) {
-      return inFlight;
-    }
+    final signed = await signPath(avatarPath);
+    if (signed.isNotEmpty) return signed;
 
-    final future = () async {
-      // Private avatars bucket — sign via PHP BFF only (anon sign/info returns 400).
-      if (MobileBackendService.isConfigured) {
-        try {
-          final token = await MobileBackendService.getSessionToken();
-          if (token != null && token.isNotEmpty) {
-            final res = await MobileBackendService().createSignedStorageUrl(
-              bucket: 'avatars',
-              path: avatarPath,
-              expiresIn: 60 * 60 * 12,
-            );
-            final signed = (res['signed_url']?.toString() ?? '').trim();
-            if (res['ok'] == true && signed.isNotEmpty) {
-              _signedAvatarCache[cacheKey] = _CachedSignedAvatar(
-                url: signed,
-                cachedAtUtc: DateTime.now().toUtc(),
-              );
-              return signed;
-            }
-          }
-        } catch (_) {}
+    if (uuidRe.hasMatch(uid)) {
+      for (final candidate in <String>[
+        'media/avatars/profiles/$uid.jpg',
+        'profiles/$uid.jpg',
+        'profiles/$uid.png',
+        'profiles/$uid.webp',
+      ]) {
+        if (candidate == avatarPath) continue;
+        final alt = await signPath(candidate);
+        if (alt.isNotEmpty) return alt;
       }
-      return raw;
-    }();
-
-    _signedAvatarInFlight[cacheKey] = future;
-    try {
-      return await future;
-    } finally {
-      _signedAvatarInFlight.remove(cacheKey);
     }
+    return '';
   }
 
   /// Public wrapper for scanner overlays (private bucket paths need signing).
-  Future<String> resolveAvatarDisplayUrl(String rawPhotoUrl) {
-    return _resolveAvatarDisplayUrl(rawPhotoUrl);
+  Future<String> resolveAvatarDisplayUrl(
+    String rawPhotoUrl, {
+    String? userId,
+  }) {
+    return _resolveAvatarDisplayUrl(rawPhotoUrl, userId: userId);
   }
 
   Future<Map<String, String>> _resolveParticipantIdentityForRegistration(
@@ -1030,6 +1068,7 @@ class EventService {
       'end_at',
       'scan_window_minutes',
       'sort_order',
+      'session_no',
     'early_out_enabled_at',
   ];
 
@@ -4377,27 +4416,47 @@ class EventService {
     String userId, {
     bool forceFresh = false,
   }) async {
-    final cacheKey = 'tickets:$userId';
+    final uid = userId.trim();
+    if (uid.isEmpty) return [];
+
+    final cacheKey = 'tickets:$uid';
+    final offline = await isEffectivelyOffline();
+
+    // Offline / unreachable backend: never hit network; serve last disk snapshot.
+    if (offline) {
+      return _appCache.loadJsonList(cacheKey);
+    }
+
     if (!forceFresh) {
-      final memCached = await _appCache.loadJsonList(cacheKey);
-      // Prefer warm memory/disk so offline reopen stays populated.
-      if (memCached.isNotEmpty) {
+      final cached = await _appCache.loadJsonList(cacheKey);
+      if (cached.isNotEmpty) {
         final age = await _appCache.lastUpdatedAt(cacheKey);
         final isFresh = age != null &&
             DateTime.now().toUtc().difference(age.toUtc()) <= _ticketsTtl;
         if (isFresh) {
-          return memCached;
+          return cached;
         }
-        unawaited(_fetchAndPersistMyTickets(userId, cacheKey));
-        return memCached;
+        unawaited(_fetchAndPersistMyTickets(uid, cacheKey));
+        return cached;
       }
     }
 
-    return _appCache.fetchOnce(
-      'fetch:$cacheKey',
-      () => _fetchAndPersistMyTickets(userId, cacheKey),
-      forceFresh: forceFresh,
-    );
+    try {
+      return await _appCache.fetchOnce(
+        'fetch:$cacheKey',
+        () => _fetchAndPersistMyTickets(uid, cacheKey),
+        forceFresh: forceFresh,
+      );
+    } catch (_) {
+      return _appCache.loadJsonList(cacheKey);
+    }
+  }
+
+  /// Disk-only ticket list for instant UI hydrate (no network).
+  Future<List<Map<String, dynamic>>> getMyTicketsCached(String userId) async {
+    final uid = userId.trim();
+    if (uid.isEmpty) return [];
+    return _appCache.loadJsonList('tickets:$uid');
   }
 
   Future<List<Map<String, dynamic>>> _fetchAndPersistMyTickets(
@@ -4406,15 +4465,14 @@ class EventService {
   ) async {
     try {
       final rows = await _fetchMyTickets(userId);
-      final offline = await isLikelyOffline();
       var toStore = rows;
-      if (rows.isEmpty && offline) {
+      if (rows.isEmpty) {
         toStore = await _preferExistingCacheIfEmpty(cacheKey, rows);
       }
       await _appCache.saveJsonList(
         cacheKey,
         toStore,
-        preserveNonEmptyOnEmpty: offline,
+        preserveNonEmptyOnEmpty: true,
       );
       return toStore;
     } catch (_) {
@@ -5504,7 +5562,32 @@ class EventService {
     };
   }
 
-  Future<Map<String, dynamic>> getTeacherScanContext(String teacherId) async {
+  Map<String, dynamic>? _readScanContextMem(String cacheKey, {bool forceFresh = false}) {
+    if (forceFresh) {
+      _scanContextMem.remove(cacheKey);
+      _scanContextMemAt.remove(cacheKey);
+      return null;
+    }
+    final cached = _scanContextMem[cacheKey];
+    final at = _scanContextMemAt[cacheKey];
+    if (cached == null || at == null) return null;
+    if (DateTime.now().toUtc().difference(at) > _scanContextMemTtl) {
+      _scanContextMem.remove(cacheKey);
+      _scanContextMemAt.remove(cacheKey);
+      return null;
+    }
+    return Map<String, dynamic>.from(cached);
+  }
+
+  void _writeScanContextMem(String cacheKey, Map<String, dynamic> payload) {
+    _scanContextMem[cacheKey] = Map<String, dynamic>.from(payload);
+    _scanContextMemAt[cacheKey] = DateTime.now().toUtc();
+  }
+
+  Future<Map<String, dynamic>> getTeacherScanContext(
+    String teacherId, {
+    bool forceFresh = false,
+  }) async {
     if (teacherId.trim().isEmpty) {
       return {
         'ok': true,
@@ -5517,9 +5600,15 @@ class EventService {
       };
     }
 
+    final memKey = 'teacher:$teacherId';
+    final memHit = _readScanContextMem(memKey, forceFresh: forceFresh);
+    if (memHit != null) {
+      return memHit;
+    }
+
     if (MobileBackendService.isConfigured) {
       try {
-        final hosted = await _mobileBackend.getScanContext(fresh: true);
+        final hosted = await _mobileBackend.getScanContext(fresh: forceFresh);
         if (hosted['ok'] == true) {
           final hostedStatus =
               (hosted['status']?.toString() ?? '').trim().toLowerCase();
@@ -5534,7 +5623,9 @@ class EventService {
               (hostedStatus != 'no_assignment' &&
                   hostedStatus != 'error' &&
                   hostedStatus != 'forbidden')) {
-            return Map<String, dynamic>.from(hosted);
+            final payload = Map<String, dynamic>.from(hosted);
+            _writeScanContextMem(memKey, payload);
+            return payload;
           }
         }
       } catch (_) {
@@ -5639,7 +5730,10 @@ class EventService {
     }
   }
 
-  Future<Map<String, dynamic>> getStudentScanContext(String studentId) async {
+  Future<Map<String, dynamic>> getStudentScanContext(
+    String studentId, {
+    bool forceFresh = false,
+  }) async {
     if (studentId.trim().isEmpty) {
       return {
         'ok': true,
@@ -5652,9 +5746,15 @@ class EventService {
       };
     }
 
+    final memKey = 'student:$studentId';
+    final memHit = _readScanContextMem(memKey, forceFresh: forceFresh);
+    if (memHit != null) {
+      return memHit;
+    }
+
     if (MobileBackendService.isConfigured) {
       try {
-        final hosted = await _mobileBackend.getScanContext(fresh: true);
+        final hosted = await _mobileBackend.getScanContext(fresh: forceFresh);
         if (hosted['ok'] == true) {
           final hostedStatus =
               (hosted['status']?.toString() ?? '').trim().toLowerCase();
@@ -5672,7 +5772,9 @@ class EventService {
               (hostedStatus != 'no_assignment' &&
                   hostedStatus != 'error' &&
                   hostedStatus != 'forbidden')) {
-            return Map<String, dynamic>.from(hosted);
+            final payload = Map<String, dynamic>.from(hosted);
+            _writeScanContextMem(memKey, payload);
+            return payload;
           }
         }
       } catch (_) {
@@ -6139,8 +6241,14 @@ class EventService {
                     participantRow['student_id']?.toString() ??
                     '')
                 .trim();
+        final participantUserId =
+            (user?['id']?.toString() ??
+                    participantRow['student_id']?.toString() ??
+                    '')
+                .trim();
         final participantPhotoUrl = await _resolveAvatarDisplayUrl(
           user?['photo_url']?.toString() ?? '',
+          userId: participantUserId,
         );
 
         final sessionPresence = <String, bool>{};
@@ -6205,6 +6313,7 @@ class EventService {
             'participant_name': participantName,
             'participant_student_id': participantStudentId,
             'participant_student_no': participantStudentId,
+            'participant_user_id': participantUserId,
             'participant_photo_url': participantPhotoUrl,
             'session_presence': sessionPresence,
             'attendance_status': attendanceStatus,
@@ -7788,7 +7897,7 @@ class EventService {
   }
 
   static String buildEventQrPayload(String eventId) {
-    final id = eventId.trim();
+    final id = eventId.trim().toLowerCase();
     if (id.isEmpty) return '';
     return 'PULSE-EVENT-$id';
   }
@@ -8144,10 +8253,36 @@ class EventService {
           .select('id, question_text, field_type, required, sort_order')
           .eq('event_id', eventId)
           .order('sort_order', ascending: true);
-      return List<Map<String, dynamic>>.from(response);
+      return _sortEvaluationQuestionsByType(
+        List<Map<String, dynamic>>.from(response),
+      );
     } catch (e) {
       return [];
     }
+  }
+
+  /// Rating (Likert) first, then comment/text — matches teacher admin grouping.
+  List<Map<String, dynamic>> _sortEvaluationQuestionsByType(
+    List<Map<String, dynamic>> questions,
+  ) {
+    final indexed = <MapEntry<int, Map<String, dynamic>>>[];
+    for (var i = 0; i < questions.length; i++) {
+      indexed.add(MapEntry(i, questions[i]));
+    }
+    indexed.sort((a, b) {
+      final typeA =
+          (a.value['field_type']?.toString() ?? 'text').trim().toLowerCase();
+      final typeB =
+          (b.value['field_type']?.toString() ?? 'text').trim().toLowerCase();
+      final rankA = typeA == 'rating' ? 0 : 1;
+      final rankB = typeB == 'rating' ? 0 : 1;
+      if (rankA != rankB) return rankA.compareTo(rankB);
+      final sortA = int.tryParse(a.value['sort_order']?.toString() ?? '') ?? 0;
+      final sortB = int.tryParse(b.value['sort_order']?.toString() ?? '') ?? 0;
+      if (sortA != sortB) return sortA.compareTo(sortB);
+      return a.key.compareTo(b.key);
+    });
+    return indexed.map((e) => e.value).toList();
   }
 
   // Submit evaluation answers
@@ -8334,24 +8469,55 @@ class EventService {
     return _hasCheckInRecord(row) && _hasCheckOutRecord(row);
   }
 
-  /// Latest-ending seminar id for multi-seminar events (null = simple / 1 seminar).
+  bool _eventExpectsTwoSeminars(Map<String, dynamic> event) {
+    final structure = (event['event_structure']?.toString() ?? '')
+        .toLowerCase()
+        .trim();
+    if (structure == 'two_seminars') return true;
+    final count = int.tryParse(event['session_count']?.toString() ?? '') ?? 0;
+    return count >= 2;
+  }
+
+  bool _sessionIsLaterInProgram(
+    Map<String, dynamic> a,
+    Map<String, dynamic> b,
+  ) {
+    final sortA = int.tryParse(a['sort_order']?.toString() ?? '') ?? -1;
+    final sortB = int.tryParse(b['sort_order']?.toString() ?? '') ?? -1;
+    if (sortA != sortB) return sortA > sortB;
+
+    final noA = int.tryParse(a['session_no']?.toString() ?? '') ?? -1;
+    final noB = int.tryParse(b['session_no']?.toString() ?? '') ?? -1;
+    if (noA != noB) return noA > noB;
+
+    final startA = _toUtcDate(a['start_at']);
+    final startB = _toUtcDate(b['start_at']);
+    if (startA != null && startB != null && startA != startB) {
+      return startA.isAfter(startB);
+    }
+
+    final endA = _toUtcDate(a['end_at']);
+    final endB = _toUtcDate(b['end_at']);
+    if (endA != null && endB != null && endA != endB) {
+      return endA.isAfter(endB);
+    }
+    return false;
+  }
+
+  /// Last seminar in program order (Seminar 2). Null = simple / 1 seminar.
   String? _finalSeminarIdForEvaluation(List<Map<String, dynamic>> sessions) {
-    if (sessions.length <= 1) return null;
-    String? finalId;
-    DateTime? finalEnd;
+    Map<String, dynamic>? last;
+    var count = 0;
     for (final session in sessions) {
       final sid = session['id']?.toString().trim() ?? '';
       if (sid.isEmpty) continue;
-      final end =
-          DateTime.tryParse(session['end_at']?.toString() ?? '')?.toLocal() ??
-          DateTime.tryParse(session['start_at']?.toString() ?? '')?.toLocal();
-      if (end == null) continue;
-      if (finalEnd == null || end.isAfter(finalEnd)) {
-        finalEnd = end;
-        finalId = sid;
+      count++;
+      if (last == null || _sessionIsLaterInProgram(session, last)) {
+        last = session;
       }
     }
-    return finalId;
+    if (count <= 1) return null;
+    return last?['id']?.toString();
   }
 
   bool _isNonEmptyAnswer(dynamic value) {
@@ -8470,7 +8636,9 @@ class EventService {
           .select('id, question_text, field_type, required, sort_order')
           .eq('event_id', eventId)
           .order('sort_order', ascending: true);
-      return List<Map<String, dynamic>>.from(rows);
+      return _sortEvaluationQuestionsByType(
+        List<Map<String, dynamic>>.from(rows),
+      );
     } catch (_) {
       return [];
     }
@@ -8485,7 +8653,9 @@ class EventService {
           .select('id, question_text, field_type, required, sort_order')
           .eq('session_id', sessionId)
           .order('sort_order', ascending: true);
-      return List<Map<String, dynamic>>.from(rows);
+      return _sortEvaluationQuestionsByType(
+        List<Map<String, dynamic>>.from(rows),
+      );
     } catch (_) {
       return [];
     }
@@ -8568,10 +8738,16 @@ class EventService {
         };
       }
 
-      // 2+ seminars: wait for final seminar (latest end_at) time-out — not Seminar 1.
+      // 2 seminars: wait for Seminar 2 time-out only — never open on Seminar 1.
+      final expectsTwo = _eventExpectsTwoSeminars(event);
       final finalSeminarId = _finalSeminarIdForEvaluation(sessions);
-      if (finalSeminarId != null &&
-          !attendedSessionIds.contains(finalSeminarId)) {
+      final waitingForFinal = (finalSeminarId != null &&
+              !attendedSessionIds.contains(finalSeminarId)) ||
+          (expectsTwo &&
+              (sessions.where((s) => (s['id']?.toString().trim() ?? '').isNotEmpty).length <
+                      2 ||
+                  finalSeminarId == null));
+      if (waitingForFinal) {
         Map<String, dynamic>? finalSession;
         for (final s in sessions) {
           if ((s['id']?.toString() ?? '') == finalSeminarId) {

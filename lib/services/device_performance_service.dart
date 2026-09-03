@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
+import 'package:flutter/widgets.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Runtime quality level applied to animations / images / transitions.
@@ -149,6 +150,19 @@ class DevicePerformance extends ChangeNotifier {
         PerformanceTier.medium => 720,
         PerformanceTier.high => 1080,
       };
+
+  /// Full-width hero/cover images — stay sharp even in Battery Saver.
+  /// List thumbnails should keep using [imageCacheWidth].
+  int heroImageCacheWidth(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final physical = (width * dpr).round().clamp(1, 4096);
+    return switch (_tier) {
+      PerformanceTier.low => physical.clamp(900, 1200),
+      PerformanceTier.medium => physical.clamp(1080, 1440),
+      PerformanceTier.high => physical.clamp(1200, 2160),
+    };
+  }
 
   /// Subtitle for profile menu card.
   String get settingsSubtitle {

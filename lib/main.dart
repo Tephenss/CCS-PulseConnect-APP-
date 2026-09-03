@@ -600,7 +600,7 @@ class PulseConnectAppState extends State<PulseConnectApp>
     _lastShownConnectivityState = offline;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final ctx = PulseConnectApp.navigatorKey.currentContext;
-      if (ctx == null) return;
+        if (ctx == null) return;
       if (offline) {
         AppSnackBar.warning(ctx, 'Offline mode detected. Using the latest synced data on this device.', title: 'No Connection');
       } else {
@@ -639,7 +639,7 @@ class PulseConnectAppState extends State<PulseConnectApp>
 
   void _startOfflineWarmupTicker() {
     _offlineWarmupTimer?.cancel();
-    _offlineWarmupTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+    _offlineWarmupTimer = Timer.periodic(const Duration(seconds: 180), (_) {
       if (_isOffline == false) {
         unawaited(_primeOfflineReadiness());
       }

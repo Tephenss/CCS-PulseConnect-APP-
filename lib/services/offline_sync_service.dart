@@ -9,6 +9,9 @@ import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'package:shared_preferences/shared_preferences.dart';
+
+import '../utils/event_time_utils.dart';
 import 'event_service.dart';
 import 'offline_backup_service.dart';
 import 'offline_scan_store.dart';
@@ -16,7 +19,7 @@ import 'offline_scan_store.dart';
 class OfflineSyncService {
   /// Min interval for background snapshot warmups (Home / main ticker).
   /// On-demand Scan / post-sync callers should pass force: true.
-  static const Duration _backgroundSnapshotMinInterval = Duration(minutes: 2);
+  static const Duration _backgroundSnapshotMinInterval = Duration(minutes: 5);
   DateTime? _lastBackgroundSnapshotAt;
   Future<Map<String, dynamic>>? _inFlightSnapshot;
 
@@ -106,10 +109,24 @@ class OfflineSyncService {
     required DateTime? endAt,
     String? earlyOutEnabledAtRaw,
     required DateTime nowUtc,
+    DateTime? startAt,
+    int graceMinutes = 30,
   }) {
+    final grace = graceMinutes < 1 ? 30 : graceMinutes;
+    final graceCloses = startAt?.add(Duration(minutes: grace));
     final earlyRaw = (earlyOutEnabledAtRaw ?? '').trim();
     if (earlyRaw.isNotEmpty) {
-      final enabledAt = _parseDate(earlyRaw);
+      if (graceCloses != null && nowUtc.isBefore(graceCloses)) {
+        return {
+          'open': false,
+          'opens_at': graceCloses.toIso8601String(),
+          'closes_at': null,
+          'status': 'too_early_checkout',
+          'message': 'Too early to time out. Time-in grace is still open.',
+          'mode': 'early_out',
+        };
+      }
+      final enabledAt = _parseScheduleManila(earlyRaw);
       if (enabledAt != null) {
         final closes = enabledAt.add(const Duration(hours: 1));
         if (!nowUtc.isBefore(enabledAt) && !nowUtc.isAfter(closes)) {
@@ -152,21 +169,27 @@ class OfflineSyncService {
         'mode': 'normal',
       };
     }
-    final closes = endAt.add(const Duration(hours: 1));
-    if (nowUtc.isBefore(endAt)) {
+    var opensAt = endAt;
+    if (graceCloses != null && opensAt.isBefore(graceCloses)) {
+      opensAt = graceCloses;
+    }
+    final closes = opensAt.add(const Duration(hours: 1));
+    if (nowUtc.isBefore(opensAt)) {
       return {
         'open': false,
-        'opens_at': endAt.toIso8601String(),
+        'opens_at': opensAt.toIso8601String(),
         'closes_at': closes.toIso8601String(),
         'status': 'too_early_checkout',
-        'message': 'Time-out is not open yet.',
+        'message': graceCloses != null && opensAt == graceCloses
+            ? 'Too early to time out. Time-in grace is still open.'
+            : 'Time-out is not open yet.',
         'mode': 'normal',
       };
     }
     if (!nowUtc.isAfter(closes)) {
       return {
         'open': true,
-        'opens_at': endAt.toIso8601String(),
+        'opens_at': opensAt.toIso8601String(),
         'closes_at': closes.toIso8601String(),
         'status': 'open',
         'message': 'Time-out is open.',
@@ -175,7 +198,7 @@ class OfflineSyncService {
     }
     return {
       'open': false,
-      'opens_at': endAt.toIso8601String(),
+      'opens_at': opensAt.toIso8601String(),
       'closes_at': closes.toIso8601String(),
       'status': 'closed',
       'message': 'Time-out window has closed.',
@@ -189,8 +212,146 @@ class OfflineSyncService {
     return DateTime.tryParse(value)?.toUtc();
   }
 
+  /// Event/session wall times — same Manila civil clock as PHP Event QR.
+  DateTime? _parseScheduleManila(String? raw) {
+    final wall = parseStoredEventDateTime(raw);
+    if (wall == null) return null;
+    return DateTime.utc(
+      wall.year,
+      wall.month,
+      wall.day,
+      wall.hour,
+      wall.minute,
+      wall.second,
+      wall.millisecond,
+      wall.microsecond,
+    );
+  }
+
+  DateTime _nowManila() {
+    final wall = DateTime.now().toUtc().add(kManilaOffset);
+    return DateTime.utc(
+      wall.year,
+      wall.month,
+      wall.day,
+      wall.hour,
+      wall.minute,
+      wall.second,
+      wall.millisecond,
+      wall.microsecond,
+    );
+  }
+
   String _ticketHash(String payload) {
     return sha256.convert(utf8.encode(payload.trim())).toString();
+  }
+
+  String _normalizeEventQrPayload(String raw) {
+    final trimmed = raw.trim();
+    final match = RegExp(
+      r'^PULSE-EVENT-(.+)$',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (match == null) return trimmed;
+    final eventId = (match.group(1) ?? '').trim().toLowerCase();
+    if (eventId.isEmpty) return trimmed;
+    return EventService.buildEventQrPayload(eventId);
+  }
+
+  String _eventIdFromEventQr(String raw) {
+    final match = RegExp(
+      r'^PULSE-EVENT-(.+)$',
+      caseSensitive: false,
+    ).firstMatch(raw.trim());
+    return (match?.group(1) ?? '').trim();
+  }
+
+  Future<Set<String>> _selfIdentityKeys(String userId) async {
+    final keys = <String>{};
+    void add(String? value) {
+      final v = (value ?? '').trim().toLowerCase();
+      if (v.isNotEmpty) keys.add(v);
+    }
+
+    add(userId);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      add(prefs.getString('user_id'));
+      add(prefs.getString('student_id'));
+      final userData = prefs.getString('user_data');
+      if (userData != null && userData.trim().isNotEmpty) {
+        final parsed = jsonDecode(userData);
+        if (parsed is Map) {
+          add(parsed['id']?.toString());
+          add(parsed['student_id']?.toString());
+          add(parsed['student_no']?.toString());
+          add(parsed['student_number']?.toString());
+        }
+      }
+    } catch (_) {}
+    return keys;
+  }
+
+  bool _payloadMatchesSelfIdentity(
+    Map<String, dynamic> payload,
+    Set<String> identities,
+  ) {
+    if (identities.isEmpty) return false;
+    const fields = [
+      'participant_student_id',
+      'participant_student_no',
+      'participant_user_id',
+      'student_id',
+      'user_id',
+    ];
+    for (final field in fields) {
+      final value = (payload[field]?.toString() ?? '').trim().toLowerCase();
+      if (value.isNotEmpty && identities.contains(value)) return true;
+    }
+    return false;
+  }
+
+  Future<Map<String, dynamic>?> _lookupSelfTicketCacheRow({
+    required String actorKey,
+    required String eventQrPayload,
+  }) async {
+    final raw = eventQrPayload.trim();
+    final normalized = _normalizeEventQrPayload(raw);
+    final hashes = <String>{
+      if (raw.isNotEmpty) _ticketHash(raw),
+      if (normalized.isNotEmpty) _ticketHash(normalized),
+    };
+    for (final hash in hashes) {
+      final row = await _store.getTicketCacheByHash(
+        actorKey: actorKey,
+        ticketHash: hash,
+      );
+      if (row != null) return row;
+    }
+
+    final eventId = _eventIdFromEventQr(normalized);
+    if (eventId.isEmpty) return null;
+
+    var rows = await _store.listTicketCacheForEvent(
+      actorKey: actorKey,
+      eventId: eventId,
+    );
+    if (rows.isEmpty) {
+      final recent = await _store.listRecentTicketCache(
+        actorKey: actorKey,
+        limit: 500,
+      );
+      final wanted = eventId.toLowerCase();
+      rows = recent
+          .where(
+            (row) =>
+                (row['event_id']?.toString() ?? '').trim().toLowerCase() ==
+                wanted,
+          )
+          .toList();
+    }
+    if (rows.isEmpty) return null;
+    return rows.first;
   }
 
   String _offlineParticipantKey(
@@ -1098,6 +1259,8 @@ class OfflineSyncService {
         final participantStudentNo =
             (item['participant_student_no']?.toString() ?? participantStudentId)
                 .trim();
+        final participantUserId =
+            (item['participant_user_id']?.toString() ?? '').trim();
         final remotePhotoUrl =
             (item['participant_photo_url']?.toString() ?? '').trim();
         var avatarLocalPath = '';
@@ -1135,6 +1298,7 @@ class OfflineSyncService {
           'participant_name': participantName,
           'participant_student_id': participantStudentId,
           'participant_student_no': participantStudentNo,
+          'participant_user_id': participantUserId,
           'participant_photo_url': remotePhotoUrl,
           'participant_photo_local_path': avatarLocalPath,
           'session_presence': sessionPresence,
@@ -2103,10 +2267,13 @@ class OfflineSyncService {
     String studentId,
   ) async {
     try {
-      final rows = await _eventService.getMyTickets(
-        studentId,
-        forceFresh: true,
-      );
+      var rows = await _eventService.getMyTicketsCached(studentId);
+      if (rows.isEmpty) {
+        rows = await _eventService.getMyTickets(
+          studentId,
+          forceFresh: false,
+        );
+      }
       final events = <Map<String, dynamic>>[];
       for (final row in rows) {
         final event = row['events'] is Map
@@ -2237,6 +2404,347 @@ class OfflineSyncService {
     }
   }
 
+  /// Build/merge Event-QR self pack from locally cached tickets (no network).
+  /// Used when switching Assist → Take Attendance while already offline.
+  Future<Map<String, dynamic>> ensureSelfAttendancePackFromLocalTickets({
+    required String studentId,
+  }) async {
+    await _ensureAutoRestore();
+    final actor = studentId.trim();
+    if (actor.isEmpty) {
+      return {
+        'ok': false,
+        'event_count': 0,
+        'error': 'Missing student account id.',
+      };
+    }
+
+    final actorKey = _selfActorKey(actor);
+    final fromTickets = await _buildSelfPackFromMyTickets(actor);
+    final fromAssist = await _buildSelfPackFromAssistRoster(actor);
+    final events = _unionSelfPackEvents(fromTickets, fromAssist);
+    final built = {
+      'ok': events.isNotEmpty,
+      'events': events,
+      'event_count': events.length,
+      'synced_at': DateTime.now().toUtc().toIso8601String(),
+    };
+    if (events.isEmpty) {
+      final existing = await getCachedSelfAttendancePack(studentId: actor);
+      final count =
+          int.tryParse(existing?['event_count']?.toString() ?? '') ?? 0;
+      return {
+        'ok': existing != null && count > 0,
+        'event_count': count,
+        'kept_existing': true,
+      };
+    }
+
+    return _mergeSelfAttendancePack(
+      actorId: actor,
+      actorKey: actorKey,
+      pack: built,
+    );
+  }
+
+  List<Map<String, dynamic>> _unionSelfPackEvents(
+    Map<String, dynamic> ticketsPack,
+    Map<String, dynamic> assistPack,
+  ) {
+    final byId = <String, Map<String, dynamic>>{};
+    void add(Map<String, dynamic> pack) {
+      final raw = pack['events'];
+      if (raw is! List) return;
+      for (final item in raw) {
+        if (item is! Map) continue;
+        final event = Map<String, dynamic>.from(item);
+        final eventId =
+            (event['event_id']?.toString() ?? '').trim().toLowerCase();
+        if (eventId.isEmpty || byId.containsKey(eventId)) continue;
+        byId[eventId] = event;
+      }
+    }
+
+    add(ticketsPack);
+    add(assistPack);
+    return byId.values.toList();
+  }
+
+  List<Map<String, dynamic>> _sessionsFromEventMap(Map<String, dynamic> eventMap) {
+    final sessions = <Map<String, dynamic>>[];
+    final sessionsRaw = eventMap['sessions'];
+    if (sessionsRaw is! List) return sessions;
+    for (final session in sessionsRaw) {
+      if (session is! Map) continue;
+      final sessionMap = Map<String, dynamic>.from(session);
+      final sid = (sessionMap['id']?.toString() ?? '').trim();
+      if (sid.isEmpty) continue;
+      sessions.add({
+        'id': sid,
+        'title': (sessionMap['title']?.toString() ?? '').trim(),
+        'topic': (sessionMap['topic']?.toString() ?? '').trim(),
+        'location': (sessionMap['location']?.toString() ?? '').trim(),
+        'start_at': (sessionMap['start_at']?.toString() ?? '').trim(),
+        'end_at': (sessionMap['end_at']?.toString() ?? '').trim(),
+        'scan_window_minutes':
+            int.tryParse(sessionMap['scan_window_minutes']?.toString() ?? '') ??
+                30,
+        'early_out_enabled_at': sessionMap['early_out_enabled_at'],
+        'attendance': sessionMap['attendance'],
+      });
+    }
+    return sessions;
+  }
+
+  /// When Assist → Take Attendance happens offline, reuse this student's
+  /// row from the assistant roster (same event) as an Event-QR self pack.
+  Future<Map<String, dynamic>> _buildSelfPackFromAssistRoster(
+    String studentId,
+  ) async {
+    final assistContext = await getCachedScannerContext(
+      actorId: studentId,
+      isTeacher: false,
+    );
+    if (assistContext == null) {
+      return {'ok': false, 'events': <Map<String, dynamic>>[]};
+    }
+    final contextMap = assistContext['context'] is Map
+        ? Map<String, dynamic>.from(assistContext['context'] as Map)
+        : <String, dynamic>{};
+    final eventMap = contextMap['event'] is Map
+        ? Map<String, dynamic>.from(contextMap['event'] as Map)
+        : <String, dynamic>{};
+    final eventId = (eventMap['id']?.toString() ?? '').trim();
+    if (eventId.isEmpty) {
+      return {'ok': false, 'events': <Map<String, dynamic>>[]};
+    }
+
+    final assistKey = _actorKey(actorId: studentId, isTeacher: false);
+    var rosterRows = await _store.listTicketCacheForEvent(
+      actorKey: assistKey,
+      eventId: eventId,
+    );
+    if (rosterRows.isEmpty) {
+      final recent = await _store.listRecentTicketCache(
+        actorKey: assistKey,
+        limit: 5000,
+      );
+      final wanted = eventId.toLowerCase();
+      rosterRows = recent
+          .where(
+            (row) =>
+                (row['event_id']?.toString() ?? '').trim().toLowerCase() ==
+                wanted,
+          )
+          .toList();
+    }
+
+    final identities = await _selfIdentityKeys(studentId);
+    Map<String, dynamic>? mine;
+    for (final row in rosterRows) {
+      Map<String, dynamic> payload = {};
+      try {
+        final decoded = jsonDecode(row['payload_json']?.toString() ?? '{}');
+        if (decoded is Map) {
+          payload = Map<String, dynamic>.from(decoded);
+        }
+      } catch (_) {
+        continue;
+      }
+      if (_payloadMatchesSelfIdentity(payload, identities)) {
+        mine = payload;
+        break;
+      }
+    }
+    if (mine == null) {
+      debugPrint(
+        '[self-offline] assist roster has ${rosterRows.length} tickets but none match this student',
+      );
+      return {'ok': false, 'events': <Map<String, dynamic>>[]};
+    }
+
+    final sessions = _sessionsFromEventMap(eventMap);
+    final usesSessions = usesEventSessions(eventMap) || sessions.isNotEmpty;
+    debugPrint(
+      '[self-offline] hydrated Event QR pack from assist roster event=$eventId',
+    );
+    return {
+      'ok': true,
+      'events': [
+        {
+          'event_id': eventId,
+          'title': (eventMap['title']?.toString() ??
+                  mine['event_title']?.toString() ??
+                  'Event')
+              .trim(),
+          'status': (eventMap['status']?.toString() ?? 'published').trim(),
+          'start_at': (eventMap['start_at']?.toString() ??
+                  mine['event_start_at']?.toString() ??
+                  '')
+              .trim(),
+          'end_at': (eventMap['end_at']?.toString() ??
+                  mine['event_end_at']?.toString() ??
+                  '')
+              .trim(),
+          'location': (eventMap['location']?.toString() ??
+                  mine['event_location']?.toString() ??
+                  '')
+              .trim(),
+          'grace_time':
+              int.tryParse(eventMap['grace_time']?.toString() ?? '') ??
+                  int.tryParse(mine['event_grace_time']?.toString() ?? '') ??
+                  30,
+          'early_out_enabled_at':
+              (eventMap['early_out_enabled_at']?.toString() ?? '').trim(),
+          'uses_sessions': usesSessions,
+          'qr_payload': EventService.buildEventQrPayload(eventId),
+          'registration_id': (mine['registration_id']?.toString() ?? '').trim(),
+          'ticket_id': (mine['ticket_id']?.toString() ?? '').trim(),
+          'attendance': null,
+          'sessions': sessions,
+          'participant_name': mine['participant_name'],
+          'participant_photo_url': mine['participant_photo_url'],
+          'participant_student_id': studentId,
+          'participant_student_no': mine['participant_student_no'] ??
+              mine['participant_student_id'],
+          'participant_user_id': mine['participant_user_id'],
+        },
+      ],
+      'event_count': 1,
+    };
+  }
+
+  /// Insert missing Event-QR rows without wiping queued offline self-scans.
+  Future<Map<String, dynamic>> _mergeSelfAttendancePack({
+    required String actorId,
+    required String actorKey,
+    required Map<String, dynamic> pack,
+  }) async {
+    final eventsRaw = pack['events'];
+    final events = eventsRaw is List
+        ? eventsRaw
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList()
+        : <Map<String, dynamic>>[];
+
+    final now = DateTime.now().toUtc();
+    final nowIso = now.toIso8601String();
+    var inserted = 0;
+    var kept = 0;
+
+    for (final event in events) {
+      final eventId = (event['event_id']?.toString() ?? '').trim();
+      final rawQr = (event['qr_payload']?.toString() ?? '').trim();
+      final qrPayload = _normalizeEventQrPayload(
+        rawQr.isNotEmpty ? rawQr : EventService.buildEventQrPayload(eventId),
+      );
+      if (eventId.isEmpty || qrPayload.isEmpty) continue;
+
+      final existing = await _lookupSelfTicketCacheRow(
+        actorKey: actorKey,
+        eventQrPayload: qrPayload,
+      );
+      if (existing != null) {
+        kept++;
+        continue;
+      }
+
+      final ticketHash = _ticketHash(qrPayload);
+
+      final attendance = event['attendance'] is Map
+          ? Map<String, dynamic>.from(event['attendance'] as Map)
+          : <String, dynamic>{};
+      final attendanceStatus =
+          (attendance['status']?.toString() ?? '').trim().toLowerCase();
+      final payload = {
+        'op_kind': 'self_checkin',
+        'event_id': eventId,
+        'qr_payload': qrPayload,
+        'ticket_payload': qrPayload,
+        'ticket_id': (event['ticket_id']?.toString() ?? '').trim(),
+        'registration_id': (event['registration_id']?.toString() ?? '').trim(),
+        'title': (event['title']?.toString() ?? '').trim(),
+        'status': (event['status']?.toString() ?? '').trim(),
+        'start_at': (event['start_at']?.toString() ?? '').trim(),
+        'end_at': (event['end_at']?.toString() ?? '').trim(),
+        'location': (event['location']?.toString() ?? '').trim(),
+        'grace_time':
+            int.tryParse(event['grace_time']?.toString() ?? '') ?? 30,
+        'early_out_enabled_at':
+            (event['early_out_enabled_at']?.toString() ?? '').trim(),
+        'uses_sessions': event['uses_sessions'] == true,
+        'sessions': event['sessions'] is List ? event['sessions'] : <dynamic>[],
+        'attendance': attendance,
+        'attendance_status': attendanceStatus,
+        'participant_name': event['participant_name'],
+        'participant_photo_url': event['participant_photo_url'],
+        'participant_student_id': event['participant_student_id'],
+        'participant_student_no': event['participant_student_no'],
+        'updated_at': nowIso,
+      };
+
+      await _store.replaceTicketCacheForEvent(
+        actorKey: actorKey,
+        eventId: eventId,
+        rows: [
+          {
+            'actor_key': actorKey,
+            'event_id': eventId,
+            'session_id': '',
+            'ticket_hash': ticketHash,
+            'payload_json': jsonEncode(payload),
+            'avatar_local_path': null,
+            'avatar_remote_url':
+                (event['participant_photo_url']?.toString() ?? '').trim(),
+            'attendance_status':
+                attendanceStatus.isEmpty ? 'unscanned' : attendanceStatus,
+            'pending_sync': 0,
+            'updated_at': nowIso,
+          },
+        ],
+      );
+      inserted++;
+    }
+
+    final total = inserted + kept;
+    final existingCtx = await getCachedSelfAttendancePack(studentId: actorId);
+    final contextPayload = {
+      'status': 'ready',
+      'scanner_enabled': true,
+      'self_pack': true,
+      'event_count': total,
+      'message': total <= 0
+          ? 'No registered events cached yet for Event QR check-in.'
+          : 'Self-attendance pack ready for offline Event QR scans.',
+    };
+
+    if (total > 0 || existingCtx == null) {
+      await _store.upsertContextCache(
+        actorKey: actorKey,
+        role: 'self',
+        actorId: actorId,
+        status: 'ready',
+        scannerEnabled: true,
+        syncedAtIso: nowIso,
+        expiresAtIso: now.add(_maxCacheAge).toIso8601String(),
+        payloadJson: jsonEncode(contextPayload),
+      );
+    }
+
+    debugPrint(
+      '[self-offline] local hydrate inserted=$inserted kept=$kept actor=$actorKey',
+    );
+
+    return {
+      'ok': total > 0,
+      'event_count': total,
+      'inserted': inserted,
+      'kept': kept,
+      'from_local_tickets': true,
+    };
+  }
+
   Future<Map<String, dynamic>> _persistSelfAttendancePack({
     required String actorId,
     required String actorKey,
@@ -2256,9 +2764,10 @@ class OfflineSyncService {
 
     for (final event in events) {
       final eventId = (event['event_id']?.toString() ?? '').trim();
-      final qrPayload = (event['qr_payload']?.toString() ?? '').trim().isNotEmpty
-          ? (event['qr_payload']?.toString() ?? '').trim()
-          : EventService.buildEventQrPayload(eventId);
+      final rawQr = (event['qr_payload']?.toString() ?? '').trim();
+      final qrPayload = _normalizeEventQrPayload(
+        rawQr.isNotEmpty ? rawQr : EventService.buildEventQrPayload(eventId),
+      );
       if (eventId.isEmpty || qrPayload.isEmpty) continue;
 
       final ticketHash = _ticketHash(qrPayload);
@@ -2391,7 +2900,7 @@ class OfflineSyncService {
     final snapshotStale = cached?['offline_cache_stale'] == true;
     final eventCount =
         int.tryParse(cached?['event_count']?.toString() ?? '') ?? 0;
-    final offlineReady = hasSnapshot && !snapshotStale;
+    final offlineReady = hasSnapshot && !snapshotStale && eventCount > 0;
     final refreshAttempted = refreshSnapshot && !isOffline;
     final warmFailed = refreshAttempted &&
         refreshResult != null &&
@@ -2412,7 +2921,7 @@ class OfflineSyncService {
           'Self-attendance pack is stale. Reconnect to refresh registered events.';
     } else if (eventCount <= 0) {
       message =
-          'Offline pack ready, but you have no registered events yet for Event QR.';
+          'No registered events cached yet. Open Take Attendance while online after you join an event.';
     } else {
       message =
           'Offline pack ready ($eventCount event${eventCount == 1 ? '' : 's'}).';
@@ -2438,7 +2947,7 @@ class OfflineSyncService {
   }) async {
     await _ensureAutoRestore();
     final actor = studentId.trim();
-    final normalized = eventQrPayload.trim();
+    final rawPayload = eventQrPayload.trim();
     if (actor.isEmpty) {
       return {
         'ok': false,
@@ -2446,7 +2955,7 @@ class OfflineSyncService {
         'error': 'Unable to identify your student account.',
       };
     }
-    if (!normalized.toUpperCase().startsWith('PULSE-EVENT-')) {
+    if (!rawPayload.toUpperCase().startsWith('PULSE-EVENT-')) {
       return {
         'ok': false,
         'status': 'invalid',
@@ -2454,31 +2963,29 @@ class OfflineSyncService {
       };
     }
 
-    final pack = await getCachedSelfAttendancePack(studentId: actor);
-    if (pack == null) {
-      return {
-        'ok': false,
-        'status': 'no_cache',
-        'error':
-            'Offline self-attendance is not ready yet. Open Take Attendance while online first.',
-      };
-    }
-    if (pack['offline_cache_stale'] == true) {
-      return {
-        'ok': false,
-        'status': 'cache_stale',
-        'error':
-            'Offline pack is stale. Reconnect to refresh your registered events.',
-      };
-    }
-
     final actorKey = _selfActorKey(actor);
-    final ticketHash = _ticketHash(normalized);
-    final row = await _store.getTicketCacheByHash(
+    final normalized = _normalizeEventQrPayload(rawPayload);
+    var row = await _lookupSelfTicketCacheRow(
       actorKey: actorKey,
-      ticketHash: ticketHash,
+      eventQrPayload: normalized,
     );
     if (row == null) {
+      await ensureSelfAttendancePackFromLocalTickets(studentId: actor);
+      row = await _lookupSelfTicketCacheRow(
+        actorKey: actorKey,
+        eventQrPayload: normalized,
+      );
+    }
+    if (row == null) {
+      final refreshedPack = await getCachedSelfAttendancePack(studentId: actor);
+      if (refreshedPack == null) {
+        return {
+          'ok': false,
+          'status': 'no_cache',
+          'error':
+              'Offline self-attendance is not ready yet. Open Take Attendance while online first.',
+        };
+      }
       return {
         'ok': false,
         'status': 'forbidden',
@@ -2506,6 +3013,10 @@ class OfflineSyncService {
       };
     }
 
+    final ticketHash = ((row['ticket_hash']?.toString() ?? '').trim().isNotEmpty)
+        ? (row['ticket_hash']?.toString() ?? '').trim()
+        : _ticketHash(normalized);
+
     final pendingSync =
         payload['pending_sync'] == true || row['pending_sync'] == 1;
     if (pendingSync) {
@@ -2521,7 +3032,7 @@ class OfflineSyncService {
       };
     }
 
-    final now = DateTime.now().toUtc();
+    final now = _nowManila();
     final usesSessions = payload['uses_sessions'] == true;
     final sessionsRaw = payload['sessions'];
     final sessions = sessionsRaw is List
@@ -2548,9 +3059,13 @@ class OfflineSyncService {
           continue;
         }
         final outWin = _checkOutWindowForEnd(
-          endAt: _parseDate(session['end_at']?.toString()),
+          endAt: _parseScheduleManila(session['end_at']?.toString()),
           earlyOutEnabledAtRaw: session['early_out_enabled_at']?.toString(),
           nowUtc: now,
+          startAt: _parseScheduleManila(session['start_at']?.toString()),
+          graceMinutes:
+              int.tryParse(session['scan_window_minutes']?.toString() ?? '') ??
+                  30,
         );
         if (outWin['open'] == true) {
           outCandidates.add({'session': session, 'window': outWin});
@@ -2580,9 +3095,13 @@ class OfflineSyncService {
               continue;
             }
             final outWin = _checkOutWindowForEnd(
-              endAt: _parseDate(session['end_at']?.toString()),
+              endAt: _parseScheduleManila(session['end_at']?.toString()),
               earlyOutEnabledAtRaw: session['early_out_enabled_at']?.toString(),
               nowUtc: now,
+              startAt: _parseScheduleManila(session['start_at']?.toString()),
+              graceMinutes:
+                  int.tryParse(session['scan_window_minutes']?.toString() ?? '') ??
+                      30,
             );
             if (outWin['open'] == true) {
               // Should have been caught above; keep scanning.
@@ -2594,7 +3113,7 @@ class OfflineSyncService {
             };
             continue;
           }
-          final start = _parseDate(session['start_at']?.toString());
+          final start = _parseScheduleManila(session['start_at']?.toString());
           final grace =
               int.tryParse(session['scan_window_minutes']?.toString() ?? '') ??
                   30;
@@ -2608,6 +3127,29 @@ class OfflineSyncService {
           } else if (win['status'] == 'waiting') {
             waitingIn.add({'session': session, 'window': win});
           }
+        }
+        if (alreadyInBlocked != null) {
+          final blocked = alreadyInBlocked['session'] as Map<String, dynamic>;
+          final outWin = alreadyInBlocked['window'] as Map<String, dynamic>;
+          final blockedName = (blocked['title']?.toString() ??
+                  blocked['topic']?.toString() ??
+                  'Seminar')
+              .trim();
+          return {
+            'ok': false,
+            'status': (outWin['status']?.toString() ?? 'too_early_checkout'),
+            'error':
+                'Already timed in for $blockedName. ${(outWin['message']?.toString() ?? 'Too early to time out.')}',
+            'already_timed_in': true,
+            'event_title': payload['title'],
+            'session_name': blockedName,
+            'session_end_at': blocked['end_at'],
+            'participant_name': payload['participant_name'],
+            'participant_photo_url': payload['participant_photo_url'],
+            'participant_student_id': payload['participant_student_id'],
+            'participant_student_no': payload['participant_student_no'] ??
+                payload['participant_student_id'],
+          };
         }
         if (openIn.length > 1) {
           return {
@@ -2627,27 +3169,17 @@ class OfflineSyncService {
             'error': waitingIn.first['window']?['message']?.toString() ??
                 'Too early to time in.',
           };
-        } else if (alreadyInBlocked != null) {
-          final outWin = alreadyInBlocked['window'] as Map<String, dynamic>;
-          return {
-            'ok': false,
-            'status': (outWin['status']?.toString() ?? 'too_early_checkout'),
-            'error':
-                'Already timed in. ${(outWin['message']?.toString() ?? 'Time-out is not open yet.')}',
-            'already_timed_in': true,
-            'participant_name': payload['participant_name'],
-            'participant_photo_url': payload['participant_photo_url'],
-            'participant_student_id': payload['participant_student_id'],
-            'participant_student_no': payload['participant_student_no'] ??
-                payload['participant_student_id'],
-          };
         } else {
           // Check absent during open check-out.
           for (final session in sessions) {
             final outWin = _checkOutWindowForEnd(
-              endAt: _parseDate(session['end_at']?.toString()),
+              endAt: _parseScheduleManila(session['end_at']?.toString()),
               earlyOutEnabledAtRaw: session['early_out_enabled_at']?.toString(),
               nowUtc: now,
+              startAt: _parseScheduleManila(session['start_at']?.toString()),
+              graceMinutes:
+                  int.tryParse(session['scan_window_minutes']?.toString() ?? '') ??
+                      30,
             );
             if (outWin['open'] == true) {
               return {
@@ -2688,9 +3220,12 @@ class OfflineSyncService {
 
       if (hasIn) {
         final outWin = _checkOutWindowForEnd(
-          endAt: _parseDate(payload['end_at']?.toString()),
+          endAt: _parseScheduleManila(payload['end_at']?.toString()),
           earlyOutEnabledAtRaw: payload['early_out_enabled_at']?.toString(),
           nowUtc: now,
+          startAt: _parseScheduleManila(payload['start_at']?.toString()),
+          graceMinutes:
+              int.tryParse(payload['grace_time']?.toString() ?? '') ?? 30,
         );
         if (outWin['open'] != true) {
           return {
@@ -2708,9 +3243,12 @@ class OfflineSyncService {
         action = 'check_out';
       } else {
         final outWin = _checkOutWindowForEnd(
-          endAt: _parseDate(payload['end_at']?.toString()),
+          endAt: _parseScheduleManila(payload['end_at']?.toString()),
           earlyOutEnabledAtRaw: payload['early_out_enabled_at']?.toString(),
           nowUtc: now,
+          startAt: _parseScheduleManila(payload['start_at']?.toString()),
+          graceMinutes:
+              int.tryParse(payload['grace_time']?.toString() ?? '') ?? 30,
         );
         if (outWin['open'] == true) {
           return {
@@ -2723,7 +3261,7 @@ class OfflineSyncService {
         final grace =
             int.tryParse(payload['grace_time']?.toString() ?? '') ?? 30;
         final inWin = _checkInWindowForStart(
-          startAt: _parseDate(payload['start_at']?.toString()),
+          startAt: _parseScheduleManila(payload['start_at']?.toString()),
           graceMinutes: grace,
           nowUtc: now,
         );
@@ -3478,14 +4016,21 @@ class OfflineSyncService {
       contextMap: contextMap,
       cachedTicketRows: cachedTicketRows,
     );
-    // Prepared = assigned event context is cached (not stale). Ticket count may
-    // be 0 before registrations exist; that must not block "Prepared".
+    // Prepared = this device can actually scan this method offline: saved
+    // assignment + ticket roster. A live online assignment is not enough.
     final contextReady = activeEventId.isNotEmpty;
-    final rosterReady = contextReady;
+    final ticketsReady = cachedTicketCount > 0;
+    final rosterReady = contextReady && ticketsReady;
     final refreshError = refreshResult == null
         ? ''
         : _monitorRefreshErrorText(refreshResult);
-    final offlineReady = hasSnapshot && !snapshotStale && contextReady;
+    final refreshAttempted = refreshSnapshot && !isOffline;
+    final warmFailed = refreshAttempted &&
+        refreshResult != null &&
+        refreshResult['ok'] != true &&
+        !(hasSnapshot && !snapshotStale && contextReady && ticketsReady);
+    final offlineReady =
+        hasSnapshot && !snapshotStale && contextReady && ticketsReady;
 
     String message;
     if (!hasSnapshot) {
@@ -3506,7 +4051,7 @@ class OfflineSyncService {
       }
     } else if (cachedTicketCount == 0) {
       message =
-          'Offline pack saved. No tickets cached yet — register participants, then reopen Scan while online.';
+          'Assignment is saved, but no tickets are on this device yet. Keep Scan open with internet until the roster finishes caching.';
     } else if (snapshotStale) {
       message = 'Saved scanner data needs an online refresh.';
     } else if (refreshError.isNotEmpty) {
@@ -3523,9 +4068,10 @@ class OfflineSyncService {
         refreshResult: refreshResult,
       ),
       'has_snapshot': hasSnapshot,
-      'snapshot_stale': snapshotStale,
+      'snapshot_stale': snapshotStale || warmFailed,
       'offline_ready': offlineReady,
       'roster_ready': rosterReady,
+      'warm_failed': warmFailed,
       'last_synced_at': cached?['offline_cache_synced_at'],
       'expires_at': cached?['offline_cache_expires_at'],
       'active_event_id': activeEventId,
