@@ -2893,14 +2893,23 @@ class OfflineSyncService {
       refreshResult = await refreshSelfAttendanceSnapshot(studentId: actor);
     }
 
-    final cached = await getCachedSelfAttendancePack(studentId: actor);
+    Map<String, dynamic>? cached =
+        await getCachedSelfAttendancePack(studentId: actor);
+    var eventCount =
+        int.tryParse(cached?['event_count']?.toString() ?? '') ?? 0;
+    if (isOffline && (cached == null || eventCount <= 0)) {
+      await ensureSelfAttendancePackFromLocalTickets(studentId: actor);
+      cached = await getCachedSelfAttendancePack(studentId: actor);
+      eventCount =
+          int.tryParse(cached?['event_count']?.toString() ?? '') ?? 0;
+    }
+
     final actorKey = _selfActorKey(actor);
     final pending = await _store.pendingCount(actorKey);
-    final hasSnapshot = cached != null;
+    final hasSnapshot = cached != null && eventCount > 0;
     final snapshotStale = cached?['offline_cache_stale'] == true;
-    final eventCount =
-        int.tryParse(cached?['event_count']?.toString() ?? '') ?? 0;
-    final offlineReady = hasSnapshot && !snapshotStale && eventCount > 0;
+    // While offline, keep using the last saved pack even if TTL elapsed.
+    final offlineReady = hasSnapshot && (isOffline || !snapshotStale);
     final refreshAttempted = refreshSnapshot && !isOffline;
     final warmFailed = refreshAttempted &&
         refreshResult != null &&
@@ -2916,7 +2925,7 @@ class OfflineSyncService {
       message = refreshResult?['ok'] == true
           ? 'Pack refresh completed but no cache was saved. Reopen Take Attendance online once more.'
           : 'No offline pack yet. Open Take Attendance while online to prepare.';
-    } else if (snapshotStale) {
+    } else if (snapshotStale && !isOffline) {
       message =
           'Self-attendance pack is stale. Reconnect to refresh registered events.';
     } else if (eventCount <= 0) {
@@ -2930,7 +2939,7 @@ class OfflineSyncService {
     return {
       'ok': true,
       'has_snapshot': hasSnapshot,
-      'snapshot_stale': snapshotStale || warmFailed,
+      'snapshot_stale': !isOffline && (snapshotStale || warmFailed),
       'offline_ready': offlineReady,
       'warm_failed': warmFailed,
       'event_count': eventCount,

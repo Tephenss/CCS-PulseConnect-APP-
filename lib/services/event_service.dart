@@ -2832,6 +2832,7 @@ class EventService {
     }
 
     if (sectionId.isNotEmpty) {
+      bool sectionFetched = false;
       try {
         final rows = await _supabase
             .from('sections')
@@ -2851,8 +2852,49 @@ class EventService {
             specialization = sectionSpec;
           }
         }
+        sectionFetched = true;
       } catch (_) {
-        // Keep best-effort values.
+        // Offline or server error — handled below.
+      }
+
+      if (sectionFetched && (courseCode != 'ALL' || yearLevel != 'ALL')) {
+        // Persist resolved scope so offline restarts use the same cache key.
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(
+            'student_scope_${trimmedUserId}_course',
+            courseCode,
+          );
+          await prefs.setString(
+            'student_scope_${trimmedUserId}_year',
+            yearLevel,
+          );
+          await prefs.setString(
+            'student_scope_${trimmedUserId}_spec',
+            specialization,
+          );
+        } catch (_) {}
+      } else if (!sectionFetched) {
+        // Offline: restore the last persisted scope so the cache key is
+        // identical to the one written while online → cache hit, not miss.
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final savedCourse =
+              prefs.getString('student_scope_${trimmedUserId}_course') ?? '';
+          final savedYear =
+              prefs.getString('student_scope_${trimmedUserId}_year') ?? '';
+          final savedSpec =
+              prefs.getString('student_scope_${trimmedUserId}_spec') ?? '';
+          if (savedCourse.isNotEmpty && savedCourse != 'ALL') {
+            courseCode = savedCourse;
+          }
+          if (savedYear.isNotEmpty && savedYear != 'ALL') {
+            yearLevel = savedYear;
+          }
+          if (savedSpec.isNotEmpty) {
+            specialization = savedSpec;
+          }
+        } catch (_) {}
       }
     }
 
