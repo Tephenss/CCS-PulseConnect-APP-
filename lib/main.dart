@@ -100,8 +100,9 @@ void main() async {
     }
     studentCourse = courseNorm == 'CS' ? 'CS' : 'IT';
 
-    // Daily OTP reset (12:00 AM Asia/Manila): clear in-app session so the
-    // user must re-login + verify. Keep FCM token (same phone / same person).
+    // Periodic OTP reset (every 3 Manila days, checked at 12:00 AM):
+    // clear in-app session so the user must re-login + verify.
+    // Keep FCM token (same phone / same person).
     // Install trust miss is handled at the login gate (not here) so a brief
     // API blip / first-boot does not wipe a still-valid session.
     if (AuthService.requiresDailyEmailVerification(userData)) {

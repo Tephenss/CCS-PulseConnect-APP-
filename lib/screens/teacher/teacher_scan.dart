@@ -803,17 +803,17 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
 
       if (teacherId.isNotEmpty) {
         _bindAssignmentRealtime(teacherId);
-        await _refreshPendingSyncCount();
-        await _refreshOfflineReadiness();
-        var bootstrappedFromCache = false;
-        if (startOffline) {
-          bootstrappedFromCache = await _applyCachedScanContextFallback();
-          if (mounted) {
-            setState(() => _isLoading = false);
-          }
+        unawaited(_refreshPendingSyncCount());
+        unawaited(_refreshOfflineReadiness());
+        var bootstrappedFromCache = await _applyCachedScanContextFallback();
+        if (bootstrappedFromCache && mounted) {
+          setState(() => _isLoading = false);
         }
         if (!startOffline || !bootstrappedFromCache) {
-        await _refreshScanContext();
+          await _refreshScanContext().timeout(
+            const Duration(seconds: 10),
+            onTimeout: () {},
+          );
         }
         if (!_isOffline && _pendingSyncCount > 0) {
           unawaited(_syncQueueIfNeeded(showSnack: false));

@@ -749,13 +749,15 @@ class _StudentScanScreenState extends State<StudentScanScreen>
       // Take Attendance = Event QR self check-in (online + offline pack).
       if (isTakeAttendance) {
         if (studentId.isNotEmpty) {
-          await _refreshPendingSyncCount();
+          unawaited(_refreshPendingSyncCount());
           if (startOffline) {
-            await _offlineSyncService.ensureSelfAttendancePackFromLocalTickets(
-              studentId: studentId,
+            unawaited(
+              _offlineSyncService.ensureSelfAttendancePackFromLocalTickets(
+                studentId: studentId,
+              ),
             );
           }
-          await _refreshOfflineReadiness(refreshSnapshot: !startOffline);
+          unawaited(_refreshOfflineReadiness(refreshSnapshot: !startOffline));
           if (mounted) {
             setState(() {
               _applyTakeAttendanceUiState(hasScanResult: false);
@@ -775,8 +777,8 @@ class _StudentScanScreenState extends State<StudentScanScreen>
 
       if (studentId.isNotEmpty) {
         _bindAssignmentRealtime(studentId);
-        await _refreshPendingSyncCount();
-        await _refreshOfflineReadiness();
+        unawaited(_refreshPendingSyncCount());
+        unawaited(_refreshOfflineReadiness());
         final bootstrappedFromCache = await _applyCachedScanContextFallback();
         if (bootstrappedFromCache && mounted) {
           setState(() => _isLoading = false);
@@ -790,10 +792,16 @@ class _StudentScanScreenState extends State<StudentScanScreen>
           if (bootstrappedFromCache) {
             unawaited(_refreshScanContext(silent: true));
           } else {
-            await _refreshScanContext();
+            await _refreshScanContext().timeout(
+              const Duration(seconds: 10),
+              onTimeout: () {},
+            );
           }
         } else if (!bootstrappedFromCache) {
-          await _refreshScanContext();
+          await _refreshScanContext().timeout(
+            const Duration(seconds: 10),
+            onTimeout: () {},
+          );
         }
         if (!_isOffline && _pendingSyncCount > 0) {
           unawaited(_performQueueSync(showSnack: false));

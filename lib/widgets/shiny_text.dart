@@ -98,6 +98,7 @@ class _ShinyTextState extends State<ShinyText>
         fontSize: widget.fontSize,
         fontWeight: widget.fontWeight,
         letterSpacing: 0.5,
+        height: 1.25,
         fontFamily: 'Orbitron',
         color: color,
         shadows: shadows,

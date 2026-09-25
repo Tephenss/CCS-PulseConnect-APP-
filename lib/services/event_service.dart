@@ -35,6 +35,7 @@ class EventService {
   static final Map<String, _CachedSignedAvatar> _signedAvatarCache = {};
   static final Map<String, Future<String>> _signedAvatarInFlight = {};
   static const Duration _signedAvatarTtl = Duration(hours: 6);
+  static const Duration _signedAvatarMissTtl = Duration(minutes: 30);
   /// In-memory Fabric canvas_state by template key (survives reopen in-session).
   static final Map<String, Map<String, dynamic>> _canvasStateCache = {};
   static const Duration _certCanvasTtl = Duration(hours: 6);
@@ -681,13 +682,6 @@ class EventService {
     String? userId,
   }) async {
     var raw = rawPhotoUrl.trim();
-    final uid = (userId ?? '').trim().toLowerCase();
-    final uuidRe = RegExp(
-      r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
-    );
-    if (raw.isEmpty && uuidRe.hasMatch(uid)) {
-      raw = 'media/avatars/profiles/$uid.jpg';
-    }
     if (raw.isEmpty) return '';
 
     final lower = raw.toLowerCase();
@@ -698,11 +692,14 @@ class EventService {
     Future<String> signPath(String path) async {
       final cacheKey = path;
       final cached = _signedAvatarCache[cacheKey];
-      if (cached != null &&
-          DateTime.now().toUtc().difference(cached.cachedAtUtc) <
-              _signedAvatarTtl &&
-          cached.url.trim().isNotEmpty) {
-        return cached.url;
+      if (cached != null) {
+        final age = DateTime.now().toUtc().difference(cached.cachedAtUtc);
+        final ttl = cached.url.trim().isEmpty
+            ? _signedAvatarMissTtl
+            : _signedAvatarTtl;
+        if (age < ttl) {
+          return cached.url;
+        }
       }
       final inFlight = _signedAvatarInFlight[cacheKey];
       if (inFlight != null) {
@@ -726,6 +723,10 @@ class EventService {
                 );
                 return signed;
               }
+              _signedAvatarCache[cacheKey] = _CachedSignedAvatar(
+                url: '',
+                cachedAtUtc: DateTime.now().toUtc(),
+              );
             }
           } catch (_) {}
         }
@@ -753,19 +754,6 @@ class EventService {
 
     final signed = await signPath(avatarPath);
     if (signed.isNotEmpty) return signed;
-
-    if (uuidRe.hasMatch(uid)) {
-      for (final candidate in <String>[
-        'media/avatars/profiles/$uid.jpg',
-        'profiles/$uid.jpg',
-        'profiles/$uid.png',
-        'profiles/$uid.webp',
-      ]) {
-        if (candidate == avatarPath) continue;
-        final alt = await signPath(candidate);
-        if (alt.isNotEmpty) return alt;
-      }
-    }
     return '';
   }
 
@@ -2641,9 +2629,14 @@ class EventService {
     return compact;
   }
 
+  bool _looksIrregularLabel(String? raw) {
+    final normalized = (raw ?? '').trim().toUpperCase();
+    return normalized == 'IRREGULAR' || normalized.contains('IRREGULAR');
+  }
+
   String _normalizeStudentCourse(String? rawCourse) {
     final normalized = (rawCourse ?? '').trim().toUpperCase();
-    if (normalized.isEmpty) return 'ALL';
+    if (normalized.isEmpty || _looksIrregularLabel(normalized)) return 'ALL';
 
     final compact = normalized.replaceAll(RegExp(r'[^A-Z0-9]'), '');
     if (compact.isEmpty) return 'ALL';
@@ -2652,7 +2645,8 @@ class EventService {
         compact == 'ALLLEVELS' ||
         compact == 'ALLYEARLEVEL' ||
         compact == 'ALLYEARLEVELS' ||
-        compact == 'ALLCOURSES') {
+        compact == 'ALLCOURSES' ||
+        compact == 'IRREGULAR') {
       return 'ALL';
     }
 
@@ -2776,16 +2770,21 @@ class EventService {
       studentSpec: studentSpec,
       targetCourse: targetCourse,
     );
-    final yearMatches = (targetYears.length == 1 && targetYears.first == 'ALL')
-        ? true
-        : (studentYear != 'ALL' && targetYears.contains(studentYear));
+    final targetAllYears =
+        targetYears.isEmpty ||
+        (targetYears.length == 1 && targetYears.first == 'ALL');
+    // Unknown year (irreg / no section digit) must not hide a course match.
+    final yearMatches =
+        targetAllYears ||
+        studentYear == 'ALL' ||
+        targetYears.contains(studentYear);
 
     return courseMatches && yearMatches;
   }
 
   String _normalizeStudentYearFromRaw(dynamic rawYear) {
     final raw = (rawYear?.toString() ?? '').trim().toUpperCase();
-    if (raw.isEmpty) return 'ALL';
+    if (raw.isEmpty || _looksIrregularLabel(raw)) return 'ALL';
 
     if (['1', '2', '3', '4'].contains(raw)) return raw;
 
@@ -2826,6 +2825,13 @@ class EventService {
         sectionId = user?['section_id']?.toString().trim() ?? '';
         specialization =
             _extractStudentSpecialization(user?['course']?.toString());
+        final flaggedIrregular =
+            user?['is_irregular'] == true ||
+            user?['is_irregular']?.toString() == 'true';
+        if (flaggedIrregular) {
+          // Roster course/year already on the user row; skip IRREGULAR section.
+          sectionId = '';
+        }
       }
     } catch (_) {
       // Fall through with defaults / section lookup.
@@ -2841,15 +2847,17 @@ class EventService {
             .limit(1);
         if ((rows as List).isNotEmpty) {
           final sectionName = rows.first['name']?.toString() ?? '';
-          if (courseCode == 'ALL') {
-            courseCode = _normalizeStudentCourse(sectionName);
-          }
-          if (yearLevel == 'ALL') {
-            yearLevel = _normalizeStudentYearFromRaw(sectionName);
-          }
-          final sectionSpec = _extractStudentSpecialization(sectionName);
-          if (sectionSpec.isNotEmpty) {
-            specialization = sectionSpec;
+          if (!_looksIrregularLabel(sectionName)) {
+            if (courseCode == 'ALL') {
+              courseCode = _normalizeStudentCourse(sectionName);
+            }
+            if (yearLevel == 'ALL') {
+              yearLevel = _normalizeStudentYearFromRaw(sectionName);
+            }
+            final sectionSpec = _extractStudentSpecialization(sectionName);
+            if (sectionSpec.isNotEmpty) {
+              specialization = sectionSpec;
+            }
           }
         }
         sectionFetched = true;
@@ -2885,7 +2893,9 @@ class EventService {
               prefs.getString('student_scope_${trimmedUserId}_year') ?? '';
           final savedSpec =
               prefs.getString('student_scope_${trimmedUserId}_spec') ?? '';
-          if (savedCourse.isNotEmpty && savedCourse != 'ALL') {
+          if (savedCourse.isNotEmpty &&
+              savedCourse != 'ALL' &&
+              !_looksIrregularLabel(savedCourse)) {
             courseCode = savedCourse;
           }
           if (savedYear.isNotEmpty && savedYear != 'ALL') {
@@ -5652,27 +5662,22 @@ class EventService {
       try {
         final hosted = await _mobileBackend.getScanContext(fresh: forceFresh);
         if (hosted['ok'] == true) {
-          final hostedStatus =
-              (hosted['status']?.toString() ?? '').trim().toLowerCase();
-          final hostedContext = hosted['context'];
-          final hasHostedContext = hostedContext is Map &&
-              ((hostedContext['event'] is Map &&
-                      ((hostedContext['event'] as Map)['id']?.toString() ?? '')
-                          .trim()
-                          .isNotEmpty) ||
-                  (hostedContext['id']?.toString() ?? '').trim().isNotEmpty);
-          if (hasHostedContext ||
-              (hostedStatus != 'no_assignment' &&
-                  hostedStatus != 'error' &&
-                  hostedStatus != 'forbidden')) {
-            final payload = Map<String, dynamic>.from(hosted);
-            _writeScanContextMem(memKey, payload);
-            return payload;
-          }
+          final payload = Map<String, dynamic>.from(hosted);
+          _writeScanContextMem(memKey, payload);
+          return payload;
         }
       } catch (_) {
-        // Fall through to anon path when BFF is unreachable.
+        // BFF unreachable — skip anon fan-out (lockdown + hangs login/scanner).
       }
+      return {
+        'ok': true,
+        'status': 'error',
+        'scanner_enabled': false,
+        'message': 'Unable to verify scanner access right now.',
+        'context': null,
+        'assignments': 0,
+        'server_time': DateTime.now().toUtc().toIso8601String(),
+      };
     }
 
     try {
@@ -5798,30 +5803,22 @@ class EventService {
       try {
         final hosted = await _mobileBackend.getScanContext(fresh: forceFresh);
         if (hosted['ok'] == true) {
-          final hostedStatus =
-              (hosted['status']?.toString() ?? '').trim().toLowerCase();
-          final hostedContext = hosted['context'];
-          final hasHostedContext = hostedContext is Map &&
-              ((hostedContext['event'] is Map &&
-                      ((hostedContext['event'] as Map)['id']?.toString() ?? '')
-                          .trim()
-                          .isNotEmpty) ||
-                  (hostedContext['id']?.toString() ?? '').trim().isNotEmpty);
-          // Only trust BFF when it returns a usable assignment/window.
-          // Bare no_assignment can be a deploy/schema miss — fall through
-          // to the local assistant lookup so offline warm is not stuck.
-          if (hasHostedContext ||
-              (hostedStatus != 'no_assignment' &&
-                  hostedStatus != 'error' &&
-                  hostedStatus != 'forbidden')) {
-            final payload = Map<String, dynamic>.from(hosted);
-            _writeScanContextMem(memKey, payload);
-            return payload;
-          }
+          final payload = Map<String, dynamic>.from(hosted);
+          _writeScanContextMem(memKey, payload);
+          return payload;
         }
       } catch (_) {
-        // Fall through to anon path when BFF is unreachable.
+        // BFF unreachable — skip anon assistant fan-out (hangs the Scan tab).
       }
+      return {
+        'ok': true,
+        'status': 'error',
+        'scanner_enabled': false,
+        'message': 'Unable to verify scanner access right now.',
+        'context': null,
+        'assignments': 0,
+        'server_time': DateTime.now().toUtc().toIso8601String(),
+      };
     }
 
     try {

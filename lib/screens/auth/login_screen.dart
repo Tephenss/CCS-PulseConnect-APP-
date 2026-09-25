@@ -158,7 +158,7 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           return;
         }
 
-        await PushNotificationService().updateToken();
+        unawaited(PushNotificationService().updateToken());
         if (!mounted) return;
         _showOfflineRecoveryNotices(
           restoredCount: restoredOfflineQueueCount,
@@ -166,9 +166,17 @@ class _LoginScreenState extends State<LoginScreen> with TickerProviderStateMixin
           reconciledCount: reconciledOfflineQueueCount,
         );
         if (!mounted) return;
+        String? course;
+        if (currentRole == 'student') {
+          course = await _resolveLoginCourse(userData).timeout(
+            const Duration(seconds: 4),
+            onTimeout: () => userData['course']?.toString(),
+          );
+        }
+        if (!mounted) return;
         PulseConnectApp.of(context).enterAppAfterAuth(
           role: currentRole,
-          course: await _resolveLoginCourse(userData),
+          course: course,
         );
       } else {
         if (!mounted) return;

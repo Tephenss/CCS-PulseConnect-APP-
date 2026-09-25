@@ -637,9 +637,13 @@ class MobileBackendService {
   /// Teacher / student-assistant scan window (opens_at, closes_at, scan_mode).
   /// Prefer this over anon context so offline warm matches mobile_scan_ticket.php.
   Future<Map<String, dynamic>> getScanContext({bool fresh = false}) {
-    return post('/api/mobile_scan_context.php', {
-      if (fresh) 'fresh': true,
-    });
+    return post(
+      '/api/mobile_scan_context.php',
+      {
+        if (fresh) 'fresh': true,
+      },
+      timeout: const Duration(seconds: 8),
+    );
   }
 
   Future<Map<String, dynamic>> selfCheckInViaEventQr({

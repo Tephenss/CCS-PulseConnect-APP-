@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -46,7 +47,9 @@ class AuthService {
     final verifiedAt = DateTime.tryParse(verifiedAtRaw)?.toUtc();
     if (verifiedAt == null) return true;
 
-    // Calendar-day reset at 12:00 AM (UTC+8 / Asia-Manila) for all users.
+    // OTP recency window: 3 Manila calendar days from last verify.
+    // Example: verified Mon → still valid Tue & Wed → OTP again Thu 12:00 AM.
+    const otpResetIntervalManilaDays = 3;
     const tzOffset = Duration(hours: 8);
     final nowLocal = DateTime.now().toUtc().add(tzOffset);
     final verifiedLocal = verifiedAt.add(tzOffset);
@@ -56,7 +59,7 @@ class AuthService {
       verifiedLocal.month,
       verifiedLocal.day,
     );
-    return nowDay.isAfter(verifiedDay);
+    return nowDay.difference(verifiedDay).inDays >= otpResetIntervalManilaDays;
   }
 
   static const String _cachedPublicIpKey = 'trusted_public_ip_cache';
@@ -370,13 +373,18 @@ class AuthService {
         _mergeAvatarCache(parsed, prefs, userId);
       }
 
-      // Avatars bucket is private (security lockdown). Always refresh via PHP
-      // BFF signed URL when we have a storage path + mobile session.
+      final skipAvatarLookup =
+          userId.isNotEmpty && _avatarMissIsFresh(prefs, userId);
+
+      // Avatars bucket is private (security lockdown). Refresh via PHP BFF
+      // when we have a storage path — skip paths we already know are missing
+      // (Storage 400 storm / yellow dashboard bars).
       final photoUrl = (parsed['photo_url'] as String?) ?? '';
       final photoPath =
           (parsed['photo_path'] as String?) ??
           _extractStoragePathFromUrl(photoUrl);
-      final hasPath = photoPath != null && photoPath.isNotEmpty;
+      final hasPath =
+          !skipAvatarLookup && photoPath != null && photoPath.isNotEmpty;
       if (hasPath) {
         try {
           final freshSigned = await _resolveAvatarUrl(photoPath);
@@ -392,6 +400,9 @@ class AuthService {
               );
             }
             await prefs.setString('user_data', jsonEncode(parsed));
+            await _clearAvatarMiss(prefs, userId);
+          } else if (userId.isNotEmpty) {
+            await _markAvatarMiss(prefs, parsed, userId);
           }
         } catch (_) {
           // Keep old URL if refresh fails.
@@ -421,6 +432,9 @@ class AuthService {
               );
             }
             await prefs.setString('user_data', jsonEncode(parsed));
+            await _clearAvatarMiss(prefs, userId);
+          } else if (userId.isNotEmpty) {
+            await _markAvatarMiss(prefs, parsed, userId);
           }
         } catch (_) {
           // Keep current state.
@@ -431,7 +445,7 @@ class AuthService {
       // from Flutter (anon createSignedUrl / public info returns 400).
       final stillEmpty =
           ((parsed['photo_url'] as String?) ?? '').trim().isEmpty;
-      if (stillEmpty && userId.isNotEmpty) {
+      if (stillEmpty && userId.isNotEmpty && !skipAvatarLookup) {
         try {
           final resolved = await _resolveOwnAvatarFromServer();
           final signed = (resolved?['signed_url'] ?? '').trim();
@@ -449,8 +463,13 @@ class AuthService {
               photoPath: guessedPath.isNotEmpty ? guessedPath : null,
             );
             await prefs.setString('user_data', jsonEncode(parsed));
+            await _clearAvatarMiss(prefs, userId);
+          } else {
+            await _markAvatarMiss(prefs, parsed, userId);
           }
-        } catch (_) {}
+        } catch (_) {
+          await _markAvatarMiss(prefs, parsed, userId);
+        }
       }
 
       return parsed;
@@ -581,34 +600,30 @@ class AuthService {
           );
         }
       }
-      await _offlineBackupService.autoRestoreIfNeeded();
-      if (userId.isNotEmpty) {
+
+      // Do not block the login spinner on offline restore/sync/snapshot.
+      // Scanner tab warms its own pack; a hung scan-context used to freeze login.
+      final queuedUserId = userId;
+      final queuedIsTeacher = role.toLowerCase() == 'teacher';
+      unawaited(() async {
         try {
+          await _offlineBackupService.autoRestoreIfNeeded();
+          if (queuedUserId.isEmpty) {
+            await _offlineBackupService.autoBackupIfConfigured(force: true);
+            return;
+          }
           final offlineSyncService = OfflineSyncService();
-          final isTeacher = role.toLowerCase() == 'teacher';
-          restoredOfflineQueueCount = await offlineSyncService
-              .pendingQueueCount(actorId: userId, isTeacher: isTeacher);
-          await offlineSyncService
-              .syncPendingQueue(actorId: userId, isTeacher: isTeacher)
-              .then((result) {
-                syncedOfflineQueueCount = (result['synced'] is num)
-                    ? (result['synced'] as num).toInt()
-                    : int.tryParse(result['synced']?.toString() ?? '') ?? 0;
-                reconciledOfflineQueueCount =
-                    (result['conflict_resolved'] is num)
-                    ? (result['conflict_resolved'] as num).toInt()
-                    : int.tryParse(
-                            result['conflict_resolved']?.toString() ?? '',
-                          ) ??
-                          0;
-              });
-          await offlineSyncService.refreshSnapshotForCurrentScanner(
-            actorId: userId,
-            isTeacher: isTeacher,
+          await offlineSyncService.syncPendingQueue(
+            actorId: queuedUserId,
+            isTeacher: queuedIsTeacher,
           );
+          await offlineSyncService.refreshSnapshotForCurrentScanner(
+            actorId: queuedUserId,
+            isTeacher: queuedIsTeacher,
+          );
+          await _offlineBackupService.autoBackupIfConfigured(force: true);
         } catch (_) {}
-      }
-      await _offlineBackupService.autoBackupIfConfigured(force: true);
+      }());
 
       return {
         'ok': true,
@@ -789,7 +804,7 @@ class AuthService {
     await prefs.remove(fcmKeepAfterDailyLogoutKey);
   }
 
-  /// [unregisterPush]: false for Manila 12:00 AM daily OTP gate (same phone,
+  /// [unregisterPush]: false for the periodic OTP gate (same phone,
   /// same person — keep FCM mapping so reminders still arrive). True for
   /// Sign out / account switch.
   Future<void> logout({bool unregisterPush = true}) async {
@@ -1152,6 +1167,7 @@ class AuthService {
         };
       }
 
+      await _clearAvatarMiss(prefs, userId);
       return await updatePhotoUrl(
         _withCacheBuster(signed),
         photoPath: filePath,
@@ -1206,6 +1222,38 @@ class AuthService {
 
   String _avatarUrlKey(String userId) => 'avatar_url_$userId';
   String _avatarPathKey(String userId) => 'avatar_path_$userId';
+  String _avatarMissAtKey(String userId) => 'avatar_miss_at_$userId';
+  static const Duration _avatarMissTtl = Duration(minutes: 30);
+
+  bool _avatarMissIsFresh(SharedPreferences prefs, String userId) {
+    final atMs = prefs.getInt(_avatarMissAtKey(userId)) ?? 0;
+    if (atMs <= 0) return false;
+    final age = DateTime.now().millisecondsSinceEpoch - atMs;
+    return age >= 0 && age < _avatarMissTtl.inMilliseconds;
+  }
+
+  Future<void> _clearAvatarMiss(SharedPreferences prefs, String userId) async {
+    if (userId.isEmpty) return;
+    await prefs.remove(_avatarMissAtKey(userId));
+  }
+
+  Future<void> _markAvatarMiss(
+    SharedPreferences prefs,
+    Map<String, dynamic> userData,
+    String userId,
+  ) async {
+    if (userId.isEmpty) return;
+    await prefs.setInt(
+      _avatarMissAtKey(userId),
+      DateTime.now().millisecondsSinceEpoch,
+    );
+    final path = (userData['photo_path'] as String?) ?? '';
+    if (path.contains('profiles/') && path.contains(userId)) {
+      userData.remove('photo_path');
+      await prefs.remove(_avatarPathKey(userId));
+      await prefs.setString('user_data', jsonEncode(userData));
+    }
+  }
 
   Future<void> _saveAvatarCache(
     SharedPreferences prefs,
