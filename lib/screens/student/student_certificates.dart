@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import '../../widgets/app_snackbar.dart';
@@ -50,9 +49,19 @@ class _StudentCertificatesState extends State<StudentCertificates>
     final middleName = (user['middle_name']?.toString() ?? '').trim();
     final lastName = (user['last_name']?.toString() ?? '').trim();
     final suffix = (user['suffix']?.toString() ?? '').trim();
+    final middleInitials = middleName
+        .split(RegExp(r'\s+'))
+        .where((part) => part.isNotEmpty)
+        .map((part) {
+          final clean = part.replaceAll(RegExp(r'\.+$'), '');
+          if (clean.isEmpty) return '';
+          return '${String.fromCharCode(clean.runes.first).toUpperCase()}.';
+        })
+        .where((part) => part.isNotEmpty)
+        .join(' ');
     final parts = <String>[
       if (firstName.isNotEmpty) firstName,
-      if (middleName.isNotEmpty) middleName,
+      if (middleInitials.isNotEmpty) middleInitials,
       if (lastName.isNotEmpty) lastName,
     ];
     var full = parts.join(' ').replaceAll(RegExp(r'\s+'), ' ').trim();
@@ -66,6 +75,15 @@ class _StudentCertificatesState extends State<StudentCertificates>
   }
 
   String _participantName(Map<String, dynamic> cert) {
+    final hasStructuredName = [
+      'first_name',
+      'middle_name',
+      'last_name',
+    ].any((key) => (cert[key]?.toString() ?? '').trim().isNotEmpty);
+    if (hasStructuredName) {
+      final structuredName = _composeUserDisplayName(cert);
+      if (structuredName.isNotEmpty) return structuredName;
+    }
     final raw = (cert['participant_name']?.toString() ?? '').trim();
     if (raw.isNotEmpty &&
         raw.toLowerCase() != 'student name' &&
@@ -101,8 +119,9 @@ class _StudentCertificatesState extends State<StudentCertificates>
       if (raw != null && raw.trim().isNotEmpty) {
         final parsed = jsonDecode(raw);
         if (parsed is Map) {
-          final composed =
-              _composeUserDisplayName(Map<String, dynamic>.from(parsed));
+          final composed = _composeUserDisplayName(
+            Map<String, dynamic>.from(parsed),
+          );
           if (composed.isNotEmpty) {
             _cachedParticipantName = composed;
             return composed;
@@ -140,10 +159,7 @@ class _StudentCertificatesState extends State<StudentCertificates>
         .trim();
   }
 
-  String _safePdfFileName(
-    String participantName, {
-    String? seminarOrTopic,
-  }) {
+  String _safePdfFileName(String participantName, {String? seminarOrTopic}) {
     var name = _sanitizeFilePart(participantName);
     if (name.isEmpty || name.toLowerCase() == 'student name') {
       name = 'Certificate';
@@ -230,7 +246,10 @@ class _StudentCertificatesState extends State<StudentCertificates>
       var target = File(p.join(downloadsDir.path, fileName));
       if (await target.exists()) {
         final stamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
-        final base = fileName.replaceAll(RegExp(r'\.pdf$', caseSensitive: false), '');
+        final base = fileName.replaceAll(
+          RegExp(r'\.pdf$', caseSensitive: false),
+          '',
+        );
         target = File(p.join(downloadsDir.path, '${base}_$stamp.pdf'));
       }
       await target.writeAsBytes(pdfBytes, flush: true);
@@ -267,7 +286,10 @@ class _StudentCertificatesState extends State<StudentCertificates>
       }
 
       if (imageBytes == null || imageBytes.isEmpty) {
-        AppSnackBar.error(context, 'Certificate file is unavailable for download.');
+        AppSnackBar.error(
+          context,
+          'Certificate file is unavailable for download.',
+        );
         return;
       }
 
@@ -295,7 +317,9 @@ class _StudentCertificatesState extends State<StudentCertificates>
       await tempFile.writeAsBytes(pdfBytes, flush: true);
       await SharePlus.instance.share(
         ShareParams(
-          files: [XFile(tempFile.path, mimeType: 'application/pdf', name: fileName)],
+          files: [
+            XFile(tempFile.path, mimeType: 'application/pdf', name: fileName),
+          ],
           text: 'Your CCS PulseConnect certificate',
         ),
       );
@@ -415,8 +439,9 @@ class _StudentCertificatesState extends State<StudentCertificates>
       if (raw != null && raw.trim().isNotEmpty) {
         final parsed = jsonDecode(raw);
         if (parsed is Map) {
-          final composed =
-              _composeUserDisplayName(Map<String, dynamic>.from(parsed));
+          final composed = _composeUserDisplayName(
+            Map<String, dynamic>.from(parsed),
+          );
           if (composed.isNotEmpty) _cachedParticipantName = composed;
         }
       }
@@ -497,12 +522,14 @@ class _StudentCertificatesState extends State<StudentCertificates>
       if (resolvedName.isNotEmpty) {
         _cachedParticipantName = resolvedName;
       }
-      await Future.wait(certs.map((cert) async {
-        final id = cert['id']?.toString() ?? '';
-        if (id.isEmpty) return;
-        if (_CertificatePreviewCache.peek(id) != null) return;
-        await _CertificatePreviewCache.load(id);
-      }));
+      await Future.wait(
+        certs.map((cert) async {
+          final id = cert['id']?.toString() ?? '';
+          if (id.isEmpty) return;
+          if (_CertificatePreviewCache.peek(id) != null) return;
+          await _CertificatePreviewCache.load(id);
+        }),
+      );
       final previousById = <String, Map<String, dynamic>>{
         for (final row in _certificates)
           if ((row['id']?.toString() ?? '').isNotEmpty)
@@ -514,7 +541,8 @@ class _StudentCertificatesState extends State<StudentCertificates>
             : _normalizeCertificateNameOrder(_participantName(cert));
         final id = cert['id']?.toString() ?? '';
         final prev = previousById[id];
-        final keptCanvas = _parseCanvasState(prev?['template_canvas_state']) ??
+        final keptCanvas =
+            _parseCanvasState(prev?['template_canvas_state']) ??
             _parseCanvasState(cert['template_canvas_state']);
         return {
           ...cert,
@@ -540,9 +568,8 @@ class _StudentCertificatesState extends State<StudentCertificates>
     if (query.isEmpty) return _certificates;
     return _certificates.where((cert) {
       final event = cert['events'] as Map<String, dynamic>? ?? {};
-      final title = cert['display_title']?.toString() ??
-          event['title']?.toString() ??
-          '';
+      final title =
+          cert['display_title']?.toString() ?? event['title']?.toString() ?? '';
       final code = cert['certificate_code']?.toString() ?? '';
       return title.toLowerCase().contains(query) ||
           code.toLowerCase().contains(query);
@@ -558,8 +585,9 @@ class _StudentCertificatesState extends State<StudentCertificates>
         event['title']?.toString().trim() ??
         'Event';
 
-    final session =
-        cert['session'] is Map ? (cert['session'] as Map) : const <dynamic, dynamic>{};
+    final session = cert['session'] is Map
+        ? (cert['session'] as Map)
+        : const <dynamic, dynamic>{};
     final sessionTopic = (session['topic']?.toString() ?? '').trim();
     final sessionTitle = (session['title']?.toString() ?? '').trim();
 
@@ -736,7 +764,9 @@ class _StudentCertificatesState extends State<StudentCertificates>
                                 ),
                                 prefixIcon: Icon(
                                   Icons.search_rounded,
-                                  color: _studentPrimary(context).withValues(alpha: 0.7),
+                                  color: _studentPrimary(
+                                    context,
+                                  ).withValues(alpha: 0.7),
                                 ),
                                 suffixIcon: _searchQuery.isNotEmpty
                                     ? IconButton(
@@ -784,12 +814,13 @@ class _StudentCertificatesState extends State<StudentCertificates>
                         Expanded(
                           child: _filteredCertificates.isEmpty
                               ? ListView(
-                                  physics: const AlwaysScrollableScrollPhysics(),
+                                  physics:
+                                      const AlwaysScrollableScrollPhysics(),
                                   children: [
                                     SizedBox(
                                       height:
                                           MediaQuery.of(context).size.height *
-                                              0.56,
+                                          0.56,
                                       child: Center(
                                         child: Text(
                                           'No certificates matched your search.',
@@ -814,7 +845,9 @@ class _StudentCertificatesState extends State<StudentCertificates>
                                   itemCount: _filteredCertificates.length,
                                   itemBuilder: (context, index) {
                                     return Padding(
-                                      padding: const EdgeInsets.only(bottom: 14),
+                                      padding: const EdgeInsets.only(
+                                        bottom: 14,
+                                      ),
                                       child: _buildCertificateCard(
                                         _filteredCertificates[index],
                                       ),
@@ -833,8 +866,11 @@ class _StudentCertificatesState extends State<StudentCertificates>
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.workspace_premium_outlined,
-              size: 64, color: Colors.grey.shade300),
+          Icon(
+            Icons.workspace_premium_outlined,
+            size: 64,
+            color: Colors.grey.shade300,
+          ),
           const SizedBox(height: 16),
           Text(
             'No certificates yet',
@@ -872,186 +908,196 @@ class _StudentCertificatesState extends State<StudentCertificates>
 
     DateTime? startDate;
     if (startAt != null) {
-      try { startDate = DateTime.parse(startAt); } catch (_) {}
+      try {
+        startDate = DateTime.parse(startAt);
+      } catch (_) {}
     }
 
     return SizedBox(
-        width: double.infinity,
-        child: Container(
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: const Color(0xFFE5E7EB)),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.06),
-                blurRadius: 20,
-                offset: const Offset(0, 10),
-              ),
-              BoxShadow(
-                color: _studentPrimary(context).withValues(alpha: 0.03),
-                blurRadius: 30,
-                offset: const Offset(0, 15),
-                spreadRadius: -5,
-              ),
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SizedBox(
-                height: 160,
-                child: ClipRRect(
-                  borderRadius: const BorderRadius.vertical(
-                    top: Radius.circular(19),
-                  ),
-                  // Cached personal PNG only — never Fabric / never raw {{participant_name}} thumb.
-                  child: _CertificateListThumb(
-                    key: ValueKey('cert-thumb-${cert['id']?.toString() ?? ''}'),
-                    cert: cert,
-                    certId: cert['id']?.toString() ?? '',
-                    participantName: () {
-                      final n = _participantName(cert);
-                      if (n.isNotEmpty) return n;
-                      return (_cachedParticipantName ?? '').trim();
-                    }(),
-                    title: eventTitle,
-                    eventService: _eventService,
-                  ),
+      width: double.infinity,
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFFE5E7EB)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.06),
+              blurRadius: 20,
+              offset: const Offset(0, 10),
+            ),
+            BoxShadow(
+              color: _studentPrimary(context).withValues(alpha: 0.03),
+              blurRadius: 30,
+              offset: const Offset(0, 15),
+              spreadRadius: -5,
+            ),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SizedBox(
+              height: 160,
+              child: ClipRRect(
+                borderRadius: const BorderRadius.vertical(
+                  top: Radius.circular(19),
+                ),
+                // Cached personal PNG only — never Fabric / never raw {{participant_name}} thumb.
+                child: _CertificateListThumb(
+                  key: ValueKey('cert-thumb-${cert['id']?.toString() ?? ''}'),
+                  cert: cert,
+                  certId: cert['id']?.toString() ?? '',
+                  participantName: () {
+                    final n = _participantName(cert);
+                    if (n.isNotEmpty) return n;
+                    return (_cachedParticipantName ?? '').trim();
+                  }(),
+                  title: eventTitle,
+                  eventService: _eventService,
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (seminarLabel != null && seminarLabel.isNotEmpty)
-                            Container(
-                              margin: const EdgeInsets.only(bottom: 10),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 5,
+            ),
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (seminarLabel != null && seminarLabel.isNotEmpty)
+                          Container(
+                            margin: const EdgeInsets.only(bottom: 10),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 5,
+                            ),
+                            decoration: BoxDecoration(
+                              gradient: const LinearGradient(
+                                colors: [Color(0xFFFFFBEB), Color(0xFFFEF3C7)],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
                               ),
-                              decoration: BoxDecoration(
-                                gradient: const LinearGradient(
-                                  colors: [Color(0xFFFFFBEB), Color(0xFFFEF3C7)],
-                                  begin: Alignment.topLeft,
-                                  end: Alignment.bottomRight,
-                                ),
-                                borderRadius: BorderRadius.circular(30),
-                                border: Border.all(
-                                  color: const Color(0xFFFDE68A),
-                                  width: 1,
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: const Color(0xFFD97706).withValues(alpha: 0.08),
-                                    blurRadius: 4,
-                                    offset: const Offset(0, 2),
-                                  ),
-                                ],
+                              borderRadius: BorderRadius.circular(30),
+                              border: Border.all(
+                                color: const Color(0xFFFDE68A),
+                                width: 1,
                               ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(
-                                    Icons.bookmark_added_rounded,
-                                    size: 13,
-                                    color: Color(0xFFD97706),
-                                  ),
-                                  const SizedBox(width: 5),
-                                  Flexible(
-                                    child: Text(
-                                      seminarLabel,
-                                      style: GoogleFonts.inter(
-                                        fontSize: 10,
-                                        fontWeight: FontWeight.w800,
-                                        color: const Color(0xFF92400E),
-                                        letterSpacing: 0.2,
-                                      ),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: const Color(
+                                    0xFFD97706,
+                                  ).withValues(alpha: 0.08),
+                                  blurRadius: 4,
+                                  offset: const Offset(0, 2),
+                                ),
+                              ],
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(
+                                  Icons.bookmark_added_rounded,
+                                  size: 13,
+                                  color: Color(0xFFD97706),
+                                ),
+                                const SizedBox(width: 5),
+                                Flexible(
+                                  child: Text(
+                                    seminarLabel,
+                                    style: GoogleFonts.inter(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w800,
+                                      color: const Color(0xFF92400E),
+                                      letterSpacing: 0.2,
                                     ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                ],
-                              ),
-                            ),
-                          Text(
-                            eventTitle,
-                            style: GoogleFonts.inter(
-                              fontWeight: FontWeight.w800,
-                              fontSize: 18,
-                              color: const Color(0xFF1F2937),
-                              letterSpacing: -0.3,
-                              height: 1.25,
-                            ),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              Icon(
-                                Icons.calendar_today_rounded,
-                                size: 13,
-                                color: Colors.grey.shade400,
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                startDate != null
-                                    ? DateFormat('MMMM dd, yyyy').format(startDate)
-                                    : '--',
-                                style: GoogleFonts.inter(
-                                  fontSize: 12,
-                                  color: const Color(0xFF6B7280),
-                                  fontWeight: FontWeight.w600,
                                 ),
+                              ],
+                            ),
+                          ),
+                        Text(
+                          eventTitle,
+                          style: GoogleFonts.inter(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 18,
+                            color: const Color(0xFF1F2937),
+                            letterSpacing: -0.3,
+                            height: 1.25,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Icon(
+                              Icons.calendar_today_rounded,
+                              size: 13,
+                              color: Colors.grey.shade400,
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              startDate != null
+                                  ? DateFormat(
+                                      'MMMM dd, yyyy',
+                                    ).format(startDate)
+                                  : '--',
+                              style: GoogleFonts.inter(
+                                fontSize: 12,
+                                color: const Color(0xFF6B7280),
+                                fontWeight: FontWeight.w600,
                               ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    GestureDetector(
-                      onTap: () => _showCertificatePreview(cert),
-                      child: Container(
-                        width: 44,
-                        height: 44,
-                        decoration: BoxDecoration(
-                          gradient: LinearGradient(
-                            colors: [
-                              _studentPrimary(context),
-                              CourseThemeUtils.studentDarkFromPrimary(_studentPrimary(context)),
-                            ],
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                          ),
-                          shape: BoxShape.circle,
-                          boxShadow: [
-                            BoxShadow(
-                              color: _studentPrimary(context).withValues(alpha: 0.35),
-                              blurRadius: 10,
-                              offset: const Offset(0, 4),
                             ),
                           ],
                         ),
-                        child: const Icon(
-                          Icons.arrow_forward_rounded,
-                          color: Colors.white,
-                          size: 20,
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  GestureDetector(
+                    onTap: () => _showCertificatePreview(cert),
+                    child: Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [
+                            _studentPrimary(context),
+                            CourseThemeUtils.studentDarkFromPrimary(
+                              _studentPrimary(context),
+                            ),
+                          ],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
                         ),
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: _studentPrimary(
+                              context,
+                            ).withValues(alpha: 0.35),
+                            blurRadius: 10,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: const Icon(
+                        Icons.arrow_forward_rounded,
+                        color: Colors.white,
+                        size: 20,
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
+          ],
         ),
+      ),
     );
   }
 
@@ -1077,22 +1123,23 @@ class _StudentCertificatesState extends State<StudentCertificates>
         resolveParticipantName: _resolveParticipantName,
         buildThumbnail: _buildCertificateThumbnail,
         hasThumbnail: _hasThumbnail,
-        onDownload: ({
-          required Map<String, dynamic> certRow,
-          Uint8List? renderedImageBytes,
-        }) async {
-          if (_isDownloading) return;
-          _isDownloading = true;
-          try {
-            await _downloadCertificate(
-              certRow,
-              renderedImageBytes: renderedImageBytes,
-              alreadyLocked: true,
-            );
-          } finally {
-            _isDownloading = false;
-          }
-        },
+        onDownload:
+            ({
+              required Map<String, dynamic> certRow,
+              Uint8List? renderedImageBytes,
+            }) async {
+              if (_isDownloading) return;
+              _isDownloading = true;
+              try {
+                await _downloadCertificate(
+                  certRow,
+                  renderedImageBytes: renderedImageBytes,
+                  alreadyLocked: true,
+                );
+              } finally {
+                _isDownloading = false;
+              }
+            },
         onCanvasReady: (canvas) {
           final id = cert['id']?.toString() ?? '';
           if (id.isEmpty || !mounted) return;
@@ -1141,13 +1188,15 @@ class _CertificatePreviewDialog extends StatefulWidget {
   final Color studentPrimary;
   final Color studentDark;
   final EventService eventService;
-  final Future<String> Function(Map<String, dynamic> cert) resolveParticipantName;
+  final Future<String> Function(Map<String, dynamic> cert)
+  resolveParticipantName;
   final Widget Function(Map<String, dynamic> cert, {BoxFit fit}) buildThumbnail;
   final bool Function(Map<String, dynamic> cert) hasThumbnail;
   final Future<void> Function({
     required Map<String, dynamic> certRow,
     Uint8List? renderedImageBytes,
-  }) onDownload;
+  })
+  onDownload;
   final void Function(Map<String, dynamic> canvas) onCanvasReady;
   final VoidCallback onPreviewCached;
 
@@ -1349,8 +1398,8 @@ class _CertificatePreviewDialogState extends State<_CertificatePreviewDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final headerTitle = widget.seminarLabel == null ||
-            widget.seminarLabel!.isEmpty
+    final headerTitle =
+        widget.seminarLabel == null || widget.seminarLabel!.isEmpty
         ? widget.eventTitle
         : '${widget.eventTitle} - ${widget.seminarLabel}';
 
@@ -1388,8 +1437,7 @@ class _CertificatePreviewDialogState extends State<_CertificatePreviewDialog> {
                       Icons.close_rounded,
                       color: Colors.grey.shade500,
                     ),
-                    onPressed:
-                        _isSaving ? null : () => Navigator.pop(context),
+                    onPressed: _isSaving ? null : () => Navigator.pop(context),
                     padding: EdgeInsets.zero,
                     constraints: const BoxConstraints(),
                   ),
@@ -1495,7 +1543,8 @@ class _CertificatePreviewCache {
 
   static Future<File> _fileFor(String certId) async {
     final dir = await getApplicationSupportDirectory();
-    final folder = Directory(p.join(dir.path, 'cert_previews'));
+    // Keep old full-name / edge-gap PNGs out of the refreshed renderer cache.
+    final folder = Directory(p.join(dir.path, 'cert_previews_v2'));
     if (!await folder.exists()) {
       await folder.create(recursive: true);
     }
@@ -1505,20 +1554,20 @@ class _CertificatePreviewCache {
   static Uint8List? peek(String certId) {
     final id = certId.trim();
     if (id.isEmpty) return null;
-    return _memory[id];
+    return _memory['v2:$id'];
   }
 
   static Future<Uint8List?> load(String certId) async {
     final id = certId.trim();
     if (id.isEmpty) return null;
-    final mem = _memory[id];
+    final mem = _memory['v2:$id'];
     if (mem != null && mem.isNotEmpty) return mem;
     try {
       final file = await _fileFor(id);
       if (await file.exists()) {
         final bytes = await file.readAsBytes();
         if (bytes.isNotEmpty) {
-          _memory[id] = bytes;
+          _memory['v2:$id'] = bytes;
           return bytes;
         }
       }
@@ -1529,7 +1578,7 @@ class _CertificatePreviewCache {
   static Future<void> save(String certId, Uint8List bytes) async {
     final id = certId.trim();
     if (id.isEmpty || bytes.isEmpty) return;
-    _memory[id] = bytes;
+    _memory['v2:$id'] = bytes;
     try {
       final file = await _fileFor(id);
       await file.writeAsBytes(bytes, flush: true);
@@ -1875,7 +1924,9 @@ class _CertificateCanvasPreviewState extends State<_CertificateCanvasPreview> {
             var current = (typeof obj.get === 'function')
               ? obj.get('text')
               : obj.text;
+            var isParticipantName = /{{\\s*(?:participant_name|name)\\s*}}/i.test(String(current || ''));
             obj.set('text', tokenReplace(current));
+            if (isParticipantName) fitParticipantNameToOneLine(obj);
           }
         }
 
@@ -1904,6 +1955,65 @@ class _CertificateCanvasPreviewState extends State<_CertificateCanvasPreview> {
         if (Array.isArray(node.objects)) {
           node.objects.forEach(rewriteStateUrls);
         }
+      }
+
+      function fitParticipantNameToOneLine(obj) {
+        if (!obj || !obj.set || !obj.getCenterPoint) return;
+        var logicalWidth = defaultWidth;
+        var maxWidth = logicalWidth * 0.9;
+        var center = obj.getCenterPoint();
+        center.x = logicalWidth / 2;
+        var scaleX = Math.max(0.01, Math.abs(Number(obj.scaleX) || 1));
+        var originalSize = Math.max(6, Number(obj.fontSize) || 24);
+
+        obj.set({
+          originX: 'center',
+          left: center.x,
+          text: String(obj.text || '').replace(/[\\r\\n]+/g, ' ').replace(/\\s+/g, ' ').trim(),
+          textAlign: 'center',
+          splitByGrapheme: false
+        });
+
+        if (obj.type === 'textbox') {
+          obj.set('width', maxWidth / scaleX);
+        }
+
+        for (var size = originalSize; size >= 6; size -= 1) {
+          obj.set('fontSize', size);
+          if (typeof obj.initDimensions === 'function') obj.initDimensions();
+          var lines = Array.isArray(obj._textLines) ? obj._textLines.length : 1;
+          var textWidth = typeof obj.calcTextWidth === 'function'
+            ? obj.calcTextWidth() * scaleX
+            : (Number(obj.width) || maxWidth);
+          if (lines <= 1 && textWidth <= maxWidth) break;
+        }
+
+        if (typeof obj.initDimensions === 'function') obj.initDimensions();
+        if (typeof obj.setPositionByOrigin === 'function') {
+          obj.setPositionByOrigin(center, 'center', 'center');
+        }
+        obj.setCoords();
+      }
+
+      function extendFullBleedImage(image) {
+        if (!image || !image.getBoundingRect || !image.set || Number(image.angle || 0) !== 0) return;
+        var bounds = image.getBoundingRect(true, true);
+        if (!bounds || !(bounds.width > 0) || !(bounds.height > 0)) return;
+        var bleed = 3;
+        var nearFullCanvas =
+          bounds.left >= -bleed && bounds.top >= -bleed &&
+          bounds.left <= bleed && bounds.top <= bleed &&
+          Math.abs((bounds.left + bounds.width) - defaultWidth) <= bleed &&
+          Math.abs((bounds.top + bounds.height) - defaultHeight) <= bleed;
+        if (!nearFullCanvas) return;
+
+        var center = new fabric.Point(defaultWidth / 2, defaultHeight / 2);
+        image.set({
+          scaleX: (Number(image.scaleX) || 1) * ((defaultWidth + bleed * 2) / bounds.width),
+          scaleY: (Number(image.scaleY) || 1) * ((defaultHeight + bleed * 2) / bounds.height)
+        });
+        image.setPositionByOrigin(center, 'center', 'center');
+        image.setCoords();
       }
 
       const parsed = (typeof STATE === 'string') ? JSON.parse(STATE) : STATE;
@@ -1948,7 +2058,11 @@ class _CertificateCanvasPreviewState extends State<_CertificateCanvasPreview> {
           applyTokensToObject(obj);
           obj.selectable = false;
           obj.evented = false;
+          if (String(obj.type || '').toLowerCase() === 'image') {
+            extendFullBleedImage(obj);
+          }
         });
+        extendFullBleedImage(canvas.backgroundImage);
         canvas.renderAll();
         fitCanvas();
         window.__certReady = true;
