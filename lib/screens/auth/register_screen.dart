@@ -623,10 +623,6 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    // Messages
-                                    if (_errorMessage != null) _buildMessage(_errorMessage!, false),
-                                    if (_successMessage != null) _buildMessage(_successMessage!, true),
-
                                     _buildLabel('Student Number'),
                                     const SizedBox(height: 8),
                                     TextFormField(
@@ -953,6 +949,15 @@ class _RegisterScreenState extends State<RegisterScreen> with TickerProviderStat
                                               ),
                                       ),
                                     ),
+
+                                    if (_errorMessage != null) ...[
+                                      const SizedBox(height: 14),
+                                      _buildMessage(_errorMessage!, false),
+                                    ],
+                                    if (_successMessage != null) ...[
+                                      const SizedBox(height: 14),
+                                      _buildMessage(_successMessage!, true),
+                                    ],
 
                                   ],
                                 ),

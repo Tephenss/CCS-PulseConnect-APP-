@@ -2615,8 +2615,8 @@ class EventService {
     if (compact == 'BSITBA') return 'BSIT-BA';
     if (normalized == 'BSIT-SD' || normalized == 'BSIT_SD') return 'BSIT-SD';
     if (normalized == 'BSIT-BA' || normalized == 'BSIT_BA') return 'BSIT-BA';
-    if (compact == 'BSIT' || compact == 'IT') return 'BSIT';
-    if (compact == 'BSCS' || compact == 'CS') return 'BSCS';
+    if (compact == 'IT' || compact.startsWith('BSIT')) return 'BSIT';
+    if (compact == 'CS' || compact.startsWith('BSCS')) return 'BSCS';
     if (compact == 'ALL' ||
         compact == 'NONE' ||
         compact == 'ALLLEVELS' ||
@@ -2727,6 +2727,25 @@ class EventService {
       return {'course': course, 'years': years};
     }
 
+    // Older event rows may store the human-readable target instead of the
+    // canonical COURSE=...;YEARS=... value shown by the web UI.
+    final labeled = RegExp(
+      r'^(BSIT(?:[\s_-]*(?:SD|BA))?|BSCS|IT|CS)\s*[-:]\s*(.+)$',
+    ).firstMatch(raw);
+    if (labeled != null) {
+      final course = _normalizeEventTargetCourse(labeled.group(1));
+      final yearLabel = labeled.group(2) ?? '';
+      final years = RegExp(r'([1-4])(?:ST|ND|RD|TH)?(?:\s*YEAR)?')
+          .allMatches(yearLabel)
+          .map((match) => match.group(1)!)
+          .toSet()
+          .toList();
+      return {
+        'course': course,
+        'years': years.isEmpty ? const <String>['ALL'] : years,
+      };
+    }
+
     final pair = RegExp(r'^(BSIT|BSCS)\s*[-_|]\s*([1-4])$').firstMatch(raw);
     if (pair != null) {
       return {
@@ -2820,11 +2839,27 @@ class EventService {
       final user = await AuthService().getCurrentUser();
       final prefsId = (user?['id']?.toString() ?? '').trim();
       if (prefsId.isEmpty || prefsId == trimmedUserId) {
-        courseCode = _normalizeStudentCourse(user?['course']?.toString());
+        final profileCourses = [
+          user?['course'],
+          user?['program_label'],
+          user?['course_code'],
+        ]
+            .map((value) => value?.toString().trim() ?? '')
+            .where((value) => value.isNotEmpty)
+            .toList();
+        for (final profileCourse in profileCourses) {
+          final normalizedCourse = _normalizeStudentCourse(profileCourse);
+          if (normalizedCourse != 'ALL') {
+            courseCode = normalizedCourse;
+            break;
+          }
+        }
         yearLevel = _normalizeStudentYearFromRaw(user?['year_level']);
         sectionId = user?['section_id']?.toString().trim() ?? '';
-        specialization =
-            _extractStudentSpecialization(user?['course']?.toString());
+        for (final profileCourse in profileCourses) {
+          specialization = _extractStudentSpecialization(profileCourse);
+          if (specialization.isNotEmpty) break;
+        }
         final flaggedIrregular =
             user?['is_irregular'] == true ||
             user?['is_irregular']?.toString() == 'true';

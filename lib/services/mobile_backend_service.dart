@@ -141,12 +141,205 @@ class MobileBackendService {
   }
 
   static bool _isEndpointUnavailable(http.Response response) {
-    if (response.statusCode == 404 || response.statusCode == 405) {
+    if (response.statusCode == 404 ||
+        response.statusCode == 405 ||
+        response.statusCode == 307 ||
+        response.statusCode == 308) {
       return true;
     }
 
     final body = response.body.trim().toLowerCase();
     return body.startsWith('<!doctype') || body.startsWith('<html');
+  }
+
+  static bool _isTrustedApiRedirect(Uri from, Uri to) {
+    if (to.userInfo.isNotEmpty ||
+        !to.path.startsWith('/api/') ||
+        to.path != from.path ||
+        to.query != from.query) {
+      return false;
+    }
+
+    final sameOrigin =
+        from.scheme == to.scheme &&
+        from.host == to.host &&
+        from.port == to.port;
+    const productionHosts = {'ccspulseconnect.com', 'www.ccspulseconnect.com'};
+    final canonicalProductionHost =
+        from.scheme == 'https' &&
+        to.scheme == 'https' &&
+        from.port == 443 &&
+        to.port == 443 &&
+        productionHosts.contains(from.host.toLowerCase()) &&
+        productionHosts.contains(to.host.toLowerCase());
+
+    return sameOrigin || canonicalProductionHost;
+  }
+
+  static String _safeRedirectTarget(String? rawLocation) {
+    final location = (rawLocation ?? '').trim();
+    final target = Uri.tryParse(location);
+    if (target == null) return 'an unknown location';
+
+    if (!target.hasAuthority) {
+      return target.path.isEmpty ? 'an unknown location' : target.path;
+    }
+
+    final port = target.hasPort ? ':${target.port}' : '';
+    return '${target.scheme}://${target.host}$port${target.path}';
+  }
+
+  static Future<http.Response> _postFollowingTrustedRedirects({
+    required Uri uri,
+    required Map<String, String> headers,
+    required String encodedBody,
+  }) async {
+    final client = http.Client();
+    var target = uri;
+    http.Response? response;
+
+    try {
+      for (var redirects = 0; redirects <= 3; redirects++) {
+        final request = http.Request('POST', target)
+          ..followRedirects = false
+          ..headers.addAll(headers)
+          ..body = encodedBody;
+        response = await http.Response.fromStream(
+          await client.send(request),
+        );
+
+        if (response.statusCode != 307 && response.statusCode != 308) {
+          return response;
+        }
+
+        final location = response.headers['location']?.trim() ?? '';
+        if (location.isEmpty) return response;
+
+        final nextTarget = target.resolve(location);
+        if (!_isTrustedApiRedirect(target, nextTarget)) return response;
+        target = nextTarget;
+      }
+
+      return response!;
+    } finally {
+      client.close();
+    }
+  }
+
+  static Future<http.Response> _postMultipartFollowingTrustedRedirects({
+    required Uri uri,
+    required Map<String, String> headers,
+    required Map<String, String> fields,
+    required String filePath,
+    required List<int>? fileBytes,
+    required String fileName,
+  }) async {
+    final client = http.Client();
+    var target = uri;
+    http.Response? response;
+
+    try {
+      for (var redirects = 0; redirects <= 3; redirects++) {
+        final request = http.MultipartRequest('POST', target)
+          ..followRedirects = false
+          ..headers.addAll(headers)
+          ..fields.addAll(fields);
+        if (filePath.isNotEmpty) {
+          request.files.add(
+            await http.MultipartFile.fromPath(
+              'schedule_file',
+              filePath,
+              filename: fileName,
+            ),
+          );
+        } else {
+          request.files.add(
+            http.MultipartFile.fromBytes(
+              'schedule_file',
+              fileBytes!,
+              filename: fileName,
+            ),
+          );
+        }
+
+        response = await http.Response.fromStream(await client.send(request));
+        if (response.statusCode != 307 && response.statusCode != 308) {
+          return response;
+        }
+
+        final location = response.headers['location']?.trim() ?? '';
+        if (location.isEmpty) return response;
+
+        final Uri nextTarget;
+        try {
+          nextTarget = target.resolve(location);
+        } on FormatException {
+          return response;
+        }
+        if (!_isTrustedApiRedirect(target, nextTarget)) return response;
+        target = nextTarget;
+      }
+
+      return response!;
+    } finally {
+      client.close();
+    }
+  }
+
+  static String _unexpectedResponseMessage(
+    String path,
+    http.Response response,
+  ) {
+    final status = response.statusCode;
+    final body = response.body.trimLeft().toLowerCase();
+    final isHtml =
+        body.startsWith('<!doctype') ||
+        body.startsWith('<html') ||
+        body.startsWith('<');
+
+    if (status == 404) {
+      return 'API endpoint not found (HTTP 404): $path. Check that the latest PHP API file is deployed.';
+    }
+    if (status == 405) {
+      return 'API endpoint rejected this request method (HTTP 405): $path.';
+    }
+    if (status == 307 || status == 308) {
+      final destination = _safeRedirectTarget(response.headers['location']);
+      return 'API redirected this POST (HTTP $status) to $destination. Check the production API canonical URL and routing.';
+    }
+    if (status == 401 || status == 403) {
+      return 'API request was rejected (HTTP $status): $path. Check the mobile API key, session, or hosting firewall.';
+    }
+    if (status >= 500) {
+      return 'API server error (HTTP $status): $path. Check the PHP and hosting error logs.';
+    }
+    if (isHtml) {
+      return 'API returned a web page instead of JSON (HTTP $status): $path. Check the production API URL and routing.';
+    }
+    if (response.body.trim().isEmpty) {
+      return 'API returned an empty response (HTTP $status): $path.';
+    }
+    return 'API returned unreadable data (HTTP $status): $path.';
+  }
+
+  static void _debugUnexpectedResponse(String path, http.Response response) {
+    if (!kDebugMode) return;
+
+    final body = response.body.trimLeft().toLowerCase();
+    final kind = body.isEmpty
+        ? 'empty'
+        : (body.startsWith('<') ? 'html' : 'non-json');
+    final contentType = response.headers['content-type'] ?? 'unknown';
+    debugPrint(
+      '[mobile-backend] $path returned HTTP ${response.statusCode}; '
+      'content-type=$contentType; body=$kind (${response.body.length} chars)',
+    );
+    if (response.statusCode == 307 || response.statusCode == 308) {
+      debugPrint(
+        '[mobile-backend] redirect location: '
+        '${_safeRedirectTarget(response.headers['location'])}',
+      );
+    }
   }
 
   static Future<Map<String, dynamic>> post(
@@ -168,43 +361,39 @@ class MobileBackendService {
     final uri = base.replace(path: normalizedPath);
 
     try {
-      final response = await http
-          .post(
-            uri,
-            headers: await _headers(withSession: withSession),
-            body: jsonEncode(body),
-          )
-          .timeout(timeout ?? _defaultTimeout);
+      final requestTimeout = timeout ?? _defaultTimeout;
+      final response = await _postFollowingTrustedRedirects(
+        uri: uri,
+        headers: await _headers(withSession: withSession),
+        encodedBody: jsonEncode(body),
+      ).timeout(requestTimeout);
 
       final parsed = _tryDecodeJsonResponse(response.body);
       if (parsed == null) {
+        _debugUnexpectedResponse(normalizedPath, response);
         if (_isEndpointUnavailable(response)) {
           return {
             'ok': false,
             'endpoint_unavailable': true,
-            'error': 'Registration service is temporarily unavailable.',
-          };
-        }
-
-        if (response.body.trim().isEmpty && response.statusCode >= 500) {
-          return {
-            'ok': false,
-            'error':
-                'Server crashed (HTTP ${response.statusCode}, empty body). Redeploy missing PHP includes (curl_ssl.php / mobile_session.php) on Hostinger.',
+            'error': _unexpectedResponseMessage(normalizedPath, response),
           };
         }
 
         return {
           'ok': false,
-          'error': response.statusCode >= 500
-              ? 'Server error (HTTP ${response.statusCode}).'
-              : 'Invalid server response.',
+          'error': _unexpectedResponseMessage(normalizedPath, response),
         };
       }
 
       final data = parsed;
 
       if (response.statusCode < 200 || response.statusCode >= 300) {
+        if (kDebugMode) {
+          debugPrint(
+            '[mobile-backend] $normalizedPath returned HTTP '
+            '${response.statusCode} with a JSON error response.',
+          );
+        }
         final err = data['error']?.toString().trim();
         final msg = data['message']?.toString().trim();
         return {
@@ -213,8 +402,8 @@ class MobileBackendService {
           'error': (err != null && err.isNotEmpty)
               ? err
               : ((msg != null && msg.isNotEmpty)
-                  ? msg
-                  : 'Request failed (HTTP ${response.statusCode}).'),
+                    ? msg
+                    : 'Request failed (HTTP ${response.statusCode}).'),
         };
       }
 
@@ -228,19 +417,22 @@ class MobileBackendService {
 
       return data;
     } on FormatException {
+      if (kDebugMode) {
+        debugPrint(
+          '[mobile-backend] $normalizedPath raised FormatException while '
+          'building or reading the request.',
+        );
+      }
       return {
         'ok': false,
-        'endpoint_unavailable': true,
-        'error': 'Registration service is temporarily unavailable.',
+        'error':
+            'API request or response had an unexpected format: $normalizedPath. Check the endpoint configuration and retry.',
       };
     } catch (e) {
       if (kDebugMode) {
         debugPrint('[mobile-backend] $path failed: $e');
       }
-      return {
-        'ok': false,
-        'error': normalizeTransportError(e.toString()),
-      };
+      return {'ok': false, 'error': normalizeTransportError(e.toString())};
     }
   }
 
@@ -264,7 +456,7 @@ class MobileBackendService {
     if (lower.contains('formatexception') ||
         lower.contains('<!doctype html>') ||
         lower.contains('unexpected character')) {
-      return 'Registration service is temporarily unavailable.';
+      return 'The API response could not be read. Check the endpoint configuration and try again.';
     }
     if (message.isEmpty) {
       return 'Unable to contact the hosted backend.';
@@ -423,48 +615,45 @@ class MobileBackendService {
     }
 
     final uri = _baseUri!.replace(path: path);
-    final request = http.MultipartRequest('POST', uri);
+    final headers = <String, String>{};
     final key = Env.mobilePushApiKey.trim();
     if (key.isNotEmpty && !key.contains('YOUR_SHARED_KEY')) {
-      request.headers['X-Mobile-Api-Key'] = key;
+      headers['X-Mobile-Api-Key'] = key;
     }
     if (withSession) {
       final session = await getSessionToken();
       if (session != null && session.isNotEmpty) {
-        request.headers['Authorization'] = 'Bearer $session';
-        request.headers['X-Mobile-Session'] = session;
+        headers['Authorization'] = 'Bearer $session';
+        headers['X-Mobile-Session'] = session;
       }
     }
-    if (fields != null) {
-      request.fields.addAll(fields);
-    }
-    final safeName =
-        fileName.trim().isNotEmpty ? fileName.trim() : 'registration.pdf';
-    if (hasPath) {
-      request.files.add(
-        await http.MultipartFile.fromPath(
-          'schedule_file',
-          diskPath,
-          filename: safeName,
-        ),
-      );
-    } else {
-      request.files.add(
-        http.MultipartFile.fromBytes(
-          'schedule_file',
-          bytes!,
-          filename: safeName,
-        ),
-      );
-    }
+    final safeName = fileName.trim().isNotEmpty
+        ? fileName.trim()
+        : 'registration.pdf';
 
     try {
-      final streamed = await request.send().timeout(timeout);
-      final response = await http.Response.fromStream(streamed);
+      final response = await _postMultipartFollowingTrustedRedirects(
+        uri: uri,
+        headers: headers,
+        fields: fields ?? const {},
+        filePath: hasPath ? diskPath : '',
+        fileBytes: hasPath ? null : bytes,
+        fileName: safeName,
+      ).timeout(timeout);
       final parsed = _tryDecodeJsonResponse(response.body);
       if (parsed == null) {
         final status = response.statusCode;
         final body = response.body.trim().toLowerCase();
+        if (status == 307 || status == 308) {
+          final destination = _safeRedirectTarget(
+            response.headers['location'],
+          );
+          return {
+            'ok': false,
+            'error':
+                'File upload was redirected (HTTP $status) to $destination. Check the production API URL and routing.',
+          };
+        }
         if (status == 404 || body.contains('not found')) {
           return {
             'ok': false,
@@ -482,13 +671,14 @@ class MobileBackendService {
         return {
           'ok': false,
           'error':
-              'Could not read the server reply (HTTP $status). Try again, or ask admin if migration 059 is applied.',
+              'Could not read the server reply (HTTP $status). Try again, or contact the admin with this status.',
         };
       }
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return {
           'ok': false,
-          'error': parsed['error']?.toString() ??
+          'error':
+              parsed['error']?.toString() ??
               'Upload failed (HTTP ${response.statusCode}).',
         };
       }
@@ -508,14 +698,10 @@ class MobileBackendService {
     required String email,
     required String code,
   }) {
-    return post(
-      '/api/mobile_password_reset_verify.php',
-      {
-        'email': email.trim().toLowerCase(),
-        'code': code.trim(),
-      },
-      withSession: false,
-    );
+    return post('/api/mobile_password_reset_verify.php', {
+      'email': email.trim().toLowerCase(),
+      'code': code.trim(),
+    }, withSession: false);
   }
 
   Future<Map<String, dynamic>> updatePasswordWithResetToken({
@@ -523,15 +709,11 @@ class MobileBackendService {
     required String resetToken,
     required String newPassword,
   }) {
-    return post(
-      '/api/mobile_password_reset_update.php',
-      {
-        'email': email.trim().toLowerCase(),
-        'reset_token': resetToken,
-        'new_password': newPassword,
-      },
-      withSession: false,
-    );
+    return post('/api/mobile_password_reset_update.php', {
+      'email': email.trim().toLowerCase(),
+      'reset_token': resetToken,
+      'new_password': newPassword,
+    }, withSession: false);
   }
 
   Future<Map<String, dynamic>> verifyEmailCode({
@@ -542,8 +724,9 @@ class MobileBackendService {
     String? deviceLabel,
     String purpose = 'login',
   }) {
-    final resolvedPurpose =
-        purpose.trim().isEmpty ? 'login' : purpose.trim().toLowerCase();
+    final resolvedPurpose = purpose.trim().isEmpty
+        ? 'login'
+        : purpose.trim().toLowerCase();
     final body = <String, dynamic>{
       'code': code.trim(),
       'purpose': resolvedPurpose,
@@ -612,10 +795,7 @@ class MobileBackendService {
     String action,
     Map<String, dynamic> payload,
   ) {
-    return post('/api/mobile_secure_write.php', {
-      'action': action,
-      ...payload,
-    });
+    return post('/api/mobile_secure_write.php', {'action': action, ...payload});
   }
 
   Future<Map<String, dynamic>> scanTicket({
@@ -637,13 +817,9 @@ class MobileBackendService {
   /// Teacher / student-assistant scan window (opens_at, closes_at, scan_mode).
   /// Prefer this over anon context so offline warm matches mobile_scan_ticket.php.
   Future<Map<String, dynamic>> getScanContext({bool fresh = false}) {
-    return post(
-      '/api/mobile_scan_context.php',
-      {
-        if (fresh) 'fresh': true,
-      },
-      timeout: const Duration(seconds: 8),
-    );
+    return post('/api/mobile_scan_context.php', {
+      if (fresh) 'fresh': true,
+    }, timeout: const Duration(seconds: 8));
   }
 
   Future<Map<String, dynamic>> selfCheckInViaEventQr({
@@ -675,11 +851,9 @@ class MobileBackendService {
   Future<Map<String, dynamic>> improveEventDescription({
     required String rawText,
   }) {
-    return post(
-      '/api/mobile_ai_improve.php',
-      {'raw_text': rawText.trim()},
-      timeout: _emailTimeout,
-    );
+    return post('/api/mobile_ai_improve.php', {
+      'raw_text': rawText.trim(),
+    }, timeout: _emailTimeout);
   }
 
   Future<Map<String, dynamic>> setEventEarlyOut({
@@ -717,22 +891,16 @@ class MobileBackendService {
         .toSet()
         .take(40)
         .toList();
-    return post('/api/mobile_events_early_out_batch.php', {
-      'event_ids': ids,
-    });
+    return post('/api/mobile_events_early_out_batch.php', {'event_ids': ids});
   }
 
   Future<Map<String, dynamic>> sendChangePasswordOtp() {
-    return post(
-      '/api/mobile_change_password.php',
-      {'action': 'send_otp'},
-      timeout: _emailTimeout,
-    );
+    return post('/api/mobile_change_password.php', {
+      'action': 'send_otp',
+    }, timeout: _emailTimeout);
   }
 
-  Future<Map<String, dynamic>> verifyChangePasswordOtp({
-    required String code,
-  }) {
+  Future<Map<String, dynamic>> verifyChangePasswordOtp({required String code}) {
     return post('/api/mobile_change_password.php', {
       'action': 'verify_otp',
       'code': code.trim(),
@@ -824,18 +992,17 @@ class MobileBackendService {
       request.headers['X-Mobile-Session'] = session;
     }
 
-    final safeName = fileName.trim().isNotEmpty ? fileName.trim() : 'avatar.jpg';
+    final safeName = fileName.trim().isNotEmpty
+        ? fileName.trim()
+        : 'avatar.jpg';
     request.files.add(
-      http.MultipartFile.fromBytes(
-        'avatar_file',
-        bytes,
-        filename: safeName,
-      ),
+      http.MultipartFile.fromBytes('avatar_file', bytes, filename: safeName),
     );
 
     try {
-      final streamed =
-          await request.send().timeout(const Duration(seconds: 45));
+      final streamed = await request.send().timeout(
+        const Duration(seconds: 45),
+      );
       final response = await http.Response.fromStream(streamed);
       final parsed = _tryDecodeJsonResponse(response.body);
       if (parsed == null) {
@@ -844,7 +1011,8 @@ class MobileBackendService {
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return {
           'ok': false,
-          'error': parsed['error']?.toString() ??
+          'error':
+              parsed['error']?.toString() ??
               'Upload failed (HTTP ${response.statusCode}).',
         };
       }
@@ -856,10 +1024,7 @@ class MobileBackendService {
       }
       return parsed;
     } catch (e) {
-      return {
-        'ok': false,
-        'error': normalizeTransportError(e.toString()),
-      };
+      return {'ok': false, 'error': normalizeTransportError(e.toString())};
     }
   }
 
@@ -895,15 +1060,13 @@ class MobileBackendService {
 
     request.fields['event_id'] = eventId.trim();
     request.files.add(
-      http.MultipartFile.fromBytes(
-        'cover_file',
-        bytes,
-        filename: fileName,
-      ),
+      http.MultipartFile.fromBytes('cover_file', bytes, filename: fileName),
     );
 
     try {
-      final streamed = await request.send().timeout(const Duration(seconds: 45));
+      final streamed = await request.send().timeout(
+        const Duration(seconds: 45),
+      );
       final response = await http.Response.fromStream(streamed);
       final parsed = _tryDecodeJsonResponse(response.body);
       if (parsed == null) {
@@ -912,7 +1075,8 @@ class MobileBackendService {
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return {
           'ok': false,
-          'error': parsed['error']?.toString() ??
+          'error':
+              parsed['error']?.toString() ??
               'Upload failed (HTTP ${response.statusCode}).',
         };
       }
@@ -924,10 +1088,7 @@ class MobileBackendService {
       }
       return parsed;
     } catch (e) {
-      return {
-        'ok': false,
-        'error': normalizeTransportError(e.toString()),
-      };
+      return {'ok': false, 'error': normalizeTransportError(e.toString())};
     }
   }
 
@@ -946,8 +1107,7 @@ class MobileBackendService {
     }
 
     final base = _baseUri!;
-    final uri =
-        base.replace(path: '/api/mobile_proposal_document_upload.php');
+    final uri = base.replace(path: '/api/mobile_proposal_document_upload.php');
     final request = http.MultipartRequest('POST', uri);
 
     final key = Env.mobilePushApiKey.trim();
@@ -963,16 +1123,13 @@ class MobileBackendService {
     request.fields['event_id'] = eventId.trim();
     request.fields['requirement_id'] = requirementId.trim();
     request.files.add(
-      http.MultipartFile.fromBytes(
-        'proposal_file',
-        bytes,
-        filename: fileName,
-      ),
+      http.MultipartFile.fromBytes('proposal_file', bytes, filename: fileName),
     );
 
     try {
-      final streamed =
-          await request.send().timeout(const Duration(seconds: 45));
+      final streamed = await request.send().timeout(
+        const Duration(seconds: 45),
+      );
       final response = await http.Response.fromStream(streamed);
       final parsed = _tryDecodeJsonResponse(response.body);
       if (parsed == null) {
@@ -981,7 +1138,8 @@ class MobileBackendService {
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return {
           'ok': false,
-          'error': parsed['error']?.toString() ??
+          'error':
+              parsed['error']?.toString() ??
               'Upload failed (HTTP ${response.statusCode}).',
         };
       }
@@ -993,15 +1151,16 @@ class MobileBackendService {
       }
       return parsed;
     } catch (e) {
-      return {
-        'ok': false,
-        'error': normalizeTransportError(e.toString()),
-      };
+      return {'ok': false, 'error': normalizeTransportError(e.toString())};
     }
   }
 
   Future<Map<String, dynamic>> getMyTicketsSecure() {
-    return post('/api/mobile_my_tickets.php', {}, timeout: _registrationTimeout);
+    return post(
+      '/api/mobile_my_tickets.php',
+      {},
+      timeout: _registrationTimeout,
+    );
   }
 
   Future<Map<String, dynamic>> getSelfAttendancePack() {
@@ -1028,14 +1187,10 @@ class MobileBackendService {
     required String eventId,
     required String type,
   }) {
-    return post(
-      '/api/mobile_event_roster.php',
-      {
-        'event_id': eventId.trim(),
-        'type': type.trim(),
-      },
-      timeout: _registrationTimeout,
-    );
+    return post('/api/mobile_event_roster.php', {
+      'event_id': eventId.trim(),
+      'type': type.trim(),
+    }, timeout: _registrationTimeout);
   }
 
   Future<Map<String, dynamic>> secureRead({
@@ -1058,8 +1213,9 @@ class MobileBackendService {
     required String fullName,
     String purpose = 'login',
   }) {
-    final resolvedPurpose =
-        purpose.trim().isEmpty ? 'login' : purpose.trim().toLowerCase();
+    final resolvedPurpose = purpose.trim().isEmpty
+        ? 'login'
+        : purpose.trim().toLowerCase();
     return post(
       '/api/mobile_email_verification_send.php',
       {
@@ -1074,14 +1230,10 @@ class MobileBackendService {
     );
   }
 
-  Future<Map<String, dynamic>> sendPasswordResetCode({
-    required String email,
-  }) {
+  Future<Map<String, dynamic>> sendPasswordResetCode({required String email}) {
     return post(
       '/api/mobile_password_reset_send.php',
-      {
-        'email': email.trim().toLowerCase(),
-      },
+      {'email': email.trim().toLowerCase()},
       withSession: false,
       timeout: _emailTimeout,
     );
@@ -1092,29 +1244,21 @@ class MobileBackendService {
     required String email,
     required String fullName,
   }) {
-    return post(
-      '/api/mobile_email_under_review_send.php',
-      {
-        'user_id': userId,
-        'email': email.trim().toLowerCase(),
-        'full_name': fullName.trim(),
-      },
-      timeout: _emailTimeout,
-    );
+    return post('/api/mobile_email_under_review_send.php', {
+      'user_id': userId,
+      'email': email.trim().toLowerCase(),
+      'full_name': fullName.trim(),
+    }, timeout: _emailTimeout);
   }
 
   Future<Map<String, dynamic>> registerForEvent({
     required String eventId,
     required String userId,
   }) {
-    return post(
-      '/api/mobile_register_event.php',
-      {
-        'event_id': eventId.trim(),
-        'user_id': userId.trim(),
-      },
-      timeout: _registrationTimeout,
-    );
+    return post('/api/mobile_register_event.php', {
+      'event_id': eventId.trim(),
+      'user_id': userId.trim(),
+    }, timeout: _registrationTimeout);
   }
 
   Future<Map<String, dynamic>> getEventRegistrationInfo({
@@ -1137,28 +1281,20 @@ class MobileBackendService {
     required String eventId,
     required String userId,
   }) {
-    return post(
-      '/api/mobile_student_requirements_info.php',
-      {
-        'event_id': eventId.trim(),
-        'user_id': userId.trim(),
-      },
-      timeout: _requirementsTimeout,
-    );
+    return post('/api/mobile_student_requirements_info.php', {
+      'event_id': eventId.trim(),
+      'user_id': userId.trim(),
+    }, timeout: _requirementsTimeout);
   }
 
   Future<Map<String, dynamic>> submitStudentRequirements({
     required String eventId,
     required String userId,
   }) {
-    return post(
-      '/api/mobile_student_requirements_submit.php',
-      {
-        'event_id': eventId.trim(),
-        'user_id': userId.trim(),
-      },
-      timeout: _requirementsTimeout,
-    );
+    return post('/api/mobile_student_requirements_submit.php', {
+      'event_id': eventId.trim(),
+      'user_id': userId.trim(),
+    }, timeout: _requirementsTimeout);
   }
 
   Future<Map<String, dynamic>> uploadStudentRequirementFile({
@@ -1186,8 +1322,9 @@ class MobileBackendService {
     }
 
     final base = _baseUri!;
-    final uri =
-        base.replace(path: '/api/mobile_student_requirement_document_upload.php');
+    final uri = base.replace(
+      path: '/api/mobile_student_requirement_document_upload.php',
+    );
     final request = http.MultipartRequest('POST', uri);
 
     final key = Env.mobilePushApiKey.trim();
@@ -1224,7 +1361,9 @@ class MobileBackendService {
     }
 
     try {
-      final streamed = await request.send().timeout(const Duration(seconds: 90));
+      final streamed = await request.send().timeout(
+        const Duration(seconds: 90),
+      );
       final response = await http.Response.fromStream(streamed);
       final parsed = _tryDecodeJsonResponse(response.body);
       if (parsed == null) {
@@ -1233,7 +1372,8 @@ class MobileBackendService {
       if (response.statusCode < 200 || response.statusCode >= 300) {
         return {
           'ok': false,
-          'error': parsed['error']?.toString() ??
+          'error':
+              parsed['error']?.toString() ??
               'Upload failed (HTTP ${response.statusCode}).',
         };
       }
@@ -1245,10 +1385,7 @@ class MobileBackendService {
       }
       return parsed;
     } catch (e) {
-      return {
-        'ok': false,
-        'error': normalizeTransportError(e.toString()),
-      };
+      return {'ok': false, 'error': normalizeTransportError(e.toString())};
     }
   }
 }
