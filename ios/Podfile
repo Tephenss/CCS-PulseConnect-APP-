@@ -1,5 +1,5 @@
-﻿# Uncomment this line to define a global platform for your project
-platform :ios, '12.0'
+﻿# Match the Runner target and the minimum iOS version of the locked Firebase pods.
+platform :ios, '13.0'
 
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
 

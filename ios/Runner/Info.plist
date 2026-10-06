@@ -75,7 +75,7 @@
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>This app saves event QR codes to your photo gallery.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>This app needs access to your camera to let you take a profile picture.</string>
+	<string>This app needs access to your camera to take a profile picture or scan event QR codes.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app needs access to your microphone if you pick a video.</string>
 </dict>
