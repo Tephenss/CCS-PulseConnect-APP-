@@ -9,8 +9,36 @@ import '../../utils/course_theme_utils.dart';
 
 class StudentTicketView extends StatefulWidget {
   final Map<String, dynamic> ticket;
+  final bool tutorialDemo;
 
-  const StudentTicketView({super.key, required this.ticket});
+  const StudentTicketView({
+    super.key,
+    required this.ticket,
+    this.tutorialDemo = false,
+  });
+
+  static Map<String, dynamic> tutorialSampleTicket() {
+    final start = DateTime.now().add(const Duration(days: 14));
+    return {
+      'id': 'tutorial-sample-registration',
+      'event_id': 'tutorial-sample-event',
+      'registered_at': DateTime.now().toIso8601String(),
+      'events': {
+        'id': 'tutorial-sample-event',
+        'title': 'CCS Student Orientation (Sample)',
+        'description': 'Practice ticket preview only.',
+        'event_type': 'Seminar',
+        'location': 'CCS Main Hall',
+        'start_at': start.toIso8601String(),
+        'end_at': start.add(const Duration(hours: 2)).toIso8601String(),
+        'event_mode': 'simple',
+        'status': 'published',
+        'grace_time': 30,
+      },
+      'tickets': {'id': 'DEMO-2026-01', 'attendance': <Map<String, dynamic>>[]},
+      'tutorial_demo': true,
+    };
+  }
 
   @override
   State<StudentTicketView> createState() => _StudentTicketViewState();
@@ -21,6 +49,7 @@ class _StudentTicketViewState extends State<StudentTicketView>
   final EventService _eventService = EventService();
   bool _isLoadingSeminarAttendance = false;
   List<Map<String, dynamic>> _seminarAttendance = [];
+
   /// Live simple-event attendance (refreshed while this screen is open).
   Map<String, dynamic>? _liveAttendance;
   Timer? _attendancePollTimer;
@@ -42,8 +71,7 @@ class _StudentTicketViewState extends State<StudentTicketView>
     return '';
   }
 
-  String get _registrationId =>
-      (widget.ticket['id'] ?? '').toString().trim();
+  String get _registrationId => (widget.ticket['id'] ?? '').toString().trim();
 
   String get _eventId {
     final event = widget.ticket['events'];
@@ -60,6 +88,8 @@ class _StudentTicketViewState extends State<StudentTicketView>
     WidgetsBinding.instance.addObserver(this);
     _liveAttendance = _attendanceFromTicket(widget.ticket);
     _seminarAttendance = _seedSeminarRows(widget.ticket);
+    if (widget.tutorialDemo) return;
+
     _loadSeminarAttendance();
     unawaited(_refreshAttendanceLive(force: true));
     _bindAttendanceRealtime();
@@ -80,6 +110,7 @@ class _StudentTicketViewState extends State<StudentTicketView>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (widget.tutorialDemo) return;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
@@ -130,7 +161,8 @@ class _StudentTicketViewState extends State<StudentTicketView>
     final now = DateTime.now();
     if (!force &&
         _lastAttendanceRefreshAt != null &&
-        now.difference(_lastAttendanceRefreshAt!) < const Duration(seconds: 8)) {
+        now.difference(_lastAttendanceRefreshAt!) <
+            const Duration(seconds: 8)) {
       return;
     }
     _attendanceRefreshInFlight = true;
@@ -167,8 +199,9 @@ class _StudentTicketViewState extends State<StudentTicketView>
           _seminarAttendance = seminarRows;
           _isLoadingSeminarAttendance = false;
           if (seminarRows.isNotEmpty && widget.ticket['events'] is Map) {
-            final patched =
-                Map<String, dynamic>.from(widget.ticket['events'] as Map);
+            final patched = Map<String, dynamic>.from(
+              widget.ticket['events'] as Map,
+            );
             patched['event_mode'] = 'seminar_based';
             patched['uses_sessions'] = true;
             widget.ticket['events'] = patched;
@@ -279,8 +312,9 @@ class _StudentTicketViewState extends State<StudentTicketView>
       patched['event_mode'] = 'seminar_based';
       patched['uses_sessions'] = true;
       if ((patched['event_structure']?.toString() ?? '').trim().isEmpty) {
-        patched['event_structure'] =
-            rows.length > 1 ? 'two_seminars' : 'one_seminar';
+        patched['event_structure'] = rows.length > 1
+            ? 'two_seminars'
+            : 'one_seminar';
       }
       widget.ticket['events'] = patched;
     }
@@ -306,28 +340,32 @@ class _StudentTicketViewState extends State<StudentTicketView>
     final ticketData = ticket['tickets'];
     final ticketId = ticketData is List && ticketData.isNotEmpty
         ? ticketData[0]['id']?.toString() ?? ''
-        : ticketData is Map ? ticketData['id']?.toString() ?? '' : '';
+        : ticketData is Map
+        ? ticketData['id']?.toString() ?? ''
+        : '';
 
     // Prefer live attendance (polled / realtime) over the stale nav payload.
-    final attendance = _liveAttendance ?? () {
-      Map<String, dynamic>? nested;
-      if (ticketData is List && ticketData.isNotEmpty) {
-        final att = ticketData[0]['attendance'];
-        if (att is List && att.isNotEmpty) {
-          nested = Map<String, dynamic>.from(att[0] as Map);
-        } else if (att is Map) {
-          nested = Map<String, dynamic>.from(att);
-        }
-      } else if (ticketData is Map) {
-        final att = ticketData['attendance'];
-        if (att is List && att.isNotEmpty) {
-          nested = Map<String, dynamic>.from(att[0] as Map);
-        } else if (att is Map) {
-          nested = Map<String, dynamic>.from(att);
-        }
-      }
-      return nested;
-    }();
+    final attendance =
+        _liveAttendance ??
+        () {
+          Map<String, dynamic>? nested;
+          if (ticketData is List && ticketData.isNotEmpty) {
+            final att = ticketData[0]['attendance'];
+            if (att is List && att.isNotEmpty) {
+              nested = Map<String, dynamic>.from(att[0] as Map);
+            } else if (att is Map) {
+              nested = Map<String, dynamic>.from(att);
+            }
+          } else if (ticketData is Map) {
+            final att = ticketData['attendance'];
+            if (att is List && att.isNotEmpty) {
+              nested = Map<String, dynamic>.from(att[0] as Map);
+            } else if (att is Map) {
+              nested = Map<String, dynamic>.from(att);
+            }
+          }
+          return nested;
+        }();
 
     final scanStatus = attendance?['status'] as String? ?? 'unscanned';
     final checkInAt = attendance?['check_in_at'] as String?;
@@ -338,11 +376,13 @@ class _StudentTicketViewState extends State<StudentTicketView>
       checkInAt: checkInAt,
       checkOutAt: checkOutAt,
     );
-    final ticketIdDisplay = ticketId.length > 8 ? ticketId.substring(0, 8).toUpperCase() : ticketId.toUpperCase();
+    final ticketIdDisplay = ticketId.length > 8
+        ? ticketId.substring(0, 8).toUpperCase()
+        : ticketId.toUpperCase();
 
     final startDate = parseStoredEventDateTime(startAt);
     final endDate = parseStoredEventDateTime(endAt);
-    
+
     String timeString = 'TBA';
     if (startDate != null) {
       final start = DateFormat('hh:mm a').format(startDate);
@@ -356,13 +396,17 @@ class _StudentTicketViewState extends State<StudentTicketView>
 
     final themePrimary = _studentPrimary(context);
     final chromeColor = CourseThemeUtils.studentChromeFromPrimary(themePrimary);
-    final ticketGradient =
-        CourseThemeUtils.studentTicketGradientFromPrimary(themePrimary);
+    final ticketGradient = CourseThemeUtils.studentTicketGradientFromPrimary(
+      themePrimary,
+    );
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8F9FA),
       appBar: AppBar(
-        title: const Text('Event Ticket', style: TextStyle(fontWeight: FontWeight.w700)),
+        title: const Text(
+          'Event Ticket',
+          style: TextStyle(fontWeight: FontWeight.w700),
+        ),
         elevation: 0,
         backgroundColor: Colors.white,
         foregroundColor: const Color(0xFF1F2937),
@@ -372,7 +416,10 @@ class _StudentTicketViewState extends State<StudentTicketView>
           children: [
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 20,
+                  vertical: 24,
+                ),
                 child: Center(
                   child: Container(
                     width: double.infinity,
@@ -393,353 +440,512 @@ class _StudentTicketViewState extends State<StudentTicketView>
                           borderRadius: BorderRadius.circular(20),
                           child: Stack(
                             children: [
-                          // Shiny Background Layer (Full Height)
-                          Positioned.fill(
-                            child: Container(
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.topLeft,
-                                  end: Alignment.bottomRight,
-                                  colors: ticketGradient,
-                                  stops: const [0.0, 0.4, 0.6, 1.0],
-                                ),
-                              ),
-                            ),
-                          ),
-
-                          // Diagonal Shine Overlay
-                          Positioned.fill(
-                            child: Opacity(
-                              opacity: 0.12,
-                              child: Container(
-                                decoration: const BoxDecoration(
-                                  gradient: LinearGradient(
-                                    begin: Alignment(-1.0, -1.0),
-                                    end: Alignment(1.0, 1.0),
-                                    colors: [
-                                      Colors.transparent,
-                                      Colors.white,
-                                      Colors.transparent,
-                                    ],
-                                    stops: [0.45, 0.5, 0.55],
+                              // Shiny Background Layer (Full Height)
+                              Positioned.fill(
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      begin: Alignment.topLeft,
+                                      end: Alignment.bottomRight,
+                                      colors: ticketGradient,
+                                      stops: const [0.0, 0.4, 0.6, 1.0],
+                                    ),
                                   ),
                                 ),
                               ),
-                            ),
-                          ),
 
-                          // Main Content
-                          Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              // Top Part (Main Ticket Info)
-                              Container(
-                                padding: const EdgeInsets.all(28),
-                                decoration: BoxDecoration(
-                                  border: Border(bottom: BorderSide(color: Colors.white.withValues(alpha: 0.05))),
+                              // Diagonal Shine Overlay
+                              Positioned.fill(
+                                child: Opacity(
+                                  opacity: 0.12,
+                                  child: Container(
+                                    decoration: const BoxDecoration(
+                                      gradient: LinearGradient(
+                                        begin: Alignment(-1.0, -1.0),
+                                        end: Alignment(1.0, 1.0),
+                                        colors: [
+                                          Colors.transparent,
+                                          Colors.white,
+                                          Colors.transparent,
+                                        ],
+                                        stops: [0.45, 0.5, 0.55],
+                                      ),
+                                    ),
+                                  ),
                                 ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    // Header
-                                    Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              ),
+
+                              // Main Content
+                              Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  // Top Part (Main Ticket Info)
+                                  Container(
+                                    padding: const EdgeInsets.all(28),
+                                    decoration: BoxDecoration(
+                                      border: Border(
+                                        bottom: BorderSide(
+                                          color: Colors.white.withValues(
+                                            alpha: 0.05,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
                                       children: [
+                                        // Header
                                         Row(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.spaceBetween,
                                           children: [
-                                            const Icon(Icons.confirmation_num, color: Color(0xFFD4A843), size: 20),
-                                            const SizedBox(width: 8),
-                                            const Text(
-                                              'PULSECONNECT',
-                                              style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: -0.5),
+                                            Row(
+                                              children: [
+                                                const Icon(
+                                                  Icons.confirmation_num,
+                                                  color: Color(0xFFD4A843),
+                                                  size: 20,
+                                                ),
+                                                const SizedBox(width: 8),
+                                                const Text(
+                                                  'PULSECONNECT',
+                                                  style: TextStyle(
+                                                    color: Colors.white,
+                                                    fontWeight: FontWeight.w900,
+                                                    fontSize: 13,
+                                                    letterSpacing: -0.5,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                            Container(
+                                              padding:
+                                                  const EdgeInsets.symmetric(
+                                                    horizontal: 10,
+                                                    vertical: 4,
+                                                  ),
+                                              decoration: BoxDecoration(
+                                                border: Border.all(
+                                                  color: const Color(
+                                                    0xFFD4A843,
+                                                  ),
+                                                  width: 1.5,
+                                                ),
+                                                borderRadius:
+                                                    BorderRadius.circular(20),
+                                              ),
+                                              child: Text(
+                                                isSeminarBased
+                                                    ? 'SEMINAR PASS'
+                                                    : 'EVENT PASS',
+                                                style: const TextStyle(
+                                                  color: Color(0xFFD4A843),
+                                                  fontSize: 10,
+                                                  fontWeight: FontWeight.w800,
+                                                  letterSpacing: 1.2,
+                                                ),
+                                              ),
                                             ),
                                           ],
                                         ),
-                                        Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                          decoration: BoxDecoration(
-                                            border: Border.all(color: const Color(0xFFD4A843), width: 1.5),
-                                            borderRadius: BorderRadius.circular(20),
-                                          ),
-                                          child: Text(
-                                            isSeminarBased ? 'SEMINAR PASS' : 'EVENT PASS',
-                                            style: const TextStyle(color: Color(0xFFD4A843), fontSize: 10, fontWeight: FontWeight.w800, letterSpacing: 1.2),
+                                        const SizedBox(height: 36),
+
+                                        // Title
+                                        Text(
+                                          title.toUpperCase(),
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w900,
+                                            fontSize: 28,
+                                            height: 1.1,
+                                            letterSpacing: -0.5,
+                                            shadows: [
+                                              Shadow(
+                                                color: Colors.black38,
+                                                offset: Offset(0, 2),
+                                                blurRadius: 4,
+                                              ),
+                                            ],
                                           ),
                                         ),
-                                      ],
-                                    ),
-                                    const SizedBox(height: 36),
-                                    
-                                    // Title
-                                    Text(
-                                      title.toUpperCase(),
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w900,
-                                        fontSize: 28,
-                                        height: 1.1,
-                                        letterSpacing: -0.5,
-                                        shadows: [Shadow(color: Colors.black38, offset: Offset(0, 2), blurRadius: 4)],
-                                      ),
-                                    ),
-                                    const SizedBox(height: 8),
-                                    Text(
-                                      _ticketSubtitle(
-                                        isSeminarBased: isSeminarBased,
-                                        seminarCount: seminarRows.length,
-                                      ),
-                                      style: TextStyle(
-                                        color: const Color(0xFFD4A843).withValues(alpha: 0.8),
-                                        fontSize: 12,
-                                        fontWeight: FontWeight.w800,
-                                        letterSpacing: 1.0,
-                                      ),
-                                    ),
-                                    
-                                    const SizedBox(height: 36),
-                                    
-                                    if (isMultiDayEvent(startDate, endDate)) ...[
-                                      _buildTicketField(
-                                        'START',
-                                        '${DateFormat('MMM dd, yyyy').format(startDate!)} · ${DateFormat('hh:mm a').format(startDate)}',
-                                      ),
-                                      const SizedBox(height: 16),
-                                      _buildTicketField(
-                                        'END',
-                                        '${DateFormat('MMM dd, yyyy').format(endDate!)} · ${DateFormat('hh:mm a').format(endDate)}',
-                                      ),
-                                    ] else ...[
-                                      Row(
-                                        children: [
-                                          Expanded(
-                                            child: _buildTicketField(
-                                              'DATE',
-                                              startDate != null
-                                                  ? DateFormat('MMM dd, yyyy').format(startDate)
-                                                  : 'TBA',
-                                            ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          _ticketSubtitle(
+                                            isSeminarBased: isSeminarBased,
+                                            seminarCount: seminarRows.length,
                                           ),
-                                          Expanded(
-                                            child: _buildTicketField('TIME', timeString),
+                                          style: TextStyle(
+                                            color: const Color(
+                                              0xFFD4A843,
+                                            ).withValues(alpha: 0.8),
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w800,
+                                            letterSpacing: 1.0,
                                           ),
-                                        ],
-                                      ),
-                                    ],
-                                    const SizedBox(height: 24),
-                                    _buildTicketField('VENUE', location),
-                                    if (isSeminarBased && seminarRows.isNotEmpty) ...[
-                                      const SizedBox(height: 24),
-                                      Text(
-                                        'SEMINARS',
-                                        style: TextStyle(
-                                          color: Colors.white.withValues(alpha: 0.5),
-                                          fontSize: 10,
-                                          fontWeight: FontWeight.w600,
-                                          letterSpacing: 1.5,
                                         ),
-                                      ),
-                                      const SizedBox(height: 10),
-                                      ...seminarRows.asMap().entries.map((entry) {
-                                        final row = entry.value;
-                                        final seminarTitle =
-                                            (row['title']?.toString() ?? '').trim().isNotEmpty
-                                                ? row['title'].toString().trim()
-                                                : 'Seminar ${entry.key + 1}';
-                                        final topic = (row['topic']?.toString() ?? '').trim();
-                                        final showTopic = topic.isNotEmpty &&
-                                            topic.toLowerCase() != seminarTitle.toLowerCase();
-                                        final room = (row['location']?.toString() ?? '').trim();
-                                        final showRoom = room.isNotEmpty &&
-                                            room.toLowerCase() != location.trim().toLowerCase();
-                                        return Padding(
-                                          padding: EdgeInsets.only(
-                                            bottom: entry.key == seminarRows.length - 1 ? 0 : 12,
+
+                                        const SizedBox(height: 36),
+
+                                        if (isMultiDayEvent(
+                                          startDate,
+                                          endDate,
+                                        )) ...[
+                                          _buildTicketField(
+                                            'START',
+                                            '${DateFormat('MMM dd, yyyy').format(startDate!)} · ${DateFormat('hh:mm a').format(startDate)}',
                                           ),
-                                          child: Row(
-                                            crossAxisAlignment: CrossAxisAlignment.start,
+                                          const SizedBox(height: 16),
+                                          _buildTicketField(
+                                            'END',
+                                            '${DateFormat('MMM dd, yyyy').format(endDate!)} · ${DateFormat('hh:mm a').format(endDate)}',
+                                          ),
+                                        ] else ...[
+                                          Row(
                                             children: [
-                                              Container(
-                                                width: 22,
-                                                height: 22,
-                                                alignment: Alignment.center,
-                                                decoration: BoxDecoration(
-                                                  color: const Color(0xFFD4A843).withValues(alpha: 0.18),
-                                                  borderRadius: BorderRadius.circular(6),
-                                                  border: Border.all(
-                                                    color: const Color(0xFFD4A843).withValues(alpha: 0.55),
-                                                  ),
-                                                ),
-                                                child: Text(
-                                                  '${entry.key + 1}',
-                                                  style: const TextStyle(
-                                                    color: Color(0xFFD4A843),
-                                                    fontSize: 11,
-                                                    fontWeight: FontWeight.w800,
-                                                  ),
+                                              Expanded(
+                                                child: _buildTicketField(
+                                                  'DATE',
+                                                  startDate != null
+                                                      ? DateFormat(
+                                                          'MMM dd, yyyy',
+                                                        ).format(startDate)
+                                                      : 'TBA',
                                                 ),
                                               ),
-                                              const SizedBox(width: 10),
                                               Expanded(
-                                                child: Column(
-                                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                                  children: [
-                                                    Text(
-                                                      seminarTitle,
-                                                      style: const TextStyle(
-                                                        color: Colors.white,
-                                                        fontSize: 14,
-                                                        fontWeight: FontWeight.w800,
-                                                        height: 1.25,
-                                                      ),
-                                                    ),
-                                                    if (showTopic) ...[
-                                                      const SizedBox(height: 2),
-                                                      Text(
-                                                        topic,
-                                                        style: TextStyle(
-                                                          color: Colors.white.withValues(alpha: 0.72),
-                                                          fontSize: 12,
-                                                          fontWeight: FontWeight.w600,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                    const SizedBox(height: 3),
-                                                    Text(
-                                                      _formatSeminarWindow(
-                                                        row['start_at']?.toString(),
-                                                        row['end_at']?.toString(),
-                                                      ),
-                                                      style: TextStyle(
-                                                        color: const Color(0xFFD4A843).withValues(alpha: 0.9),
-                                                        fontSize: 12,
-                                                        fontWeight: FontWeight.w700,
-                                                      ),
-                                                    ),
-                                                    if (showRoom) ...[
-                                                      const SizedBox(height: 2),
-                                                      Text(
-                                                        room,
-                                                        style: TextStyle(
-                                                          color: Colors.white.withValues(alpha: 0.7),
-                                                          fontSize: 11,
-                                                          fontWeight: FontWeight.w600,
-                                                        ),
-                                                      ),
-                                                    ],
-                                                  ],
+                                                child: _buildTicketField(
+                                                  'TIME',
+                                                  timeString,
                                                 ),
                                               ),
                                             ],
                                           ),
-                                        );
-                                      }),
-                                    ],
-                                  ],
-                                ),
-                              ),
+                                        ],
+                                        const SizedBox(height: 24),
+                                        _buildTicketField('VENUE', location),
+                                        if (isSeminarBased &&
+                                            seminarRows.isNotEmpty) ...[
+                                          const SizedBox(height: 24),
+                                          Text(
+                                            'SEMINARS',
+                                            style: TextStyle(
+                                              color: Colors.white.withValues(
+                                                alpha: 0.5,
+                                              ),
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.w600,
+                                              letterSpacing: 1.5,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 10),
+                                          ...seminarRows.asMap().entries.map((
+                                            entry,
+                                          ) {
+                                            final row = entry.value;
+                                            final seminarTitle =
+                                                (row['title']?.toString() ?? '')
+                                                    .trim()
+                                                    .isNotEmpty
+                                                ? row['title'].toString().trim()
+                                                : 'Seminar ${entry.key + 1}';
+                                            final topic =
+                                                (row['topic']?.toString() ?? '')
+                                                    .trim();
+                                            final showTopic =
+                                                topic.isNotEmpty &&
+                                                topic.toLowerCase() !=
+                                                    seminarTitle.toLowerCase();
+                                            final room =
+                                                (row['location']?.toString() ??
+                                                        '')
+                                                    .trim();
+                                            final showRoom =
+                                                room.isNotEmpty &&
+                                                room.toLowerCase() !=
+                                                    location
+                                                        .trim()
+                                                        .toLowerCase();
+                                            return Padding(
+                                              padding: EdgeInsets.only(
+                                                bottom:
+                                                    entry.key ==
+                                                        seminarRows.length - 1
+                                                    ? 0
+                                                    : 12,
+                                              ),
+                                              child: Row(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Container(
+                                                    width: 22,
+                                                    height: 22,
+                                                    alignment: Alignment.center,
+                                                    decoration: BoxDecoration(
+                                                      color: const Color(
+                                                        0xFFD4A843,
+                                                      ).withValues(alpha: 0.18),
+                                                      borderRadius:
+                                                          BorderRadius.circular(
+                                                            6,
+                                                          ),
+                                                      border: Border.all(
+                                                        color:
+                                                            const Color(
+                                                              0xFFD4A843,
+                                                            ).withValues(
+                                                              alpha: 0.55,
+                                                            ),
+                                                      ),
+                                                    ),
+                                                    child: Text(
+                                                      '${entry.key + 1}',
+                                                      style: const TextStyle(
+                                                        color: Color(
+                                                          0xFFD4A843,
+                                                        ),
+                                                        fontSize: 11,
+                                                        fontWeight:
+                                                            FontWeight.w800,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 10),
+                                                  Expanded(
+                                                    child: Column(
+                                                      crossAxisAlignment:
+                                                          CrossAxisAlignment
+                                                              .start,
+                                                      children: [
+                                                        Text(
+                                                          seminarTitle,
+                                                          style:
+                                                              const TextStyle(
+                                                                color: Colors
+                                                                    .white,
+                                                                fontSize: 14,
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w800,
+                                                                height: 1.25,
+                                                              ),
+                                                        ),
+                                                        if (showTopic) ...[
+                                                          const SizedBox(
+                                                            height: 2,
+                                                          ),
+                                                          Text(
+                                                            topic,
+                                                            style: TextStyle(
+                                                              color: Colors
+                                                                  .white
+                                                                  .withValues(
+                                                                    alpha: 0.72,
+                                                                  ),
+                                                              fontSize: 12,
+                                                              fontWeight:
+                                                                  FontWeight
+                                                                      .w600,
+                                                            ),
+                                                          ),
+                                                        ],
+                                                        const SizedBox(
+                                                          height: 3,
+                                                        ),
+                                                        Text(
+                                                          _formatSeminarWindow(
+                                                            row['start_at']
+                                                                ?.toString(),
+                                                            row['end_at']
+                                                                ?.toString(),
+                                                          ),
+                                                          style: TextStyle(
+                                                            color:
+                                                                const Color(
+                                                                  0xFFD4A843,
+                                                                ).withValues(
+                                                                  alpha: 0.9,
+                                                                ),
+                                                            fontSize: 12,
+                                                            fontWeight:
+                                                                FontWeight.w700,
+                                                          ),
+                                                        ),
+                                                        if (showRoom) ...[
+                                                          const SizedBox(
+                                                            height: 2,
+                                                          ),
+                                                          Text(
+                                                            room,
+                                                            style: TextStyle(
+                                                              color: Colors
+                                                                  .white
+                                                                  .withValues(
+                                                                    alpha: 0.7,
+                                                                  ),
+                                                              fontSize: 11,
+                                                              fontWeight:
+                                                                  FontWeight
+                                                                      .w600,
+                                                            ),
+                                                          ),
+                                                        ],
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            );
+                                          }),
+                                        ],
+                                      ],
+                                    ),
+                                  ),
 
-                              // Perforation Line
-                              Row(
-                                children: [
-                                  Container(
-                                    width: 14, height: 28,
-                                    decoration: const BoxDecoration(
-                                      color: Color(0xFFF8F9FA), 
-                                      borderRadius: BorderRadius.horizontal(right: Radius.circular(14)),
-                                    ),
-                                  ),
-                                  Expanded(
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                                      child: LayoutBuilder(
-                                        builder: (context, constraints) {
-                                          return Flex(
-                                            direction: Axis.horizontal,
-                                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                            children: List.generate((constraints.constrainWidth() / 12).floor(), (index) {
-                                              return Container(width: 6, height: 2, color: Colors.white.withValues(alpha: 0.2));
-                                            }),
-                                          );
-                                        },
+                                  // Perforation Line
+                                  Row(
+                                    children: [
+                                      Container(
+                                        width: 14,
+                                        height: 28,
+                                        decoration: const BoxDecoration(
+                                          color: Color(0xFFF8F9FA),
+                                          borderRadius: BorderRadius.horizontal(
+                                            right: Radius.circular(14),
+                                          ),
+                                        ),
                                       ),
-                                    ),
+                                      Expanded(
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 4,
+                                          ),
+                                          child: LayoutBuilder(
+                                            builder: (context, constraints) {
+                                              return Flex(
+                                                direction: Axis.horizontal,
+                                                mainAxisAlignment:
+                                                    MainAxisAlignment
+                                                        .spaceBetween,
+                                                children: List.generate(
+                                                  (constraints.constrainWidth() /
+                                                          12)
+                                                      .floor(),
+                                                  (index) {
+                                                    return Container(
+                                                      width: 6,
+                                                      height: 2,
+                                                      color: Colors.white
+                                                          .withValues(
+                                                            alpha: 0.2,
+                                                          ),
+                                                    );
+                                                  },
+                                                ),
+                                              );
+                                            },
+                                          ),
+                                        ),
+                                      ),
+                                      Container(
+                                        width: 14,
+                                        height: 28,
+                                        decoration: const BoxDecoration(
+                                          color: Color(0xFFF8F9FA),
+                                          borderRadius: BorderRadius.horizontal(
+                                            left: Radius.circular(14),
+                                          ),
+                                        ),
+                                      ),
+                                    ],
                                   ),
+
+                                  // Bottom Part (Stub + QR)
                                   Container(
-                                    width: 14, height: 28,
-                                    decoration: const BoxDecoration(
-                                      color: Color(0xFFF8F9FA), 
-                                      borderRadius: BorderRadius.horizontal(left: Radius.circular(14)),
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.fromLTRB(
+                                      28,
+                                      14,
+                                      28,
+                                      28,
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        // QR Code
+                                        Container(
+                                          padding: const EdgeInsets.all(12),
+                                          decoration: BoxDecoration(
+                                            color: Colors.white,
+                                            borderRadius: BorderRadius.circular(
+                                              16,
+                                            ),
+                                            boxShadow: [
+                                              BoxShadow(
+                                                color: Colors.black.withValues(
+                                                  alpha: 0.1,
+                                                ),
+                                                blurRadius: 10,
+                                                offset: const Offset(0, 5),
+                                              ),
+                                            ],
+                                          ),
+                                          child: QrImageView(
+                                            data: 'PULSE-$ticketId',
+                                            version: QrVersions.auto,
+                                            size: 140,
+                                            eyeStyle: QrEyeStyle(
+                                              eyeShape: QrEyeShape.square,
+                                              color: chromeColor,
+                                            ),
+                                            dataModuleStyle: QrDataModuleStyle(
+                                              dataModuleShape:
+                                                  QrDataModuleShape.square,
+                                              color: chromeColor,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 24),
+                                        // Ticket ID Placeholder
+                                        Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.center,
+                                          children: [
+                                            Text(
+                                              'TICKET ID',
+                                              style: TextStyle(
+                                                color: Colors.white.withValues(
+                                                  alpha: 0.5,
+                                                ),
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.w800,
+                                                letterSpacing: 2.0,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              ticketIdDisplay,
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                                fontFamily: 'monospace',
+                                                fontSize: 18,
+                                                fontWeight: FontWeight.w900,
+                                                letterSpacing: 2,
+                                              ),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ],
+                                        ),
+                                      ],
                                     ),
                                   ),
                                 ],
                               ),
-
-                              // Bottom Part (Stub + QR)
-                              Container(
-                                width: double.infinity,
-                                padding: const EdgeInsets.fromLTRB(28, 14, 28, 28),
-                                child: Column(
-                                  children: [
-                                    // QR Code
-                                    Container(
-                                      padding: const EdgeInsets.all(12),
-                                      decoration: BoxDecoration(
-                                        color: Colors.white, 
-                                        borderRadius: BorderRadius.circular(16),
-                                        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 10, offset: const Offset(0, 5))],
-                                      ),
-                                      child: QrImageView(
-                                        data: 'PULSE-$ticketId',
-                                        version: QrVersions.auto,
-                                        size: 140,
-                                        eyeStyle: QrEyeStyle(
-                                          eyeShape: QrEyeShape.square,
-                                          color: chromeColor,
-                                        ),
-                                        dataModuleStyle: QrDataModuleStyle(
-                                          dataModuleShape: QrDataModuleShape.square,
-                                          color: chromeColor,
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(height: 24),
-                                    // Ticket ID Placeholder
-                                    Column(
-                                      crossAxisAlignment: CrossAxisAlignment.center,
-                                      children: [
-                                        Text(
-                                          'TICKET ID',
-                                          style: TextStyle(
-                                            color: Colors.white.withValues(alpha: 0.5),
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.w800,
-                                            letterSpacing: 2.0,
-                                          ),
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          ticketIdDisplay,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontFamily: 'monospace',
-                                            fontSize: 18,
-                                            fontWeight: FontWeight.w900,
-                                            letterSpacing: 2,
-                                          ),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ],
-                                    ),
-                                  ],
-                                ),
-                              ),
                             ],
                           ),
-                        ],
-                      ),
-                    ),
-                        
+                        ),
+
                         // ── Attendance History Section ──
                         const SizedBox(height: 20),
                         Container(
@@ -750,7 +956,11 @@ class _StudentTicketViewState extends State<StudentTicketView>
                             borderRadius: BorderRadius.circular(16),
                             border: Border.all(color: Colors.grey.shade200),
                             boxShadow: [
-                              BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 10, offset: const Offset(0, 4)),
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.04),
+                                blurRadius: 10,
+                                offset: const Offset(0, 4),
+                              ),
                             ],
                           ),
                           child: Column(
@@ -758,7 +968,11 @@ class _StudentTicketViewState extends State<StudentTicketView>
                             children: [
                               const Text(
                                 'Attendance Status',
-                                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: Color(0xFF1F2937)),
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w800,
+                                  color: Color(0xFF1F2937),
+                                ),
                               ),
                               const SizedBox(height: 16),
 
@@ -766,19 +980,36 @@ class _StudentTicketViewState extends State<StudentTicketView>
                               Row(
                                 children: [
                                   Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 6,
+                                    ),
                                     decoration: BoxDecoration(
-                                      color: _getAttendanceColor(displayStatus).withValues(alpha: 0.12),
+                                      color: _getAttendanceColor(
+                                        displayStatus,
+                                      ).withValues(alpha: 0.12),
                                       borderRadius: BorderRadius.circular(20),
                                     ),
                                     child: Row(
                                       mainAxisSize: MainAxisSize.min,
                                       children: [
-                                        Icon(_getAttendanceIcon(displayStatus), size: 16, color: _getAttendanceColor(displayStatus)),
+                                        Icon(
+                                          _getAttendanceIcon(displayStatus),
+                                          size: 16,
+                                          color: _getAttendanceColor(
+                                            displayStatus,
+                                          ),
+                                        ),
                                         const SizedBox(width: 6),
                                         Text(
                                           _getAttendanceLabel(displayStatus),
-                                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: _getAttendanceColor(displayStatus)),
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w700,
+                                            color: _getAttendanceColor(
+                                              displayStatus,
+                                            ),
+                                          ),
                                         ),
                                       ],
                                     ),
@@ -802,19 +1033,32 @@ class _StudentTicketViewState extends State<StudentTicketView>
                                   (checkOutAt ?? '').trim().isNotEmpty,
                                 ),
                                 const SizedBox(height: 10),
-                                _buildAttendanceRow('Flow', 'Simple event', true),
+                                _buildAttendanceRow(
+                                  'Flow',
+                                  'Simple event',
+                                  true,
+                                ),
                               ],
 
                               // Event Type & Grace Time
-                              if (eventType.isNotEmpty || graceTime.isNotEmpty) ...[
+                              if (eventType.isNotEmpty ||
+                                  graceTime.isNotEmpty) ...[
                                 const SizedBox(height: 16),
                                 const Divider(height: 1),
                                 const SizedBox(height: 12),
                                 if (eventType.isNotEmpty)
-                                  _buildAttendanceRow('Event Type', eventType, true),
+                                  _buildAttendanceRow(
+                                    'Event Type',
+                                    eventType,
+                                    true,
+                                  ),
                                 if (graceTime.isNotEmpty) ...[
                                   const SizedBox(height: 8),
-                                  _buildAttendanceRow('Grace Time', '$graceTime min', true),
+                                  _buildAttendanceRow(
+                                    'Grace Time',
+                                    '$graceTime min',
+                                    true,
+                                  ),
                                 ],
                               ],
                             ],
@@ -832,7 +1076,9 @@ class _StudentTicketViewState extends State<StudentTicketView>
     );
   }
 
-  List<Map<String, dynamic>> _seminarRowsForDisplay(Map<String, dynamic> event) {
+  List<Map<String, dynamic>> _seminarRowsForDisplay(
+    Map<String, dynamic> event,
+  ) {
     if (_seminarAttendance.isNotEmpty) return _seminarAttendance;
     final embedded = event['sessions'];
     if (embedded is List && embedded.isNotEmpty) {
@@ -861,7 +1107,8 @@ class _StudentTicketViewState extends State<StudentTicketView>
     final date = DateFormat('MMM dd, yyyy').format(start);
     final startTime = DateFormat('hh:mm a').format(start);
     if (end == null) return '$date · $startTime';
-    final sameDay = start.year == end.year &&
+    final sameDay =
+        start.year == end.year &&
         start.month == end.month &&
         start.day == end.day;
     final endTime = DateFormat('hh:mm a').format(end);
@@ -897,12 +1144,16 @@ class _StudentTicketViewState extends State<StudentTicketView>
 
   bool _isSeminarBasedEvent(Map<String, dynamic> event) {
     final mode = (event['event_mode']?.toString() ?? '').trim().toLowerCase();
-    final structure = (event['event_structure']?.toString() ?? '').trim().toLowerCase();
+    final structure = (event['event_structure']?.toString() ?? '')
+        .trim()
+        .toLowerCase();
     final usesSessionsRaw = event['uses_sessions'];
-    final usesSessions = usesSessionsRaw == true ||
+    final usesSessions =
+        usesSessionsRaw == true ||
         (usesSessionsRaw is num && usesSessionsRaw > 0) ||
         (usesSessionsRaw is String && usesSessionsRaw.toLowerCase() == 'true');
-    final sessionCount = int.tryParse(event['session_count']?.toString() ?? '') ?? 0;
+    final sessionCount =
+        int.tryParse(event['session_count']?.toString() ?? '') ?? 0;
     return mode == 'seminar_based' ||
         structure == 'seminar_based' ||
         structure == 'one_seminar' ||
@@ -969,7 +1220,11 @@ class _StudentTicketViewState extends State<StudentTicketView>
       );
     }
     if (_seminarAttendance.isEmpty) {
-      return _buildAttendanceRow('Seminars', 'No seminar schedule found', false);
+      return _buildAttendanceRow(
+        'Seminars',
+        'No seminar schedule found',
+        false,
+      );
     }
 
     return Column(
@@ -977,7 +1232,9 @@ class _StudentTicketViewState extends State<StudentTicketView>
       children: [
         _buildAttendanceRow(
           'Seminars',
-          _seminarAttendance.length == 1 ? '1 Seminar' : '${_seminarAttendance.length} Seminars',
+          _seminarAttendance.length == 1
+              ? '1 Seminar'
+              : '${_seminarAttendance.length} Seminars',
           true,
         ),
         const SizedBox(height: 10),
@@ -1027,13 +1284,20 @@ class _StudentTicketViewState extends State<StudentTicketView>
       case 'timed_out':
       case 'checked_out':
         return const Color(0xFF047857);
-      case 'present': return const Color(0xFF059669);
-      case 'late': return const Color(0xFFD97706);
-      case 'early': return const Color(0xFF2563EB);
-      case 'scanned': return const Color(0xFF059669);
-      case 'absent': return const Color(0xFFDC2626);
-      case 'unscanned': return const Color(0xFF6B7280);
-      default: return const Color(0xFF6B7280);
+      case 'present':
+        return const Color(0xFF059669);
+      case 'late':
+        return const Color(0xFFD97706);
+      case 'early':
+        return const Color(0xFF2563EB);
+      case 'scanned':
+        return const Color(0xFF059669);
+      case 'absent':
+        return const Color(0xFFDC2626);
+      case 'unscanned':
+        return const Color(0xFF6B7280);
+      default:
+        return const Color(0xFF6B7280);
     }
   }
 
@@ -1042,13 +1306,20 @@ class _StudentTicketViewState extends State<StudentTicketView>
       case 'timed_out':
       case 'checked_out':
         return Icons.logout_rounded;
-      case 'present': return Icons.check_circle_rounded;
-      case 'late': return Icons.watch_later_rounded;
-      case 'early': return Icons.bolt_rounded;
-      case 'scanned': return Icons.check_circle_rounded;
-      case 'absent': return Icons.cancel_rounded;
-      case 'unscanned': return Icons.radio_button_unchecked_rounded;
-      default: return Icons.help_outline_rounded;
+      case 'present':
+        return Icons.check_circle_rounded;
+      case 'late':
+        return Icons.watch_later_rounded;
+      case 'early':
+        return Icons.bolt_rounded;
+      case 'scanned':
+        return Icons.check_circle_rounded;
+      case 'absent':
+        return Icons.cancel_rounded;
+      case 'unscanned':
+        return Icons.radio_button_unchecked_rounded;
+      default:
+        return Icons.help_outline_rounded;
     }
   }
 
@@ -1057,13 +1328,20 @@ class _StudentTicketViewState extends State<StudentTicketView>
       case 'timed_out':
       case 'checked_out':
         return 'Timed Out';
-      case 'present': return 'Checked In';
-      case 'late': return 'Checked In (Late)';
-      case 'early': return 'Checked In (Early)';
-      case 'scanned': return 'Checked In';
-      case 'absent': return 'Absent';
-      case 'unscanned': return 'Not Yet Scanned';
-      default: return status.toUpperCase();
+      case 'present':
+        return 'Checked In';
+      case 'late':
+        return 'Checked In (Late)';
+      case 'early':
+        return 'Checked In (Early)';
+      case 'scanned':
+        return 'Checked In';
+      case 'absent':
+        return 'Absent';
+      case 'unscanned':
+        return 'Not Yet Scanned';
+      default:
+        return status.toUpperCase();
     }
   }
 

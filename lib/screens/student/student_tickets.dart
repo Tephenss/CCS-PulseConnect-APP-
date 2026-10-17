@@ -14,7 +14,14 @@ import '../../utils/event_time_utils.dart';
 import '../../utils/course_theme_utils.dart';
 
 class StudentTickets extends StatefulWidget {
-  const StudentTickets({super.key});
+  final Map<String, dynamic>? tutorialTicket;
+  final GlobalKey? tutorialTargetKey;
+
+  const StudentTickets({
+    super.key,
+    this.tutorialTicket,
+    this.tutorialTargetKey,
+  });
 
   @override
   State<StudentTickets> createState() => _StudentTicketsState();
@@ -46,12 +53,34 @@ class _StudentTicketsState extends State<StudentTickets>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _eventLiveSubscription = EventLiveService.instance.changes.listen((reason) {
-      if (!mounted) return;
+      if (!mounted || widget.tutorialTicket != null) return;
       if (!_isTicketsLiveReason(reason)) return;
       final offlinePulse = reason.startsWith('offline:');
       unawaited(_loadTickets(forceFresh: !offlinePulse));
     });
+    if (widget.tutorialTicket != null) {
+      _tickets = [widget.tutorialTicket!];
+      _isLoading = false;
+      return;
+    }
     unawaited(_bootstrapTickets());
+  }
+
+  @override
+  void didUpdateWidget(covariant StudentTickets oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final wasPreview = oldWidget.tutorialTicket != null;
+    final isPreview = widget.tutorialTicket != null;
+    if (wasPreview == isPreview) return;
+
+    if (isPreview) {
+      _tickets = [widget.tutorialTicket!];
+      _isLoading = false;
+    } else {
+      _tickets = [];
+      _isLoading = true;
+      unawaited(_bootstrapTickets());
+    }
   }
 
   Future<void> _bootstrapTickets() async {
@@ -88,12 +117,14 @@ class _StudentTicketsState extends State<StudentTickets>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (widget.tutorialTicket != null) return;
     if (state == AppLifecycleState.resumed) {
       unawaited(_loadTickets(forceFresh: true));
     }
   }
 
   Future<void> _loadTickets({bool forceFresh = false}) async {
+    if (widget.tutorialTicket != null) return;
     final hadCachedTickets = _tickets.isNotEmpty;
     if (mounted && !hadCachedTickets) {
       setState(() => _isLoading = true);
@@ -123,7 +154,9 @@ class _StudentTicketsState extends State<StudentTickets>
       allTickets = await _eventService.getMyTicketsCached(userId);
     }
 
-    debugPrint('[tickets] fetched ${allTickets.length} rows, forceFresh=$effectiveForceFresh');
+    debugPrint(
+      '[tickets] fetched ${allTickets.length} rows, forceFresh=$effectiveForceFresh',
+    );
 
     final activeTickets = _activeTicketsFrom(
       allTickets,
@@ -159,7 +192,9 @@ class _StudentTicketsState extends State<StudentTickets>
           final active = _isTicketActive(t);
           final hasId = _hasTicketId(t);
           if (!active || !hasId) {
-            debugPrint('[tickets] filtered out: active=$active hasId=$hasId event=${t['events']?['title'] ?? t['event_id']}');
+            debugPrint(
+              '[tickets] filtered out: active=$active hasId=$hasId event=${t['events']?['title'] ?? t['event_id']}',
+            );
           }
           return active && hasId;
         })
@@ -180,7 +215,8 @@ class _StudentTicketsState extends State<StudentTickets>
     if (usesEventSessions(event)) {
       final embedded = event['sessions'];
       final embeddedCount = embedded is List ? embedded.length : 0;
-      final count = int.tryParse(event['session_count']?.toString() ?? '') ??
+      final count =
+          int.tryParse(event['session_count']?.toString() ?? '') ??
           embeddedCount;
       if (count == 1) return 'SEMINAR';
       if (count > 1) return '$count SEMINARS';
@@ -480,9 +516,7 @@ class _StudentTicketsState extends State<StudentTickets>
                                     vertical: 3,
                                   ),
                                   decoration: BoxDecoration(
-                                    color: Colors.white.withValues(
-                                      alpha: 0.18,
-                                    ),
+                                    color: Colors.white.withValues(alpha: 0.18),
                                     borderRadius: BorderRadius.circular(999),
                                     border: Border.all(
                                       color: Colors.white.withValues(
@@ -629,9 +663,7 @@ class _StudentTicketsState extends State<StudentTickets>
                                 borderRadius: BorderRadius.circular(12),
                                 boxShadow: [
                                   BoxShadow(
-                                    color: Colors.black.withValues(
-                                      alpha: 0.1,
-                                    ),
+                                    color: Colors.black.withValues(alpha: 0.1),
                                     blurRadius: 8,
                                     offset: const Offset(0, 4),
                                   ),
@@ -691,14 +723,17 @@ class _StudentTicketsState extends State<StudentTickets>
     );
 
     // ── Wrap in the 3-D rocking + shimmer animation ────────────────────
-    return Padding(
+    final ticketCard = Padding(
       padding: const EdgeInsets.only(bottom: 20),
       child: GestureDetector(
         onTap: () async {
           await Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (_) => StudentTicketView(ticket: ticket),
+              builder: (_) => StudentTicketView(
+                ticket: ticket,
+                tutorialDemo: widget.tutorialTicket != null,
+              ),
             ),
           );
           _loadTickets(forceFresh: true);
@@ -710,6 +745,11 @@ class _StudentTicketsState extends State<StudentTickets>
         ),
       ),
     );
+
+    if (widget.tutorialTicket != null && widget.tutorialTargetKey != null) {
+      return KeyedSubtree(key: widget.tutorialTargetKey, child: ticketCard);
+    }
+    return ticketCard;
   }
 
   Widget _buildDashedDivider() {

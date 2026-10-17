@@ -9,6 +9,7 @@ import '../../services/event_service.dart';
 import 'student_events.dart';
 import 'student_tickets.dart';
 import 'student_event_details.dart';
+import 'student_ticket_view.dart';
 import 'student_profile.dart';
 import 'student_scan.dart';
 import '../welcome_screen.dart';
@@ -29,6 +30,7 @@ import '../../widgets/safe_circle_avatar.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/course_theme_utils.dart';
 import '../../widgets/staggered_entrance.dart';
+import '../../widgets/navigation_tutorial.dart';
 
 class StudentHome extends StatefulWidget {
   const StudentHome({super.key});
@@ -49,6 +51,23 @@ class _StudentHomeState extends State<StudentHome>
   List<Map<String, dynamic>> _upcomingEvents = [];
   List<Map<String, dynamic>> _calendarEvents = [];
   int _currentIndex = 0;
+  final GlobalKey _homeNavTutorialKey = GlobalKey();
+  final GlobalKey _eventsNavTutorialKey = GlobalKey();
+  final GlobalKey _scanNavTutorialKey = GlobalKey();
+  final GlobalKey _ticketsNavTutorialKey = GlobalKey();
+  final GlobalKey _ticketPreviewTutorialKey = GlobalKey();
+  final GlobalKey _profileNavTutorialKey = GlobalKey();
+  final GlobalKey _homeProfileTutorialKey = GlobalKey();
+  final GlobalKey _homeNotificationsTutorialKey = GlobalKey();
+  final GlobalKey _homeSeeAllEventsTutorialKey = GlobalKey();
+  final GlobalKey _eventPreviewTutorialKey = GlobalKey();
+  bool _navigationTutorialRequested = false;
+  bool _showTutorialEventPreview = false;
+  bool _showTutorialTicketPreview = false;
+  final Map<String, dynamic> _tutorialSampleEvent =
+      StudentEventDetails.tutorialSampleEvent();
+  final Map<String, dynamic> _tutorialPreviewTicket =
+      StudentTicketView.tutorialSampleTicket();
   StudentScanMode? _activeScanMode;
   bool _scanVisited = false;
   DateTime? _lastScanModeSwitchAt;
@@ -58,7 +77,11 @@ class _StudentHomeState extends State<StudentHome>
   bool _isLoading = true;
   int _unreadCount = 0;
   bool _isOpeningNotifications = false;
-  DateTime _calendarMonth = DateTime(DateTime.now().year, DateTime.now().month, 1);
+  DateTime _calendarMonth = DateTime(
+    DateTime.now().year,
+    DateTime.now().month,
+    1,
+  );
   final _notifService = NotificationService();
   final PageController _headerPageController = PageController();
   int _currentHeaderSlide = 0;
@@ -68,6 +91,7 @@ class _StudentHomeState extends State<StudentHome>
   RealtimeChannel? _scannerAccessChannel;
   Timer? _scannerAccessGuardTimer;
   Timer? _deferredTabsTimer;
+
   /// Delay Events/Tickets mount so home critical path is not a request storm.
   bool _eventsTabMounted = false;
   bool _ticketsTabMounted = false;
@@ -80,7 +104,8 @@ class _StudentHomeState extends State<StudentHome>
   String? _sectionError;
 
   // Attendance Absence Reason Gate
-  final TextEditingController _absenceReasonController = TextEditingController();
+  final TextEditingController _absenceReasonController =
+      TextEditingController();
   List<Map<String, dynamic>> _pendingAbsenceScopes = [];
   String? _selectedAbsenceScopeKey;
   bool _isSubmittingAbsenceReason = false;
@@ -135,6 +160,130 @@ class _StudentHomeState extends State<StudentHome>
       curve: Curves.elasticOut,
       reverseCurve: Curves.easeInBack,
     );
+  }
+
+  void _maybeShowNavigationTutorial() {
+    if (_navigationTutorialRequested || _user == null) return;
+
+    _navigationTutorialRequested = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        NavigationTutorial.showOnce(
+          context: context,
+          role: 'student',
+          accentColor: _studentPrimary(context),
+          steps: [
+            NavigationTutorialStep(
+              targetKey: _homeNavTutorialKey,
+              title: 'Home',
+              description: 'See your events, calendar, and latest updates.',
+              icon: Icons.home_rounded,
+            ),
+            NavigationTutorialStep(
+              targetKey: _homeProfileTutorialKey,
+              title: 'Profile shortcut',
+              description: 'Tap your photo to open your profile.',
+              icon: Icons.person_rounded,
+            ),
+            NavigationTutorialStep(
+              targetKey: _homeNotificationsTutorialKey,
+              title: 'Notifications',
+              description: 'Tap the bell to see your latest updates.',
+              icon: Icons.notifications_none_rounded,
+            ),
+            NavigationTutorialStep(
+              targetKey: _homeSeeAllEventsTutorialKey,
+              title: 'Upcoming events',
+              description: 'Tap See All to browse available events.',
+              icon: Icons.event_note_rounded,
+              onEnter: () => _selectTutorialTab(0),
+            ),
+            NavigationTutorialStep(
+              targetKey: _eventPreviewTutorialKey,
+              title: 'Events',
+              description: 'Tap the sample event, then Register to continue.',
+              icon: Icons.event_note_rounded,
+              onEnter: () async {
+                if (mounted) {
+                  setState(() => _showTutorialEventPreview = true);
+                }
+                await _selectTutorialTab(1);
+              },
+              onExit: () async {
+                if (mounted) {
+                  setState(() => _showTutorialEventPreview = false);
+                }
+              },
+              onBeforeAdvance: _openTutorialSampleEvent,
+              onTargetTap: _openTutorialSampleEvent,
+            ),
+            NavigationTutorialStep(
+              targetKey: _ticketPreviewTutorialKey,
+              title: 'Your ticket',
+              description: 'Tap the ticket to view its details and QR code.',
+              icon: Icons.confirmation_num_rounded,
+              onEnter: () async {
+                if (!mounted) return;
+                setState(() => _showTutorialTicketPreview = true);
+                await _selectTutorialTab(3);
+              },
+              onExit: () async {
+                if (mounted) {
+                  setState(() => _showTutorialTicketPreview = false);
+                }
+              },
+              onTargetTap: () async {
+                await Navigator.of(context).push<void>(
+                  AppPageRoute<void>(
+                    builder: (_) => StudentTicketView(
+                      ticket: _tutorialPreviewTicket,
+                      tutorialDemo: true,
+                    ),
+                  ),
+                );
+                return null;
+              },
+            ),
+            NavigationTutorialStep(
+              targetKey: _profileNavTutorialKey,
+              title: 'Profile',
+              description: 'View your account and update your profile.',
+              icon: Icons.person_rounded,
+              onEnter: () => _selectTutorialTab(4),
+            ),
+            NavigationTutorialStep(
+              targetKey: _scanNavTutorialKey,
+              title: 'QR Scanner',
+              description: 'Scan an event QR code here.',
+              icon: Icons.qr_code_scanner_rounded,
+              onEnter: () => _selectTutorialTab(0),
+            ),
+          ],
+        ),
+      );
+    });
+  }
+
+  Future<bool?> _openTutorialSampleEvent() async {
+    final registered = await Navigator.of(context).push<bool>(
+      AppPageRoute<bool>(
+        builder: (_) => StudentEventDetails(
+          eventId: 'tutorial-sample-event',
+          initialEvent: _tutorialSampleEvent,
+          tutorialDemo: true,
+        ),
+      ),
+    );
+    return registered == true;
+  }
+
+  Future<void> _selectTutorialTab(int index) async {
+    if (!mounted) return;
+    _closeScanMenu(animated: false);
+    _ensureTabMounted(index);
+    if (_currentIndex != index) setState(() => _currentIndex = index);
+    await WidgetsBinding.instance.endOfFrame;
   }
 
   void _toggleScanMenu() {
@@ -250,8 +399,9 @@ class _StudentHomeState extends State<StudentHome>
       final scopedCourse = (scope['courseCode']?.toString() ?? '').trim();
       final scopedSpec = (scope['specialization']?.toString() ?? '').trim();
       yearLevel = scopedYear.isEmpty || scopedYear == 'ALL' ? null : scopedYear;
-      courseCode =
-          scopedCourse.isEmpty || scopedCourse == 'ALL' ? null : scopedCourse;
+      courseCode = scopedCourse.isEmpty || scopedCourse == 'ALL'
+          ? null
+          : scopedCourse;
       specialization = scopedSpec.isEmpty ? null : scopedSpec;
     } catch (_) {
       // Keep compatibility fallback below.
@@ -316,9 +466,14 @@ class _StudentHomeState extends State<StudentHome>
     if (refreshed.isEmpty) {
       selected = null;
     } else {
-      final stillExists = selected != null &&
-          refreshed.any((scope) => (scope['scope_key']?.toString() ?? '') == selected);
-      selected = stillExists ? selected : (refreshed.first['scope_key']?.toString());
+      final stillExists =
+          selected != null &&
+          refreshed.any(
+            (scope) => (scope['scope_key']?.toString() ?? '') == selected,
+          );
+      selected = stillExists
+          ? selected
+          : (refreshed.first['scope_key']?.toString());
     }
 
     setState(() {
@@ -402,8 +557,9 @@ class _StudentHomeState extends State<StudentHome>
     final actorId = studentId.trim();
     if (actorId.isEmpty) return;
 
-    _scannerAccessChannel =
-        _supabase.channel('public:student_home_scan_access:$actorId');
+    _scannerAccessChannel = _supabase.channel(
+      'public:student_home_scan_access:$actorId',
+    );
     _scannerAccessChannel!.onPostgresChanges(
       event: PostgresChangeEvent.all,
       schema: 'public',
@@ -419,14 +575,11 @@ class _StudentHomeState extends State<StudentHome>
     );
     _scannerAccessChannel!.subscribe();
 
-    _scannerAccessGuardTimer = Timer.periodic(
-      const Duration(seconds: 75),
-      (_) {
-        // Only refresh roster while Scan tab is visible.
-        if (!mounted || _currentIndex != 2) return;
-        unawaited(_refreshScannerAccessGuard(actorId));
-      },
-    );
+    _scannerAccessGuardTimer = Timer.periodic(const Duration(seconds: 75), (_) {
+      // Only refresh roster while Scan tab is visible.
+      if (!mounted || _currentIndex != 2) return;
+      unawaited(_refreshScannerAccessGuard(actorId));
+    });
   }
 
   Future<void> _loadShowcaseSlides({bool forceFresh = false}) async {
@@ -434,13 +587,21 @@ class _StudentHomeState extends State<StudentHome>
       forceFresh: forceFresh,
       onUpdated: (fresh) {
         if (!mounted) return;
-        setState(() => _showcaseItems = fresh.isNotEmpty ? fresh : ShowcaseService.instance.bundledItems());
+        setState(
+          () => _showcaseItems = fresh.isNotEmpty
+              ? fresh
+              : ShowcaseService.instance.bundledItems(),
+        );
         if (fresh.isEmpty) return;
         unawaited(ShowcaseService.instance.prefetchImages(context, fresh));
       },
     );
     if (!mounted) return;
-    setState(() => _showcaseItems = items.isNotEmpty ? items : ShowcaseService.instance.bundledItems());
+    setState(
+      () => _showcaseItems = items.isNotEmpty
+          ? items
+          : ShowcaseService.instance.bundledItems(),
+    );
     if (items.isEmpty) return;
     if (!mounted) return;
     unawaited(ShowcaseService.instance.prefetchImages(context, items));
@@ -481,9 +642,12 @@ class _StudentHomeState extends State<StudentHome>
         final scopedYear = (scope['yearLevel']?.toString() ?? '').trim();
         final scopedCourse = (scope['courseCode']?.toString() ?? '').trim();
         final scopedSpec = (scope['specialization']?.toString() ?? '').trim();
-        yearLevel = scopedYear.isEmpty || scopedYear == 'ALL' ? null : scopedYear;
-        courseCode =
-            scopedCourse.isEmpty || scopedCourse == 'ALL' ? null : scopedCourse;
+        yearLevel = scopedYear.isEmpty || scopedYear == 'ALL'
+            ? null
+            : scopedYear;
+        courseCode = scopedCourse.isEmpty || scopedCourse == 'ALL'
+            ? null
+            : scopedCourse;
         specialization = scopedSpec.isEmpty ? null : scopedSpec;
       } catch (_) {
         // Keep compatibility fallback below.
@@ -496,14 +660,14 @@ class _StudentHomeState extends State<StudentHome>
     // Keep MaterialApp + splash green for BSCS even when users.course is empty
     // but section/scope already says CS.
     if (mounted) {
-      final resolvedCourse =
-          CourseThemeUtils.normalizeCourse(courseCode ?? user?['course']);
+      final resolvedCourse = CourseThemeUtils.normalizeCourse(
+        courseCode ?? user?['course'],
+      );
       if (resolvedCourse == 'CS' || resolvedCourse == 'IT') {
         try {
-          PulseConnectApp.of(context).updateTheme(
-            'student',
-            course: resolvedCourse,
-          );
+          PulseConnectApp.of(
+            context,
+          ).updateTheme('student', course: resolvedCourse);
         } catch (_) {}
         if (user != null &&
             CourseThemeUtils.normalizeCourse(user['course']).isEmpty) {
@@ -526,7 +690,10 @@ class _StudentHomeState extends State<StudentHome>
     if (mounted) {
       setState(() {
         _user = user;
-        if (!(events.isEmpty && hadCachedEvents && offline && !effectiveForceFresh)) {
+        if (!(events.isEmpty &&
+            hadCachedEvents &&
+            offline &&
+            !effectiveForceFresh)) {
           _upcomingEvents = events;
         }
         if (!(calendarEvents.isEmpty &&
@@ -542,12 +709,14 @@ class _StudentHomeState extends State<StudentHome>
 
     // Soft open painted from cache — reconcile deletes from Supabase once online.
     if (!forceFresh && !offline && mounted) {
-      unawaited(_reconcileHomeEventsAfterCache(
-        userId: userId,
-        yearLevel: yearLevel,
-        courseCode: courseCode,
-        specialization: specialization,
-      ));
+      unawaited(
+        _reconcileHomeEventsAfterCache(
+          userId: userId,
+          yearLevel: yearLevel,
+          courseCode: courseCode,
+          specialization: specialization,
+        ),
+      );
     }
 
     // Non-critical: unread / sections / absence — after first paint.
@@ -615,7 +784,8 @@ class _StudentHomeState extends State<StudentHome>
       if (pendingAbsenceScopes.isEmpty) {
         selectedAbsenceScopeKey = null;
       } else {
-        final hasExisting = selectedAbsenceScopeKey != null &&
+        final hasExisting =
+            selectedAbsenceScopeKey != null &&
             pendingAbsenceScopes.any(
               (scope) =>
                   (scope['scope_key']?.toString() ?? '') ==
@@ -749,7 +919,8 @@ class _StudentHomeState extends State<StudentHome>
   String _scopeLockMessage(Map<String, dynamic> scope) {
     final custom = (scope['lock_message']?.toString() ?? '').trim();
     if (custom.isNotEmpty) return custom;
-    final scopeType = (scope['scope_type']?.toString() ?? 'event').toLowerCase();
+    final scopeType = (scope['scope_type']?.toString() ?? 'event')
+        .toLowerCase();
     if (_isMissedTimeoutScope(scope)) {
       return scopeType == 'session'
           ? 'You timed in to this seminar but did not time out. Submit your reason to continue.'
@@ -761,12 +932,13 @@ class _StudentHomeState extends State<StudentHome>
   }
 
   String _scopeSummaryLabel(Map<String, dynamic> scope) {
-    final scopeType = (scope['scope_type']?.toString() ?? 'event').toLowerCase();
+    final scopeType = (scope['scope_type']?.toString() ?? 'event')
+        .toLowerCase();
     final eventTitle = (scope['event_title']?.toString() ?? 'Event').trim();
     final badge = _scopeReasonBadge(scope);
     if (scopeType == 'session') {
-      final sessionTitle =
-          (scope['session_title']?.toString() ?? 'Seminar').trim();
+      final sessionTitle = (scope['session_title']?.toString() ?? 'Seminar')
+          .trim();
       return '$eventTitle - $sessionTitle ($badge)';
     }
     return '$eventTitle ($badge)';
@@ -863,7 +1035,8 @@ class _StudentHomeState extends State<StudentHome>
       return 'Section label is invalid. Please re-select.';
     }
 
-    final hasYearIndicator = RegExp(r'(^|[^0-9])[1-4]([^0-9]|$)').hasMatch(label) ||
+    final hasYearIndicator =
+        RegExp(r'(^|[^0-9])[1-4]([^0-9]|$)').hasMatch(label) ||
         label.toLowerCase().contains('year');
     if (!hasYearIndicator) {
       return 'Security check failed: section has no valid year-level marker.';
@@ -931,7 +1104,8 @@ class _StudentHomeState extends State<StudentHome>
     if (!mounted) return;
     setState(() {
       _isSubmittingAbsenceReason = false;
-      _absenceReasonError = result['error']?.toString() ?? 'Failed to submit reason.';
+      _absenceReasonError =
+          result['error']?.toString() ?? 'Failed to submit reason.';
     });
   }
 
@@ -943,6 +1117,7 @@ class _StudentHomeState extends State<StudentHome>
     final bool needsAbsenceReason =
         _user != null && _pendingAbsenceScopes.isNotEmpty;
     final gateMode = needsSection || needsAbsenceReason;
+    if (!_isLoading && !gateMode) _maybeShowNavigationTutorial();
 
     final tabBody = needsSection
         ? _buildSectionSelection()
@@ -954,7 +1129,12 @@ class _StudentHomeState extends State<StudentHome>
                   children: [
                     _buildHomeContent(),
                     _eventsTabMounted
-                        ? const StudentEvents()
+                        ? StudentEvents(
+                            tutorialEvent: _showTutorialEventPreview
+                                ? _tutorialSampleEvent
+                                : null,
+                            tutorialTargetKey: _eventPreviewTutorialKey,
+                          )
                         : const SizedBox.shrink(),
                     _scanVisited && _activeScanMode != null
                         ? StudentScanScreen(
@@ -964,7 +1144,12 @@ class _StudentHomeState extends State<StudentHome>
                           )
                         : const SizedBox.shrink(),
                     _ticketsTabMounted
-                        ? const StudentTickets()
+                        ? StudentTickets(
+                            tutorialTicket: _showTutorialTicketPreview
+                                ? _tutorialPreviewTicket
+                                : null,
+                            tutorialTargetKey: _ticketPreviewTutorialKey,
+                          )
                         : const SizedBox.shrink(),
                     StudentProfile(user: _user, onUpdate: _loadData),
                   ],
@@ -991,140 +1176,173 @@ class _StudentHomeState extends State<StudentHome>
         body: ColoredBox(
           color: gateMode ? const Color(0xFF09090B) : Colors.white,
           child: Stack(
-          clipBehavior: Clip.hardEdge,
-          children: [
-            _isLoading
-                ? PulseConnectSplashScreen.aligned(
-                    role: 'student',
-                    course: _resolveStudentCourse(context) ?? 'IT',
-                    statusMessage: 'Loading student portal & events...',
-                  )
-                : tabBody,
+            clipBehavior: Clip.hardEdge,
+            children: [
+              _isLoading
+                  ? PulseConnectSplashScreen.aligned(
+                      role: 'student',
+                      course: _resolveStudentCourse(context) ?? 'IT',
+                      statusMessage: 'Loading student portal & events...',
+                    )
+                  : tabBody,
 
-            if (_scanMenuOpen)
-              Positioned.fill(
-                child: GestureDetector(
-                  onTap: _closeScanMenu,
-                  behavior: HitTestBehavior.opaque,
-                  child: FadeTransition(
-                    opacity: _scanMenuAnimation,
-                    child: Container(
-                      color: Colors.black.withValues(alpha: 0.32),
+              if (_scanMenuOpen)
+                Positioned.fill(
+                  child: GestureDetector(
+                    onTap: _closeScanMenu,
+                    behavior: HitTestBehavior.opaque,
+                    child: FadeTransition(
+                      opacity: _scanMenuAnimation,
+                      child: Container(
+                        color: Colors.black.withValues(alpha: 0.32),
+                      ),
                     ),
                   ),
                 ),
-              ),
 
-            if (!_isLoading && !needsSection && !needsAbsenceReason && _currentIndex != 2)
-              Positioned(
-                bottom: 94,
-                right: 20,
-                child: _buildScanFloatingMenu(),
-              ),
+              if (!_isLoading &&
+                  !needsSection &&
+                  !needsAbsenceReason &&
+                  _currentIndex != 2)
+                Positioned(
+                  bottom: 94,
+                  right: 20,
+                  child: _buildScanFloatingMenu(),
+                ),
 
-            // New Floating Navigation Bar (Matches user design)
-            if (!_isLoading && !needsSection && !needsAbsenceReason)
-              Positioned(
-                bottom: 24,
-                left: 20,
-                right: 20,
-                child: Row(
-                  children: [
-                    // Main Nav Pill
-                    Expanded(
-                      child: Container(
-                        height: 64,
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        decoration: BoxDecoration(
-                          color: Colors.white, // Solid white for better visibility
-                          borderRadius: BorderRadius.circular(32),
-                          border: Border.all(color: Colors.grey.shade200, width: 1),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.25),
-                              blurRadius: 30,
-                              spreadRadius: 2,
-                              offset: const Offset(0, 12),
+              // New Floating Navigation Bar (Matches user design)
+              if (!_isLoading && !needsSection && !needsAbsenceReason)
+                Positioned(
+                  bottom: 24,
+                  left: 20,
+                  right: 20,
+                  child: Row(
+                    children: [
+                      // Main Nav Pill
+                      Expanded(
+                        child: Container(
+                          height: 64,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          decoration: BoxDecoration(
+                            color: Colors
+                                .white, // Solid white for better visibility
+                            borderRadius: BorderRadius.circular(32),
+                            border: Border.all(
+                              color: Colors.grey.shade200,
+                              width: 1,
                             ),
-                          ],
-                        ),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly, // More balanced spacing
-                          children: [
-                            _buildNavItem(Icons.home_rounded, 'Home', 0),
-                            _buildNavItem(Icons.event_note_rounded, 'Events', 1),
-                            _buildNavItem(Icons.confirmation_num_rounded, 'Tickets', 3),
-                            _buildNavItem(Icons.person_rounded, 'Profile', 4),
-                          ],
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.25),
+                                blurRadius: 30,
+                                spreadRadius: 2,
+                                offset: const Offset(0, 12),
+                              ),
+                            ],
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment
+                                .spaceEvenly, // More balanced spacing
+                            children: [
+                              _buildNavItem(
+                                Icons.home_rounded,
+                                'Home',
+                                0,
+                                tutorialKey: _homeNavTutorialKey,
+                              ),
+                              _buildNavItem(
+                                Icons.event_note_rounded,
+                                'Events',
+                                1,
+                                tutorialKey: _eventsNavTutorialKey,
+                              ),
+                              _buildNavItem(
+                                Icons.confirmation_num_rounded,
+                                'Tickets',
+                                3,
+                                tutorialKey: _ticketsNavTutorialKey,
+                              ),
+                              _buildNavItem(
+                                Icons.person_rounded,
+                                'Profile',
+                                4,
+                                tutorialKey: _profileNavTutorialKey,
+                              ),
+                            ],
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 12),
-                    // Separate QR Button
-                    GestureDetector(
-                      onTap: _onQrFabTap,
-                      child: AnimatedBuilder(
-                        animation: _scanMenuController,
-                        builder: (context, child) {
-                          final t = _scanMenuController.value.clamp(0.0, 1.0);
-                          return AnimatedContainer(
-                            duration: const Duration(milliseconds: 280),
-                            width: 58,
-                            height: 58,
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: [
-                                  _studentChrome(context),
-                                  _studentPrimary(context),
+                      const SizedBox(width: 12),
+                      // Separate QR Button
+                      GestureDetector(
+                        key: _scanNavTutorialKey,
+                        onTap: _onQrFabTap,
+                        child: AnimatedBuilder(
+                          animation: _scanMenuController,
+                          builder: (context, child) {
+                            final t = _scanMenuController.value.clamp(0.0, 1.0);
+                            return AnimatedContainer(
+                              duration: const Duration(milliseconds: 280),
+                              width: 58,
+                              height: 58,
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topLeft,
+                                  end: Alignment.bottomRight,
+                                  colors: [
+                                    _studentChrome(context),
+                                    _studentPrimary(context),
+                                  ],
+                                ),
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: _studentChrome(
+                                      context,
+                                    ).withValues(alpha: 0.5),
+                                    blurRadius: 20 + (6 * t),
+                                    spreadRadius: 1 + (2 * t),
+                                    offset: const Offset(0, 8),
+                                  ),
                                 ],
                               ),
-                              shape: BoxShape.circle,
-                              boxShadow: [
-                                BoxShadow(
-                                  color: _studentChrome(context)
-                                      .withValues(alpha: 0.5),
-                                  blurRadius: 20 + (6 * t),
-                                  spreadRadius: 1 + (2 * t),
-                                  offset: const Offset(0, 8),
-                                ),
-                              ],
-                            ),
-                            child: child,
-                          );
-                        },
-                        child: AnimatedRotation(
-                          turns: _scanMenuOpen ? 0.125 : 0,
-                          duration: const Duration(milliseconds: 300),
-                          curve: Curves.easeInOutBack,
-                          child: AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 220),
-                            transitionBuilder: (child, anim) => ScaleTransition(
-                              scale: anim,
-                              child: FadeTransition(opacity: anim, child: child),
-                            ),
-                            child: Icon(
-                              _scanMenuOpen
-                                  ? Icons.close_rounded
-                                  : Icons.qr_code_scanner_rounded,
-                              key: ValueKey(_scanMenuOpen),
-                              color: Colors.white,
-                              size: 26,
+                              child: child,
+                            );
+                          },
+                          child: AnimatedRotation(
+                            turns: _scanMenuOpen ? 0.125 : 0,
+                            duration: const Duration(milliseconds: 300),
+                            curve: Curves.easeInOutBack,
+                            child: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 220),
+                              transitionBuilder: (child, anim) =>
+                                  ScaleTransition(
+                                    scale: anim,
+                                    child: FadeTransition(
+                                      opacity: anim,
+                                      child: child,
+                                    ),
+                                  ),
+                              child: Icon(
+                                _scanMenuOpen
+                                    ? Icons.close_rounded
+                                    : Icons.qr_code_scanner_rounded,
+                                key: ValueKey(_scanMenuOpen),
+                                color: Colors.white,
+                                size: 26,
+                              ),
                             ),
                           ),
                         ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-          ],
-        ),
+            ],
+          ),
         ),
       ),
     );
-
   }
 
   Widget _buildAbsenceReasonLock() {
@@ -1142,9 +1360,7 @@ class _StudentHomeState extends State<StudentHome>
     return Container(
       width: double.infinity,
       height: double.infinity,
-      decoration: const BoxDecoration(
-        color: Color(0xFF09090B),
-      ),
+      decoration: const BoxDecoration(color: Color(0xFF09090B)),
       child: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
@@ -1223,16 +1439,25 @@ class _StudentHomeState extends State<StudentHome>
                 if (_pendingAbsenceScopes.length > 1) ...[
                   const SizedBox(height: 20),
                   DropdownButtonFormField<String>(
-                    initialValue: _selectedAbsenceScopeKey ??
+                    initialValue:
+                        _selectedAbsenceScopeKey ??
                         (_pendingAbsenceScopes.first['scope_key']?.toString()),
                     dropdownColor: const Color(0xFF1C1C22),
                     iconEnabledColor: const Color(0xFFA1A1AA),
-                    style: const TextStyle(fontSize: 14, color: Color(0xFFF4F4F5)),
+                    style: const TextStyle(
+                      fontSize: 14,
+                      color: Color(0xFFF4F4F5),
+                    ),
                     decoration: InputDecoration(
                       filled: true,
                       fillColor: const Color(0xFF1C1C22),
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(14)),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 16,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
                     ),
                     items: _pendingAbsenceScopes.map((scope) {
                       final key = scope['scope_key']?.toString() ?? '';
@@ -1283,7 +1508,9 @@ class _StudentHomeState extends State<StudentHome>
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton(
-                    onPressed: _isSubmittingAbsenceReason ? null : _submitAbsenceReason,
+                    onPressed: _isSubmittingAbsenceReason
+                        ? null
+                        : _submitAbsenceReason,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: _studentAction(context),
                       foregroundColor: Colors.white,
@@ -1293,7 +1520,10 @@ class _StudentHomeState extends State<StudentHome>
                       ),
                     ),
                     child: _isSubmittingAbsenceReason
-                        ? const PulseConnectLoader(size: 14, color: Colors.white)
+                        ? const PulseConnectLoader(
+                            size: 14,
+                            color: Colors.white,
+                          )
                         : const Text(
                             'Submit Reason',
                             style: TextStyle(
@@ -1339,9 +1569,7 @@ class _StudentHomeState extends State<StudentHome>
 
     return Container(
       width: double.infinity,
-      decoration: const BoxDecoration(
-        color: Color(0xFF09090B),
-      ),
+      decoration: const BoxDecoration(color: Color(0xFF09090B)),
       child: SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
@@ -1349,9 +1577,7 @@ class _StudentHomeState extends State<StudentHome>
             children: [
               Row(
                 mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  _buildGateLogoutButton(),
-                ],
+                children: [_buildGateLogoutButton()],
               ),
               Expanded(
                 child: Center(
@@ -1405,7 +1631,9 @@ class _StudentHomeState extends State<StudentHome>
                               decoration: BoxDecoration(
                                 color: _studentDark(context),
                                 borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: _studentChrome(context)),
+                                border: Border.all(
+                                  color: _studentChrome(context),
+                                ),
                               ),
                               child: Text(
                                 _sectionError!,
@@ -1425,7 +1653,10 @@ class _StudentHomeState extends State<StudentHome>
                             ),
                             hint: const Text(
                               'Select Year Level & Section',
-                              style: TextStyle(color: Color(0xFF71717A), fontSize: 14),
+                              style: TextStyle(
+                                color: Color(0xFF71717A),
+                                fontSize: 14,
+                              ),
                             ),
                             decoration: InputDecoration(
                               filled: true,
@@ -1444,7 +1675,8 @@ class _StudentHomeState extends State<StudentHome>
                                 child: Text(s['name'] as String? ?? ''),
                               );
                             }).toList(),
-                            onChanged: (val) => setState(() => _selectedSectionId = val),
+                            onChanged: (val) =>
+                                setState(() => _selectedSectionId = val),
                           ),
                           if (!hasSelectableSections) ...[
                             const SizedBox(height: 10),
@@ -1463,13 +1695,16 @@ class _StudentHomeState extends State<StudentHome>
                           SizedBox(
                             width: double.infinity,
                             child: ElevatedButton(
-                              onPressed: _isUpdatingSection ||
+                              onPressed:
+                                  _isUpdatingSection ||
                                       _selectedSectionId == null ||
                                       !hasSelectableSections
                                   ? null
                                   : () {
                                       final securityError =
-                                          _sectionSelectionSecurityError(_selectedSectionId);
+                                          _sectionSelectionSecurityError(
+                                            _selectedSectionId,
+                                          );
                                       if (securityError != null) {
                                         setState(() {
                                           _sectionError = securityError;
@@ -1481,7 +1716,9 @@ class _StudentHomeState extends State<StudentHome>
                                         builder: (context) => AlertDialog(
                                           backgroundColor: Colors.white,
                                           shape: RoundedRectangleBorder(
-                                            borderRadius: BorderRadius.circular(20),
+                                            borderRadius: BorderRadius.circular(
+                                              20,
+                                            ),
                                           ),
                                           title: const Text(
                                             'Are you sure?',
@@ -1501,10 +1738,13 @@ class _StudentHomeState extends State<StudentHome>
                                           ),
                                           actions: [
                                             TextButton(
-                                              onPressed: () => Navigator.pop(context),
+                                              onPressed: () =>
+                                                  Navigator.pop(context),
                                               child: const Text(
                                                 'Cancel',
-                                                style: TextStyle(color: Color(0xFF71717A)),
+                                                style: TextStyle(
+                                                  color: Color(0xFF71717A),
+                                                ),
                                               ),
                                             ),
                                             ElevatedButton(
@@ -1514,23 +1754,28 @@ class _StudentHomeState extends State<StudentHome>
                                                   _isUpdatingSection = true;
                                                   _sectionError = null;
                                                 });
-                                                final res = await _authService.updateSection(
-                                                  _selectedSectionId!,
-                                                );
+                                                final res = await _authService
+                                                    .updateSection(
+                                                      _selectedSectionId!,
+                                                    );
                                                 if (res['ok']) {
                                                   _loadData();
                                                 } else {
                                                   setState(() {
-                                                    _sectionError = res['error'];
+                                                    _sectionError =
+                                                        res['error'];
                                                     _isUpdatingSection = false;
                                                   });
                                                 }
                                               },
                                               style: ElevatedButton.styleFrom(
-                                                backgroundColor: _studentAction(context),
+                                                backgroundColor: _studentAction(
+                                                  context,
+                                                ),
                                                 foregroundColor: Colors.white,
                                                 shape: RoundedRectangleBorder(
-                                                  borderRadius: BorderRadius.circular(10),
+                                                  borderRadius:
+                                                      BorderRadius.circular(10),
                                                 ),
                                               ),
                                               child: const Text('Yes, Confirm'),
@@ -1542,13 +1787,18 @@ class _StudentHomeState extends State<StudentHome>
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: _studentAction(context),
                                 foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 16,
+                                ),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(14),
                                 ),
                               ),
                               child: _isUpdatingSection
-                                  ? const PulseConnectLoader(size: 14, color: Colors.white)
+                                  ? const PulseConnectLoader(
+                                      size: 14,
+                                      color: Colors.white,
+                                    )
                                   : const Text(
                                       'Save & Continue',
                                       style: TextStyle(
@@ -1571,9 +1821,15 @@ class _StudentHomeState extends State<StudentHome>
     );
   }
 
-  Widget _buildNavItem(IconData icon, String label, int index) {
+  Widget _buildNavItem(
+    IconData icon,
+    String label,
+    int index, {
+    GlobalKey? tutorialKey,
+  }) {
     final isActive = _currentIndex == index;
     return GestureDetector(
+      key: tutorialKey,
       onTap: () {
         _closeScanMenu();
         final switchedToTickets = index == 3 && _currentIndex != 3;
@@ -1602,7 +1858,9 @@ class _StudentHomeState extends State<StudentHome>
           children: [
             Icon(
               icon,
-              color: isActive ? _studentChrome(context) : const Color(0xFFA1A1AA),
+              color: isActive
+                  ? _studentChrome(context)
+                  : const Color(0xFFA1A1AA),
               size: 20, // Reduced icon size
             ),
             if (isActive) ...[
@@ -1633,10 +1891,7 @@ class _StudentHomeState extends State<StudentHome>
         }
         // Clamp for display purposes (elasticOut can exceed 1.0)
         final raw = _scanMenuController.value.clamp(0.0, 1.0);
-        return Opacity(
-          opacity: raw,
-          child: child,
-        );
+        return Opacity(opacity: raw, child: child);
       },
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1763,7 +2018,9 @@ class _StudentHomeState extends State<StudentHome>
                         style: TextStyle(
                           fontWeight: FontWeight.w500,
                           fontSize: 11,
-                          color: _studentChrome(context).withValues(alpha: 0.55),
+                          color: _studentChrome(
+                            context,
+                          ).withValues(alpha: 0.55),
                           height: 1.2,
                         ),
                       ),
@@ -1793,259 +2050,266 @@ class _StudentHomeState extends State<StudentHome>
 
   Widget _buildHomeContent() {
     final firstName = _user?['first_name'] as String? ?? 'Student';
-    
+
     return RefreshIndicator(
       onRefresh: () => _loadData(forceFresh: true),
       color: _studentChrome(context),
       child: CustomScrollView(
         physics: const AlwaysScrollableScrollPhysics(),
         slivers: [
-        // App Bar Header â€” Solid Dark Maroon Design
-        SliverToBoxAdapter(
-          child: Container(
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [_studentDark(context), _studentPrimary(context)],
+          // App Bar Header â€” Solid Dark Maroon Design
+          SliverToBoxAdapter(
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: [_studentDark(context), _studentPrimary(context)],
+                ),
+                borderRadius: BorderRadius.vertical(
+                  bottom: Radius.circular(32),
+                ),
               ),
-              borderRadius: BorderRadius.vertical(
-                bottom: Radius.circular(32),
-              ),
-            ),
-            child: SafeArea(
-              bottom: false,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Top row
-                    StaggeredEntrance(
-                      index: 0,
-                      slideOffset: 16.0,
-                      child: Row(
-                        children: [
-                          // Profile Avatar
-                          GestureDetector(
-                            onTap: () {
-                              setState(() => _currentIndex = 4);
-                            },
-                            child: SafeCircleAvatar(
-                              size: 50,
-                              imagePathOrUrl: _user?['photo_url']?.toString(),
-                              fallbackText: firstName.isNotEmpty
-                                  ? firstName[0].toUpperCase()
-                                  : 'S',
-                              backgroundColor: _studentPrimary(context),
-                              textColor: Colors.white,
-                              borderColor: const Color(0xFFD4A843),
-                              borderWidth: 2,
-                              textStyle: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w800,
-                                fontSize: 20,
+              child: SafeArea(
+                bottom: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Top row
+                      StaggeredEntrance(
+                        index: 0,
+                        slideOffset: 16.0,
+                        child: Row(
+                          children: [
+                            // Profile Avatar
+                            GestureDetector(
+                              key: _homeProfileTutorialKey,
+                              onTap: () {
+                                setState(() => _currentIndex = 4);
+                              },
+                              child: SafeCircleAvatar(
+                                size: 50,
+                                imagePathOrUrl: _user?['photo_url']?.toString(),
+                                fallbackText: firstName.isNotEmpty
+                                    ? firstName[0].toUpperCase()
+                                    : 'S',
+                                backgroundColor: _studentPrimary(context),
+                                textColor: Colors.white,
+                                borderColor: const Color(0xFFD4A843),
+                                borderWidth: 2,
+                                textStyle: const TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 20,
+                                ),
                               ),
                             ),
-                          ),
-                          const SizedBox(width: 14),
-                          // Expanded Column for full-width name support
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  _getGreeting(),
-                                  style: TextStyle(
-                                    color: Colors.white.withValues(alpha: 0.7),
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    letterSpacing: 0.5,
-                                  ),
-                                ),
-                                AnimatedGreetingText(
-                                  text: firstName,
-                                  style: const TextStyle(
-                                    fontSize: 22,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                  baseColor: Colors.white,
-                                  scanColor: _studentSoft(context),
-                                ),
-                              ],
-                            ),
-                          ),
-                          // Notification Bell Only - Logout is in Profile
-                          Container(
-                            margin: const EdgeInsets.only(left: 12),
-                            width: 48,
-                            height: 48,
-                            decoration: BoxDecoration(
-                              color: Colors.white.withValues(alpha: 0.10),
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            child: Stack(
-                              clipBehavior: Clip.none,
-                              children: [
-                                Positioned.fill(
-                                  child: IconButton(
-                                    padding: const EdgeInsets.all(10),
-                                    splashRadius: 22,
-                                    icon: const Icon(
-                                      Icons.notifications_none_rounded,
-                                      color: Colors.white,
+                            const SizedBox(width: 14),
+                            // Expanded Column for full-width name support
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _getGreeting(),
+                                    style: TextStyle(
+                                      color: Colors.white.withValues(
+                                        alpha: 0.7,
+                                      ),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                      letterSpacing: 0.5,
                                     ),
-                                    onPressed: _isOpeningNotifications
-                                        ? null
-                                        : _openNotificationsModal,
                                   ),
-                                ),
-                                if (_unreadCount > 0)
-                                  Positioned(
-                                    top: -4,
-                                    right: -4,
-                                    child: IgnorePointer(
-                                      child: Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 5,
-                                          vertical: 2,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFFEF4444),
-                                          borderRadius: BorderRadius.circular(
-                                            999,
+                                  AnimatedGreetingText(
+                                    text: firstName,
+                                    style: const TextStyle(
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                    baseColor: Colors.white,
+                                    scanColor: _studentSoft(context),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            // Notification Bell Only - Logout is in Profile
+                            Container(
+                              margin: const EdgeInsets.only(left: 12),
+                              width: 48,
+                              height: 48,
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.10),
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              child: Stack(
+                                clipBehavior: Clip.none,
+                                children: [
+                                  Positioned.fill(
+                                    child: IconButton(
+                                      key: _homeNotificationsTutorialKey,
+                                      padding: const EdgeInsets.all(10),
+                                      splashRadius: 22,
+                                      icon: const Icon(
+                                        Icons.notifications_none_rounded,
+                                        color: Colors.white,
+                                      ),
+                                      onPressed: _isOpeningNotifications
+                                          ? null
+                                          : _openNotificationsModal,
+                                    ),
+                                  ),
+                                  if (_unreadCount > 0)
+                                    Positioned(
+                                      top: -4,
+                                      right: -4,
+                                      child: IgnorePointer(
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 5,
+                                            vertical: 2,
                                           ),
-                                          border: Border.all(
-                                            color: _studentDark(context),
-                                            width: 1.5,
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFEF4444),
+                                            borderRadius: BorderRadius.circular(
+                                              999,
+                                            ),
+                                            border: Border.all(
+                                              color: _studentDark(context),
+                                              width: 1.5,
+                                            ),
                                           ),
-                                        ),
-                                        constraints: const BoxConstraints(
-                                          minWidth: 18,
-                                          minHeight: 18,
-                                        ),
-                                        child: Text(
-                                          _unreadCount > 99
-                                              ? '99+'
-                                              : _unreadCount.toString(),
-                                          textAlign: TextAlign.center,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.w800,
-                                            height: 1.2,
+                                          constraints: const BoxConstraints(
+                                            minWidth: 18,
+                                            minHeight: 18,
+                                          ),
+                                          child: Text(
+                                            _unreadCount > 99
+                                                ? '99+'
+                                                : _unreadCount.toString(),
+                                            textAlign: TextAlign.center,
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.w800,
+                                              height: 1.2,
+                                            ),
                                           ),
                                         ),
                                       ),
                                     ),
-                                  ),
-                              ],
+                                ],
+                              ),
                             ),
-                          ),
-                        ],
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 28),
+
+                      // Header Slider (Laptop Animation / Mini Calendar)
+                      StaggeredEntrance(
+                        index: 1,
+                        slideOffset: 24.0,
+                        child: _buildHeaderSlider(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+
+          // Upcoming Events Section
+          SliverToBoxAdapter(
+            child: StaggeredEntrance(
+              index: 2,
+              slideOffset: 20.0,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(24, 16, 24, 16),
+                child: Row(
+                  children: [
+                    const Text(
+                      'Upcoming Events',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF1F2937),
                       ),
                     ),
-
-                    const SizedBox(height: 28),
-
-                    // Header Slider (Laptop Animation / Mini Calendar)
-                    StaggeredEntrance(
-                      index: 1,
-                      slideOffset: 24.0,
-                      child: _buildHeaderSlider(),
+                    const Spacer(),
+                    GestureDetector(
+                      key: _homeSeeAllEventsTutorialKey,
+                      onTap: () {
+                        _ensureTabMounted(1);
+                        setState(() => _currentIndex = 1);
+                      },
+                      child: Text(
+                        'See All',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: _studentChrome(context),
+                        ),
+                      ),
                     ),
                   ],
                 ),
               ),
             ),
           ),
-        ),
 
-        // Upcoming Events Section
-        SliverToBoxAdapter(
-          child: StaggeredEntrance(
-            index: 2,
-            slideOffset: 20.0,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(24, 16, 24, 16),
-              child: Row(
-                children: [
-                  const Text(
-                    'Upcoming Events',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFF1F2937),
-                    ),
-                  ),
-                  const Spacer(),
-                  GestureDetector(
-                    onTap: () {
-                      _ensureTabMounted(1);
-                      setState(() => _currentIndex = 1);
-                    },
-                    child: Text(
-                      'See All',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                        color: _studentChrome(context),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-
-        // Events List
-        _upcomingEvents.isEmpty
-            ? SliverToBoxAdapter(
-                child: StaggeredEntrance(
-                  index: 3,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24),
-                    child: Container(
-                      padding: const EdgeInsets.all(40),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: Colors.grey.shade200),
-                      ),
-                      child: Column(
-                        children: [
-                          Icon(Icons.event_busy_rounded,
-                              size: 48, color: Colors.grey.shade300),
-                          const SizedBox(height: 12),
-                          Text(
-                            'No upcoming events',
-                            style: TextStyle(
-                              fontWeight: FontWeight.w700,
-                              color: Colors.grey.shade500,
+          // Events List
+          _upcomingEvents.isEmpty
+              ? SliverToBoxAdapter(
+                  child: StaggeredEntrance(
+                    index: 3,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: Container(
+                        padding: const EdgeInsets.all(40),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: Colors.grey.shade200),
+                        ),
+                        child: Column(
+                          children: [
+                            Icon(
+                              Icons.event_busy_rounded,
+                              size: 48,
+                              color: Colors.grey.shade300,
                             ),
-                          ),
-                        ],
+                            const SizedBox(height: 12),
+                            Text(
+                              'No upcoming events',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: Colors.grey.shade500,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
-                ),
-              )
-            : SliverList(
-                delegate: SliverChildBuilderDelegate(
-                  (context, index) {
+                )
+              : SliverList(
+                  delegate: SliverChildBuilderDelegate((context, index) {
                     final event = _upcomingEvents[index];
                     return StaggeredEntrance(
                       index: 3 + index,
                       slideOffset: 24.0,
                       child: _buildEventCard(event),
                     );
-                  },
-                  childCount: _upcomingEvents.length,
+                  }, childCount: _upcomingEvents.length),
                 ),
-              ),
 
-          const SliverToBoxAdapter(child: SizedBox(height: 100)), // Space for floating nav
+          const SliverToBoxAdapter(
+            child: SizedBox(height: 100),
+          ), // Space for floating nav
         ],
       ),
     );
@@ -2059,10 +2323,7 @@ class _StudentHomeState extends State<StudentHome>
           child: PageView(
             controller: _headerPageController,
             onPageChanged: (idx) => setState(() => _currentHeaderSlide = idx),
-            children: [
-              _buildMacbookSlide(),
-              _buildMiniCalendar(),
-            ],
+            children: [_buildMacbookSlide(), _buildMiniCalendar()],
           ),
         ),
         const SizedBox(height: 12),
@@ -2077,7 +2338,9 @@ class _StudentHomeState extends State<StudentHome>
               width: isActive ? 20 : 8,
               height: 8,
               decoration: BoxDecoration(
-                color: isActive ? const Color(0xFFD4A843) : Colors.white.withValues(alpha: 0.3),
+                color: isActive
+                    ? const Color(0xFFD4A843)
+                    : Colors.white.withValues(alpha: 0.3),
                 borderRadius: BorderRadius.circular(4),
               ),
             );
@@ -2144,8 +2407,13 @@ class _StudentHomeState extends State<StudentHome>
   Widget _buildMiniCalendar() {
     final now = DateTime.now();
     final monthName = DateFormat('MMMM yyyy').format(_calendarMonth);
-    final daysInMonth = DateTime(_calendarMonth.year, _calendarMonth.month + 1, 0).day;
-    final firstWeekday = DateTime(_calendarMonth.year, _calendarMonth.month, 1).weekday % 7;
+    final daysInMonth = DateTime(
+      _calendarMonth.year,
+      _calendarMonth.month + 1,
+      0,
+    ).day;
+    final firstWeekday =
+        DateTime(_calendarMonth.year, _calendarMonth.month, 1).weekday % 7;
     final weekCount = ((daysInMonth + firstWeekday + 6) / 7).ceil();
 
     return Container(
@@ -2165,19 +2433,23 @@ class _StudentHomeState extends State<StudentHome>
       ),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final safeHeight = constraints.maxHeight > 0 ? constraints.maxHeight : 300.0;
+          final safeHeight = constraints.maxHeight > 0
+              ? constraints.maxHeight
+              : 300.0;
           const monthRowHeight = 40.0;
           const sectionGap = 12.0;
           const dayHeaderHeight = 20.0;
-          final usableGridHeight = (safeHeight -
-                  monthRowHeight -
-                  sectionGap -
-                  dayHeaderHeight -
-                  sectionGap)
-              .clamp(150.0, 260.0);
+          final usableGridHeight =
+              (safeHeight -
+                      monthRowHeight -
+                      sectionGap -
+                      dayHeaderHeight -
+                      sectionGap)
+                  .clamp(150.0, 260.0);
           final gridSpacing = weekCount > 1 ? 4.0 : 0.0;
-          final cellSize = ((usableGridHeight - (gridSpacing * (weekCount - 1))) / weekCount)
-              .clamp(24.0, 32.0);
+          final cellSize =
+              ((usableGridHeight - (gridSpacing * (weekCount - 1))) / weekCount)
+                  .clamp(24.0, 32.0);
           final dayFontSize = (cellSize * 0.40).clamp(10.0, 13.0);
 
           return Column(
@@ -2192,10 +2464,18 @@ class _StudentHomeState extends State<StudentHome>
                       shape: BoxShape.circle,
                     ),
                     child: IconButton(
-                      icon: const Icon(Icons.chevron_left_rounded, color: Colors.white, size: 20),
+                      icon: const Icon(
+                        Icons.chevron_left_rounded,
+                        color: Colors.white,
+                        size: 20,
+                      ),
                       onPressed: () {
                         setState(() {
-                          _calendarMonth = DateTime(_calendarMonth.year, _calendarMonth.month - 1, 1);
+                          _calendarMonth = DateTime(
+                            _calendarMonth.year,
+                            _calendarMonth.month - 1,
+                            1,
+                          );
                         });
                       },
                       constraints: const BoxConstraints(),
@@ -2217,10 +2497,18 @@ class _StudentHomeState extends State<StudentHome>
                       shape: BoxShape.circle,
                     ),
                     child: IconButton(
-                      icon: const Icon(Icons.chevron_right_rounded, color: Colors.white, size: 20),
+                      icon: const Icon(
+                        Icons.chevron_right_rounded,
+                        color: Colors.white,
+                        size: 20,
+                      ),
                       onPressed: () {
                         setState(() {
-                          _calendarMonth = DateTime(_calendarMonth.year, _calendarMonth.month + 1, 1);
+                          _calendarMonth = DateTime(
+                            _calendarMonth.year,
+                            _calendarMonth.month + 1,
+                            1,
+                          );
                         });
                       },
                       constraints: const BoxConstraints(),
@@ -2252,174 +2540,213 @@ class _StudentHomeState extends State<StudentHome>
               const SizedBox(height: sectionGap),
 
               // Calendar Grid
-              ...List.generate(
-                weekCount,
-                (week) {
-                  return Padding(
-                    padding: EdgeInsets.only(bottom: week == weekCount - 1 ? 0 : gridSpacing),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: List.generate(7, (weekday) {
-                    final day = week * 7 + weekday - firstWeekday + 1;
-                    if (day < 1 || day > daysInMonth) {
-                      return SizedBox(width: cellSize, height: cellSize);
-                    }
-
-                    final isToday = day == now.day && _calendarMonth.month == now.month && _calendarMonth.year == now.year;
-
-                    final eventsOnThisDay = _calendarEvents.where((e) {
-                      final startAt = e['start_at'] as String?;
-                      if (startAt == null) return false;
-                      try {
-                        final d = parseStoredEventDateTime(startAt);
-                        if (d == null) return false;
-                        return d.day == day &&
-                            d.month == _calendarMonth.month &&
-                            d.year == _calendarMonth.year;
-                      } catch (_) {
-                        return false;
+              ...List.generate(weekCount, (week) {
+                return Padding(
+                  padding: EdgeInsets.only(
+                    bottom: week == weekCount - 1 ? 0 : gridSpacing,
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: List.generate(7, (weekday) {
+                      final day = week * 7 + weekday - firstWeekday + 1;
+                      if (day < 1 || day > daysInMonth) {
+                        return SizedBox(width: cellSize, height: cellSize);
                       }
-                    }).toList();
 
-                    final hasEvent = eventsOnThisDay.isNotEmpty;
+                      final isToday =
+                          day == now.day &&
+                          _calendarMonth.month == now.month &&
+                          _calendarMonth.year == now.year;
 
-                    Widget dayWidget = Container(
-                      width: cellSize,
-                      height: cellSize,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: isToday
-                            ? const Color(0xFFD4A843)
-                            : Colors.transparent,
-                      ),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            '$day',
-                            style: TextStyle(
-                              color: isToday
-                                  ? _studentDark(context)
-                                  : Colors.white.withValues(alpha: 0.9),
-                              fontWeight: isToday ? FontWeight.w900 : FontWeight.w600,
-                              fontSize: dayFontSize,
+                      final eventsOnThisDay = _calendarEvents.where((e) {
+                        final startAt = e['start_at'] as String?;
+                        if (startAt == null) return false;
+                        try {
+                          final d = parseStoredEventDateTime(startAt);
+                          if (d == null) return false;
+                          return d.day == day &&
+                              d.month == _calendarMonth.month &&
+                              d.year == _calendarMonth.year;
+                        } catch (_) {
+                          return false;
+                        }
+                      }).toList();
+
+                      final hasEvent = eventsOnThisDay.isNotEmpty;
+
+                      Widget dayWidget = Container(
+                        width: cellSize,
+                        height: cellSize,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: isToday
+                              ? const Color(0xFFD4A843)
+                              : Colors.transparent,
+                        ),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Text(
+                              '$day',
+                              style: TextStyle(
+                                color: isToday
+                                    ? _studentDark(context)
+                                    : Colors.white.withValues(alpha: 0.9),
+                                fontWeight: isToday
+                                    ? FontWeight.w900
+                                    : FontWeight.w600,
+                                fontSize: dayFontSize,
+                              ),
                             ),
-                          ),
-                          if (hasEvent)
-                            Builder(
-                              builder: (_) {
-                                final hasPublished = eventsOnThisDay.any((e) {
-                                  final s = (e['status']?.toString() ?? '')
-                                      .toLowerCase()
-                                      .trim();
-                                  return s == 'published';
-                                });
-                                final hasUnpublished = eventsOnThisDay.any((e) {
-                                  final s = (e['status']?.toString() ?? '')
-                                      .toLowerCase()
-                                      .trim();
-                                  return s != 'published';
-                                });
-                                return Padding(
-                                  padding: const EdgeInsets.only(top: 2),
-                                  child: Row(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      if (hasPublished)
-                                        Container(
-                                          width: 4,
-                                          height: 4,
-                                          decoration: const BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color: Color(0xFFFACC15),
+                            if (hasEvent)
+                              Builder(
+                                builder: (_) {
+                                  final hasPublished = eventsOnThisDay.any((e) {
+                                    final s = (e['status']?.toString() ?? '')
+                                        .toLowerCase()
+                                        .trim();
+                                    return s == 'published';
+                                  });
+                                  final hasUnpublished = eventsOnThisDay.any((
+                                    e,
+                                  ) {
+                                    final s = (e['status']?.toString() ?? '')
+                                        .toLowerCase()
+                                        .trim();
+                                    return s != 'published';
+                                  });
+                                  return Padding(
+                                    padding: const EdgeInsets.only(top: 2),
+                                    child: Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        if (hasPublished)
+                                          Container(
+                                            width: 4,
+                                            height: 4,
+                                            decoration: const BoxDecoration(
+                                              shape: BoxShape.circle,
+                                              color: Color(0xFFFACC15),
+                                            ),
                                           ),
-                                        ),
-                                      if (hasPublished && hasUnpublished)
-                                        const SizedBox(width: 2),
-                                      if (hasUnpublished)
-                                        Container(
-                                          width: 4,
-                                          height: 4,
-                                          decoration: BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color: Colors.white,
-                                            border: isToday
-                                                ? Border.all(
-                                                    color: _studentDark(context)
-                                                        .withValues(alpha: 0.35),
-                                                    width: 0.5,
-                                                  )
-                                                : null,
+                                        if (hasPublished && hasUnpublished)
+                                          const SizedBox(width: 2),
+                                        if (hasUnpublished)
+                                          Container(
+                                            width: 4,
+                                            height: 4,
+                                            decoration: BoxDecoration(
+                                              shape: BoxShape.circle,
+                                              color: Colors.white,
+                                              border: isToday
+                                                  ? Border.all(
+                                                      color: _studentDark(
+                                                        context,
+                                                      ).withValues(alpha: 0.35),
+                                                      width: 0.5,
+                                                    )
+                                                  : null,
+                                            ),
                                           ),
-                                        ),
-                                    ],
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
+                          ],
+                        ),
+                      );
+
+                      if (hasEvent) {
+                        dayWidget = GestureDetector(
+                          onTap: () {
+                            showDialog(
+                              context: context,
+                              builder: (context) {
+                                return AlertDialog(
+                                  backgroundColor: Colors.white,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(20),
                                   ),
+                                  title: const Text(
+                                    'Events on this Date',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 18,
+                                      color: Color(0xFF1F2937),
+                                    ),
+                                  ),
+                                  content: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: eventsOnThisDay
+                                        .map(
+                                          (e) => ListTile(
+                                            contentPadding: EdgeInsets.zero,
+                                            leading: Icon(
+                                              Icons.event_rounded,
+                                              color: _studentChrome(context),
+                                            ),
+                                            title: Text(
+                                              e['title'] ?? 'Event',
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w700,
+                                                fontSize: 14,
+                                                color: Color(0xFF1F2937),
+                                              ),
+                                            ),
+                                            subtitle: Text(
+                                              e['start_at'] != null
+                                                  ? (() {
+                                                      final parsed =
+                                                          parseStoredEventDateTime(
+                                                            e['start_at'],
+                                                          );
+                                                      return parsed != null
+                                                          ? DateFormat(
+                                                              'hh:mm a',
+                                                            ).format(parsed)
+                                                          : '';
+                                                    })()
+                                                  : '',
+                                              style: const TextStyle(
+                                                color: Color(0xFF71717A),
+                                              ),
+                                            ),
+                                            onTap: () {
+                                              Navigator.pop(context);
+                                              _ensureTabMounted(1);
+                                              setState(() => _currentIndex = 1);
+                                            },
+                                          ),
+                                        )
+                                        .toList(),
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () => Navigator.pop(context),
+                                      child: Text(
+                                        'Close',
+                                        style: TextStyle(
+                                          color: _studentChrome(context),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
                                 );
                               },
-                            ),
-                        ],
-                      ),
-                    );
+                            );
+                          },
+                          child: dayWidget,
+                        );
+                      }
 
-                    if (hasEvent) {
-                      dayWidget = GestureDetector(
-                        onTap: () {
-                          showDialog(
-                            context: context,
-                            builder: (context) {
-                              return AlertDialog(
-                                backgroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                                title: const Text('Events on this Date', style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: Color(0xFF1F2937))),
-                                content: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: eventsOnThisDay.map((e) => ListTile(
-                                    contentPadding: EdgeInsets.zero,
-                                    leading: Icon(
-                                      Icons.event_rounded,
-                                      color: _studentChrome(context),
-                                    ),
-                                    title: Text(e['title'] ?? 'Event', style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14, color: Color(0xFF1F2937))),
-                                    subtitle: Text(
-                                      e['start_at'] != null
-                                          ? (() {
-                                              final parsed = parseStoredEventDateTime(e['start_at']);
-                                              return parsed != null ? DateFormat('hh:mm a').format(parsed) : '';
-                                            })()
-                                          : '',
-                                      style: const TextStyle(color: Color(0xFF71717A)),
-                                    ),
-                                    onTap: () {
-                                      Navigator.pop(context);
-                                      _ensureTabMounted(1);
-                                      setState(() => _currentIndex = 1);
-                                    },
-                                  )).toList(),
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.pop(context),
-                                    child: Text(
-                                      'Close',
-                                      style: TextStyle(color: _studentChrome(context)),
-                                    ),
-                                  ),
-                                ],
-                              );
-                            }
-                          );
-                        },
-                        child: dayWidget,
-                      );
-                    }
-
-                    return dayWidget;
-                      }),
-                    ),
-                  );
-                },
-              ),
+                      return dayWidget;
+                    }),
+                  ),
+                );
+              }),
             ],
           );
         },
@@ -2474,7 +2801,9 @@ class _StudentHomeState extends State<StudentHome>
                     end: Alignment.bottomRight,
                     colors: [
                       _studentChrome(context),
-                      CourseThemeUtils.studentDarkFromPrimary(_studentPrimary(context)),
+                      CourseThemeUtils.studentDarkFromPrimary(
+                        _studentPrimary(context),
+                      ),
                     ],
                   ),
                   borderRadius: BorderRadius.circular(16),
@@ -2489,7 +2818,9 @@ class _StudentHomeState extends State<StudentHome>
                 child: Column(
                   children: [
                     Text(
-                      startDate != null ? DateFormat('dd').format(startDate) : '--',
+                      startDate != null
+                          ? DateFormat('dd').format(startDate)
+                          : '--',
                       style: const TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.w900,
@@ -2498,7 +2829,9 @@ class _StudentHomeState extends State<StudentHome>
                       ),
                     ),
                     Text(
-                      startDate != null ? DateFormat('MMM').format(startDate).toUpperCase() : '---',
+                      startDate != null
+                          ? DateFormat('MMM').format(startDate).toUpperCase()
+                          : '---',
                       style: TextStyle(
                         color: Colors.white.withValues(alpha: 0.9),
                         fontWeight: FontWeight.w700,
@@ -2530,8 +2863,11 @@ class _StudentHomeState extends State<StudentHome>
                     if (startDate != null)
                       Row(
                         children: [
-                          const Icon(Icons.schedule_rounded,
-                              size: 14, color: Color(0xFF71717A)),
+                          const Icon(
+                            Icons.schedule_rounded,
+                            size: 14,
+                            color: Color(0xFF71717A),
+                          ),
                           const SizedBox(width: 4),
                           Text(
                             DateFormat('hh:mm a').format(startDate),
@@ -2547,8 +2883,11 @@ class _StudentHomeState extends State<StudentHome>
                       const SizedBox(height: 4),
                       Row(
                         children: [
-                          const Icon(Icons.location_on_rounded,
-                              size: 14, color: Color(0xFF9CA3AF)),
+                          const Icon(
+                            Icons.location_on_rounded,
+                            size: 14,
+                            color: Color(0xFF9CA3AF),
+                          ),
                           const SizedBox(width: 4),
                           Expanded(
                             child: Text(
@@ -2576,8 +2915,11 @@ class _StudentHomeState extends State<StudentHome>
                   color: Colors.grey.shade100,
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(Icons.chevron_right_rounded,
-                    color: Color(0xFF9CA3AF), size: 20),
+                child: const Icon(
+                  Icons.chevron_right_rounded,
+                  color: Color(0xFF9CA3AF),
+                  size: 20,
+                ),
               ),
             ],
           ),

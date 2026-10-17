@@ -217,7 +217,9 @@ class AuthService {
     final id = userId.trim();
     if (id.isEmpty) return;
     if (!MobileBackendService.isConfigured) {
-      debugPrint('AuthService.trustCurrentDevice skipped: backend not configured');
+      debugPrint(
+        'AuthService.trustCurrentDevice skipped: backend not configured',
+      );
       return;
     }
 
@@ -277,7 +279,9 @@ class AuthService {
   }
 
   /// Why OTP is required: `unverified` | `daily` | `new_device` | null (not required).
-  Future<String?> emailVerificationGateReason(Map<String, dynamic>? user) async {
+  Future<String?> emailVerificationGateReason(
+    Map<String, dynamic>? user,
+  ) async {
     if (user == null) return 'unverified';
     final isVerified = user['email_verified'] == true;
     final verifiedAtRaw = user['email_verified_at']?.toString() ?? '';
@@ -310,9 +314,7 @@ class AuthService {
   /// Established accounts should never be locked out by stale `pending` rows.
   static const int _adminReviewGateMaxAgeDays = 21;
 
-  static bool _shouldBypassPendingAdminReviewGate(
-    Map<String, dynamic> user,
-  ) {
+  static bool _shouldBypassPendingAdminReviewGate(Map<String, dynamic> user) {
     final raw = user['created_at']?.toString().trim() ?? '';
     if (raw.isEmpty) return false;
     final created = DateTime.tryParse(raw)?.toUtc();
@@ -443,8 +445,9 @@ class AuthService {
 
       // Last resort: PHP BFF looks up profiles/{userId}.{ext} — never probe Storage
       // from Flutter (anon createSignedUrl / public info returns 400).
-      final stillEmpty =
-          ((parsed['photo_url'] as String?) ?? '').trim().isEmpty;
+      final stillEmpty = ((parsed['photo_url'] as String?) ?? '')
+          .trim()
+          .isEmpty;
       if (stillEmpty && userId.isNotEmpty && !skipAvatarLookup) {
         try {
           final resolved = await _resolveOwnAvatarFromServer();
@@ -698,10 +701,7 @@ class AuthService {
           error =
               'Server register API is outdated. Redeploy api/mobile_register_user.php and includes/mobile_api.php, then try again.';
         }
-        return {
-          'ok': false,
-          'error': error,
-        };
+        return {'ok': false, 'error': error};
       }
 
       final userRaw = result['user'];
@@ -733,7 +733,10 @@ class AuthService {
         bytes: bytes,
       );
     } catch (e) {
-      return {'ok': false, 'error': 'Could not read that PDF. Please try again.'};
+      return {
+        'ok': false,
+        'error': 'Could not read that PDF. Please try again.',
+      };
     }
   }
 
@@ -852,6 +855,13 @@ class AuthService {
           preservedBools[key] = value;
         }
       }
+      // Keep role-specific onboarding completion when clearing the signed-in session.
+      if (key.startsWith('navigation_tutorial_')) {
+        final value = prefs.getBool(key);
+        if (value != null) {
+          preservedBools[key] = value;
+        }
+      }
       // Keep OTP resend cooldown across logout / back → login so we don't spam.
       if (key.startsWith('email_verify_cooldown_until_')) {
         final value = prefs.getInt(key);
@@ -884,7 +894,9 @@ class AuthService {
   /// [keepMobileSession]: OTP gate only — keep the opaque session from login so
   /// post-verify APIs (avatar signed URLs, FCM, inbox, device trust) still work.
   /// Do not unregister push or wipe the offline scan store in that mode.
-  Future<void> clearLocalSessionMarkers({bool keepMobileSession = false}) async {
+  Future<void> clearLocalSessionMarkers({
+    bool keepMobileSession = false,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id');
     if (!keepMobileSession) {
@@ -910,12 +922,7 @@ class AuthService {
           (safe['photo_path'] as String?) ??
           _extractStoragePathFromUrl(photoUrl);
       if (photoUrl.isNotEmpty) {
-        await _saveAvatarCache(
-          prefs,
-          userId,
-          photoUrl,
-          photoPath: photoPath,
-        );
+        await _saveAvatarCache(prefs, userId, photoUrl, photoPath: photoPath);
       }
     }
     await _persistLocalUser(safe);
@@ -1119,10 +1126,7 @@ class AuthService {
       if (userId == null) return {'ok': false, 'error': 'Not logged in'};
 
       if (!MobileBackendService.isConfigured) {
-        return {
-          'ok': false,
-          'error': 'Hosted backend is not configured.',
-        };
+        return {'ok': false, 'error': 'Hosted backend is not configured.'};
       }
 
       final bytes = await file.readAsBytes();
@@ -1292,11 +1296,11 @@ class AuthService {
     final trimmed = url.trim();
     // Hostinger-local private avatar path. It must be resolved through the PHP
     // BFF, not passed to Image.file as though it were an Android file path.
-    if (!trimmed.contains('://') &&
-        trimmed.startsWith('media/avatars/')) {
+    if (!trimmed.contains('://') && trimmed.startsWith('media/avatars/')) {
       var path = trimmed;
       while (path.startsWith('media/avatars/avatars/')) {
-        path = 'media/avatars/${path.substring('media/avatars/avatars/'.length)}';
+        path =
+            'media/avatars/${path.substring('media/avatars/avatars/'.length)}';
       }
       return path;
     }
@@ -1351,10 +1355,7 @@ class AuthService {
       final signed = (res['signed_url']?.toString() ?? '').trim();
       final path = (res['path']?.toString() ?? '').trim();
       if (signed.isEmpty) return null;
-      return {
-        'signed_url': signed,
-        'path': path,
-      };
+      return {'signed_url': signed, 'path': path};
     } catch (_) {
       return null;
     }

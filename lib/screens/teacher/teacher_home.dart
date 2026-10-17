@@ -25,6 +25,7 @@ import '../../widgets/shiny_text.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/app_page_routes.dart';
 import 'teacher_event_manage.dart';
+import '../../widgets/navigation_tutorial.dart';
 
 class TeacherHome extends StatefulWidget {
   const TeacherHome({super.key});
@@ -45,6 +46,13 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
   List<Map<String, dynamic>> _upcomingEvents = [];
   List<Map<String, dynamic>> _calendarEvents = [];
   int _currentIndex = 0;
+  final GlobalKey _homeNavTutorialKey = GlobalKey();
+  final GlobalKey _eventsNavTutorialKey = GlobalKey();
+  final GlobalKey _scanNavTutorialKey = GlobalKey();
+  final GlobalKey _blocksNavTutorialKey = GlobalKey();
+  final GlobalKey _profileNavTutorialKey = GlobalKey();
+  bool _navigationTutorialRequested = false;
+
   /// Once opened, keep TeacherScanScreen mounted so reopening the FAB
   /// does not remount and flash the full-screen loader every time.
   bool _scanVisited = false;
@@ -82,6 +90,69 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     _loadData();
     _loadShowcaseSlides();
     _subscribeToNotifications();
+  }
+
+  void _maybeShowNavigationTutorial() {
+    if (_navigationTutorialRequested || _user == null) return;
+
+    _navigationTutorialRequested = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        NavigationTutorial.showOnce(
+          context: context,
+          role: 'teacher',
+          accentColor: _teacherPrimary,
+          steps: [
+            NavigationTutorialStep(
+              targetKey: _homeNavTutorialKey,
+              title: 'Home',
+              description:
+                  'See your dashboard, upcoming events, and teacher updates.',
+              icon: Icons.home_rounded,
+            ),
+            NavigationTutorialStep(
+              targetKey: _eventsNavTutorialKey,
+              title: 'Events',
+              description:
+                  'Review events you can access and manage your event proposals.',
+              icon: Icons.event_note_rounded,
+              onEnter: () => _selectTutorialTab(1),
+            ),
+            NavigationTutorialStep(
+              targetKey: _blocksNavTutorialKey,
+              title: 'Blocks',
+              description:
+                  'View the student blocks and class groups available to you.',
+              icon: Icons.groups_rounded,
+              onEnter: () => _selectTutorialTab(3),
+            ),
+            NavigationTutorialStep(
+              targetKey: _profileNavTutorialKey,
+              title: 'Profile',
+              description:
+                  'View your account information and available profile settings.',
+              icon: Icons.person_rounded,
+              onEnter: () => _selectTutorialTab(4),
+            ),
+            NavigationTutorialStep(
+              targetKey: _scanNavTutorialKey,
+              title: 'QR Scanner',
+              description:
+                  'Scan attendee QR codes using the access assigned to your account.',
+              icon: Icons.qr_code_scanner_rounded,
+              onEnter: () => _selectTutorialTab(0),
+            ),
+          ],
+        ),
+      );
+    });
+  }
+
+  Future<void> _selectTutorialTab(int index) async {
+    if (!mounted) return;
+    if (_currentIndex != index) setState(() => _currentIndex = index);
+    await WidgetsBinding.instance.endOfFrame;
   }
 
   bool _isTeacherHomeCatalogLiveReason(String reason) {
@@ -214,13 +285,10 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     );
     _scannerAccessChannel!.subscribe();
 
-    _scannerAccessGuardTimer = Timer.periodic(
-      const Duration(seconds: 75),
-      (_) {
-        if (!mounted || _currentIndex != 2) return;
-        unawaited(_refreshScannerAccessGuard(actorId));
-      },
-    );
+    _scannerAccessGuardTimer = Timer.periodic(const Duration(seconds: 75), (_) {
+      if (!mounted || _currentIndex != 2) return;
+      unawaited(_refreshScannerAccessGuard(actorId));
+    });
   }
 
   List<Map<String, dynamic>> _teacherActiveUpcomingEvents(
@@ -262,13 +330,21 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
       forceFresh: forceFresh,
       onUpdated: (fresh) {
         if (!mounted) return;
-        setState(() => _showcaseItems = fresh.isNotEmpty ? fresh : ShowcaseService.instance.bundledItems());
+        setState(
+          () => _showcaseItems = fresh.isNotEmpty
+              ? fresh
+              : ShowcaseService.instance.bundledItems(),
+        );
         if (fresh.isEmpty) return;
         unawaited(ShowcaseService.instance.prefetchImages(context, fresh));
       },
     );
     if (!mounted) return;
-    setState(() => _showcaseItems = items.isNotEmpty ? items : ShowcaseService.instance.bundledItems());
+    setState(
+      () => _showcaseItems = items.isNotEmpty
+          ? items
+          : ShowcaseService.instance.bundledItems(),
+    );
     if (items.isEmpty) return;
     if (!mounted) return;
     unawaited(ShowcaseService.instance.prefetchImages(context, items));
@@ -358,9 +434,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     }
 
     // Soft unread on normal open; force only on pull-to-refresh.
-    final unread = await _notifService.getUnreadCount(
-      forceRefresh: forceFresh,
-    );
+    final unread = await _notifService.getUnreadCount(forceRefresh: forceFresh);
     if (mounted) {
       setState(() {
         _user = user;
@@ -423,6 +497,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
+    if (!_isLoading) _maybeShowNavigationTutorial();
     // Events/Sections/Profile stay alive so cached data survives tab switches.
     // Scan stays mounted after first open (camera paused while inactive).
     final screens = [
@@ -490,14 +565,30 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                           children: [
-                            _buildNavItem(Icons.home_rounded, 'Home', 0),
+                            _buildNavItem(
+                              Icons.home_rounded,
+                              'Home',
+                              0,
+                              tutorialKey: _homeNavTutorialKey,
+                            ),
                             _buildNavItem(
                               Icons.event_note_rounded,
                               'Events',
                               1,
+                              tutorialKey: _eventsNavTutorialKey,
                             ),
-                            _buildNavItem(Icons.groups_rounded, 'Blocks', 3),
-                            _buildNavItem(Icons.person_rounded, 'Profile', 4),
+                            _buildNavItem(
+                              Icons.groups_rounded,
+                              'Blocks',
+                              3,
+                              tutorialKey: _blocksNavTutorialKey,
+                            ),
+                            _buildNavItem(
+                              Icons.person_rounded,
+                              'Profile',
+                              4,
+                              tutorialKey: _profileNavTutorialKey,
+                            ),
                           ],
                         ),
                       ),
@@ -505,6 +596,7 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                     const SizedBox(width: 12),
                     // Separate QR Button
                     GestureDetector(
+                      key: _scanNavTutorialKey,
                       onTap: () => setState(() {
                         _scanVisited = true;
                         _currentIndex = 2;
@@ -540,9 +632,15 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildNavItem(IconData icon, String label, int index) {
+  Widget _buildNavItem(
+    IconData icon,
+    String label,
+    int index, {
+    GlobalKey? tutorialKey,
+  }) {
     final isActive = _currentIndex == index;
     return GestureDetector(
+      key: tutorialKey,
       onTap: () => setState(() => _currentIndex = index),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 300),
@@ -1101,8 +1199,9 @@ class _TeacherHomeState extends State<TeacherHome> with WidgetsBindingObserver {
                                         color: Colors.white,
                                         border: isToday
                                             ? Border.all(
-                                                color: _teacherDark
-                                                    .withValues(alpha: 0.35),
+                                                color: _teacherDark.withValues(
+                                                  alpha: 0.35,
+                                                ),
                                                 width: 0.5,
                                               )
                                             : null,

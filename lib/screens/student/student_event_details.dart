@@ -55,12 +55,35 @@ class _EventDetailsSnapshot {
 class StudentEventDetails extends StatefulWidget {
   final String eventId;
   final Map<String, dynamic>? initialEvent;
+  final bool tutorialDemo;
 
   const StudentEventDetails({
     super.key,
     required this.eventId,
     this.initialEvent,
+    this.tutorialDemo = false,
   });
+
+  static Map<String, dynamic> tutorialSampleEvent() {
+    final start = DateTime.now().add(const Duration(days: 14));
+    return {
+      'id': 'tutorial-sample-event',
+      'title': 'CCS Student Orientation (Sample)',
+      'description':
+          'This sample event demonstrates the registration and ticket flow. It will not be submitted.',
+      'event_type': 'Seminar',
+      'location': 'CCS Main Hall',
+      'start_at': start.toIso8601String(),
+      'end_at': start.add(const Duration(hours: 2)).toIso8601String(),
+      'event_for': 'all',
+      'event_span': '',
+      'grace_time': 30,
+      'status': 'published',
+      'is_free_event': true,
+      'registration_limit': 300,
+      'registered_count': 42,
+    };
+  }
 
   /// Clears in-memory CTA cache (logout / account switch).
   static void clearUiCache([String? eventId]) {
@@ -137,6 +160,15 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _hydrateInitialEventOnly();
+    if (widget.tutorialDemo) {
+      _event ??= StudentEventDetails.tutorialSampleEvent();
+      _isLoading = false;
+      _eventCoverResolved = true;
+      _isRegistrationResolved = true;
+      _canRegisterNow = true;
+      _participantCount = 42;
+      return;
+    }
     unawaited(_hydrateFromUserCache());
     _eventLiveSubscription = EventLiveService.instance.changes.listen(
       _onLiveEventPulse,
@@ -216,8 +248,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     if (widget.initialEvent != null) {
       _event = Map<String, dynamic>.from(widget.initialEvent!);
       _isLoading = false;
-      _eventCoverResolved =
-          (_event?['cover_image_url']?.toString() ?? '').trim().isNotEmpty;
+      _eventCoverResolved = (_event?['cover_image_url']?.toString() ?? '')
+          .trim()
+          .isNotEmpty;
       // Event list data has no per-user payment/doc state — wait for load.
       _isRegistrationResolved = false;
       _approvalRequired = false;
@@ -251,13 +284,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
     setState(() {
       _isLoading = false;
-      _eventCoverResolved =
-          (_event?['cover_image_url']?.toString() ?? '').trim().isNotEmpty;
+      _eventCoverResolved = (_event?['cover_image_url']?.toString() ?? '')
+          .trim()
+          .isNotEmpty;
       final paid = _event != null && !_eventLooksFree(_event!);
-      if (paid &&
-          _approvalRequired &&
-          !_canRegisterNow &&
-          !_isRegistered) {
+      if (paid && _approvalRequired && !_canRegisterNow && !_isRegistered) {
         _isRegistrationResolved = true;
       } else if (_requirementsRequired &&
           !_requirementsApproved &&
@@ -294,8 +325,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     if (_approvalRequired &&
         !_canRegisterNow &&
         !_isRegistered &&
-        (_registrationMessage.isEmpty ||
-            !_registrationMessage.contains('₱'))) {
+        (_registrationMessage.isEmpty || !_registrationMessage.contains('₱'))) {
       _registrationMessage = _settlePaymentMessage(_event);
     }
     _hasStudentRequirements = snap.hasStudentRequirements;
@@ -342,7 +372,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       approvalRequired: _approvalRequired,
     );
 
-    _detailsCache[_detailsCacheKey(widget.eventId, _userId)] = _EventDetailsSnapshot(
+    _detailsCache[_detailsCacheKey(
+      widget.eventId,
+      _userId,
+    )] = _EventDetailsSnapshot(
       event: Map<String, dynamic>.from(event),
       sessions: _eventSessions
           .map((s) => Map<String, dynamic>.from(s))
@@ -391,6 +424,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (widget.tutorialDemo) return;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       _approvalRefreshTimer?.cancel();
@@ -414,7 +448,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     }
 
     // Poll much faster while docs are under review so approve feels instant.
-    final pendingReview = pendingDocs && _requirementsStatus == 'pending_review';
+    final pendingReview =
+        pendingDocs && _requirementsStatus == 'pending_review';
     final interval = pendingReview
         ? const Duration(seconds: 20)
         : const Duration(seconds: 60);
@@ -422,14 +457,17 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     _approvalRefreshTimer = Timer.periodic(interval, (_) {
       if (!mounted) return;
       final stillPending = _requirementsRequired && !_requirementsApproved;
-      if (!stillPending && (_isRegistered || _canRegisterNow || _isAccessDenied)) {
+      if (!stillPending &&
+          (_isRegistered || _canRegisterNow || _isAccessDenied)) {
         _approvalRefreshTimer?.cancel();
         return;
       }
       if (_requirementsStatus == 'pending_review' || stillPending) {
         _eventService.clearStudentRequirementsCache(widget.eventId);
       }
-      unawaited(_loadEvent(silent: true, forceFresh: stillPending && _isRegistered));
+      unawaited(
+        _loadEvent(silent: true, forceFresh: stillPending && _isRegistered),
+      );
     });
   }
 
@@ -647,13 +685,14 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       return Map<String, dynamic>.from(seed);
     }
 
-    final knownCover = [
-      baseEvent?['cover_image_url'],
-      seed?['cover_image_url'],
-      widget.initialEvent?['cover_image_url'],
-    ]
-        .map((value) => (value ?? '').toString().trim())
-        .firstWhere((value) => value.isNotEmpty, orElse: () => '');
+    final knownCover =
+        [
+              baseEvent?['cover_image_url'],
+              seed?['cover_image_url'],
+              widget.initialEvent?['cover_image_url'],
+            ]
+            .map((value) => (value ?? '').toString().trim())
+            .firstWhere((value) => value.isNotEmpty, orElse: () => '');
     if (knownCover.isNotEmpty &&
         (merged['cover_image_url'] ?? '').toString().trim().isEmpty) {
       merged['cover_image_url'] = knownCover;
@@ -686,15 +725,19 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     });
   }
 
-  Future<void> _loadEvent({bool silent = false, bool forceFresh = false}) async {
+  Future<void> _loadEvent({
+    bool silent = false,
+    bool forceFresh = false,
+  }) async {
     if (_isRefreshingEvent) {
       if (forceFresh) _pendingForceRefresh = true;
       return;
     }
     _isRefreshingEvent = true;
     final loadToken = ++_eventLoadToken;
-    final hasKnownCover =
-        (_event?['cover_image_url']?.toString() ?? '').trim().isNotEmpty;
+    final hasKnownCover = (_event?['cover_image_url']?.toString() ?? '')
+        .trim()
+        .isNotEmpty;
     if (mounted && !hasKnownCover) {
       setState(() => _eventCoverResolved = false);
     }
@@ -782,10 +825,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       }
 
       final requirementRows = await _eventService
-          .fetchEventStudentRequirementsList(
-            widget.eventId,
-            studentId: userId,
-          )
+          .fetchEventStudentRequirementsList(widget.eventId, studentId: userId)
           .timeout(
             const Duration(seconds: 6),
             onTimeout: () => <Map<String, dynamic>>[],
@@ -829,19 +869,21 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         }
       }
       _bindApprovalRealtime(userId);
-      final missingCover =
-          ((_event?['cover_image_url'] ?? '').toString().trim().isEmpty);
-    final results = await Future.wait([
+      final missingCover = ((_event?['cover_image_url'] ?? '')
+          .toString()
+          .trim()
+          .isEmpty);
+      final results = await Future.wait([
         _eventService.getEventById(
           widget.eventId,
           forceFresh: forceFresh || missingCover,
         ),
-      _eventService.isRegistered(widget.eventId, userId),
+        _eventService.isRegistered(widget.eventId, userId),
         _eventService.getEventRegistrationSettings(
           widget.eventId,
           forceFresh: forceFresh,
         ),
-      _eventService.getEventSessions(widget.eventId),
+        _eventService.getEventSessions(widget.eventId),
       ]).timeout(const Duration(seconds: 8));
 
       if (!mounted || loadToken != _eventLoadToken) return;
@@ -850,13 +892,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final isRegisteredResult = results[1] as bool;
       var isReg = isRegisteredResult;
       final registrationSettings = results[2] as Map<String, dynamic>?;
-    final sessions = results[3] as List<Map<String, dynamic>>;
+      final sessions = results[3] as List<Map<String, dynamic>>;
       final event = _mergeEventData(baseEvent, registrationSettings);
 
       // Paint event content ASAP. If payment just cleared and registration flips
       // true, keep CTA unresolved until docs gate is known (no See Ticket flash).
       if (mounted && loadToken == _eventLoadToken) {
-      setState(() {
+        setState(() {
           if (event.isNotEmpty) {
             _event = {
               ...?_event,
@@ -873,9 +915,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           }
           _eventSessions = sessions;
           final becameRegistered = isReg && !_isRegistered;
-        _isRegistered = isReg;
-          final looksPaid =
-              event.isNotEmpty ? !_eventLooksFree(event) : false;
+          _isRegistered = isReg;
+          final looksPaid = event.isNotEmpty ? !_eventLooksFree(event) : false;
           if (becameRegistered &&
               (looksPaid || _hasStudentRequirements) &&
               !_requirementsApproved) {
@@ -1035,7 +1076,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final resolvedCount = isReg && count < _participantCount
           ? _participantCount
           : count;
-      final isRegistrationClosed = !isReg &&
+      final isRegistrationClosed =
+          !isReg &&
           (_eventService.isEventAtCapacity(
                 event.isNotEmpty ? event : null,
                 participantCount: resolvedCount,
@@ -1043,7 +1085,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
               (event.isNotEmpty && isEventRegistrationWindowClosed(event)));
 
       // Payment must be settled before documents for paid events.
-      final paymentPending = !isReg &&
+      final paymentPending =
+          !isReg &&
           (approvalRequired ||
               (eventLooksPaid && !paymentCleared && availability.isNotEmpty) ||
               (eventLooksPaid && availability.isEmpty));
@@ -1104,7 +1147,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
       if (isRegistrationClosed) {
         canRegisterNow = false;
-        registrationMessage = _eventService.isEventAtCapacity(
+        registrationMessage =
+            _eventService.isEventAtCapacity(
               event.isNotEmpty ? event : null,
               participantCount: resolvedCount,
             )
@@ -1114,14 +1158,16 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
       // Free-event availability timed out: do not resolve as "Registration Closed".
       // Capacity / date-window closes are already known via isRegistrationClosed.
-      final availabilityUnknown = !isReg &&
+      final availabilityUnknown =
+          !isReg &&
           !eventLooksPaid &&
           !approvalRequired &&
           availability.isEmpty &&
           !isRegistrationClosed &&
           !accessDenied &&
           !(requirementsRequired && !requirementsApproved);
-      final needsDocStatus = isReg &&
+      final needsDocStatus =
+          isReg &&
           !isRegistrationClosed &&
           (requirementRows.isNotEmpty ||
               hasStudentRequirements ||
@@ -1129,9 +1175,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
               _hasStudentRequirements ||
               eventLooksPaid);
       final reqInfoOk = reqInfo['ok'] == true;
-      final docsGateUnknown = needsDocStatus &&
-          !reqInfoOk &&
-          !(silent && _isRegistrationResolved);
+      final docsGateUnknown =
+          needsDocStatus && !reqInfoOk && !(silent && _isRegistrationResolved);
       final registrationResolved =
           (!availabilityUnknown || canRegisterNow || isReg) && !docsGateUnknown;
 
@@ -1161,12 +1206,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         setState(() {
           if (!unchanged || _event == null) {
             if (nextEvent != null) {
-              _event = {
-                ...?_event,
-                ...nextEvent,
-              };
+              _event = {...?_event, ...nextEvent};
             }
-        _eventSessions = sessions;
+            _eventSessions = sessions;
             _participantCount = resolvedCount;
             _hasStudentRequirements = hasStudentRequirements;
           }
@@ -1185,8 +1227,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             // Stay on Checking... / Loading... — retry shortly.
             _isRegistrationResolved = false;
           }
-        _isLoading = false;
-      });
+          _isLoading = false;
+        });
         if (registrationResolved) {
           _storeDetailsSnapshot();
         }
@@ -1219,9 +1261,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     if (_event == null || _isOpeningRequirements) return;
     if (_isRegistrationClosedForEvent()) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_registrationClosedMessage())),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(_registrationClosedMessage())));
       }
       return;
     }
@@ -1269,6 +1311,16 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   }
 
   Future<void> _handlePrimaryAction() async {
+    if (widget.tutorialDemo) {
+      setState(() {
+        _isRegistered = true;
+        _canRegisterNow = false;
+        _participantCount++;
+      });
+      Navigator.of(context).pop(true);
+      return;
+    }
+
     // Hard lock while gates are still loading / refreshing.
     if (!_isRegistrationResolved || _isRefreshingEvent) return;
     if (_isPrimaryActionInProgress) return;
@@ -1280,7 +1332,12 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       // Paid: settle payment before any document / register CTA.
       if (_approvalRequired && !_canRegisterNow && !_isRegistered) {
         if (mounted) {
-          AppSnackBar.warning(context, _registrationMessage.isNotEmpty ? _registrationMessage : _settlePaymentMessage());
+          AppSnackBar.warning(
+            context,
+            _registrationMessage.isNotEmpty
+                ? _registrationMessage
+                : _settlePaymentMessage(),
+          );
         }
         return;
       }
@@ -1300,7 +1357,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
       if (_isRegistrationClosedForEvent()) {
         if (mounted) {
-        AppSnackBar.warning(context, _registrationClosedMessage());
+          AppSnackBar.warning(context, _registrationClosedMessage());
         }
         return;
       }
@@ -1308,10 +1365,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id') ?? '';
       if (userId.isNotEmpty) {
-        final requirements = await _eventService.fetchEventStudentRequirementsList(
-          widget.eventId,
-          studentId: userId,
-        );
+        final requirements = await _eventService
+            .fetchEventStudentRequirementsList(
+              widget.eventId,
+              studentId: userId,
+            );
         if (requirements.isNotEmpty) {
           final reqInfo = await _eventService.getStudentRequirementsInfo(
             widget.eventId,
@@ -1341,7 +1399,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           if (!approved) {
             if (status == 'pending_review') {
               if (mounted) {
-                AppSnackBar.info(context, 'Your documents are under review. Wait for teacher approval.');
+                AppSnackBar.info(
+                  context,
+                  'Your documents are under review. Wait for teacher approval.',
+                );
               }
               return;
             }
@@ -1364,7 +1425,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   }
 
   String _primaryActionLabel() {
-    final registrationPaused = _isRegistrationResolved &&
+    final registrationPaused =
+        _isRegistrationResolved &&
         !_isRegistered &&
         !_canRegisterNow &&
         !_approvalRequired &&
@@ -1395,9 +1457,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
   /// Gold is reserved for See Ticket only — docs/register stay maroon.
   bool get _isTicketPrimaryAction =>
-      _isRegistrationResolved &&
-      _isRegistered &&
-      !_docsGateBlocksTicket;
+      _isRegistrationResolved && _isRegistered && !_docsGateBlocksTicket;
 
   /// True when the student must finish docs before ticket — including the
   /// short window right after payment where `_isRegistered` is already true
@@ -1446,8 +1506,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       _requirementsStatus != 'pending_review';
 
   bool _eventLooksFree(Map<String, dynamic> event) {
-    final freeRaw =
-        (event['is_free_event'] ?? true).toString().trim().toLowerCase();
+    final freeRaw = (event['is_free_event'] ?? true)
+        .toString()
+        .trim()
+        .toLowerCase();
     return freeRaw == 'true' ||
         freeRaw == '1' ||
         freeRaw == 't' ||
@@ -1522,7 +1584,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       await _loadEvent(silent: true);
     }
 
-    final snapshot = await _eventService.getRegistrationSnapshot(widget.eventId);
+    final snapshot = await _eventService.getRegistrationSnapshot(
+      widget.eventId,
+    );
     if (snapshot != null && snapshot['is_full'] == true) {
       await _loadEvent(silent: true);
       if (mounted) {
@@ -1533,7 +1597,12 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
     if (_isAccessDenied || !_canRegisterNow) {
       if (mounted) {
-        AppSnackBar.warning(context, _registrationMessage.isNotEmpty ? _registrationMessage : 'You are not allowed to register for this event.');
+        AppSnackBar.warning(
+          context,
+          _registrationMessage.isNotEmpty
+              ? _registrationMessage
+              : 'You are not allowed to register for this event.',
+        );
       }
       return;
     }
@@ -1544,7 +1613,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
     if (result['requirements_required'] == true) {
       if (mounted) {
-    setState(() => _isRegistering = false);
+        setState(() => _isRegistering = false);
         await _handleRequirementsFlow();
       }
       return;
@@ -1554,9 +1623,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final nextCount = _participantCount + 1;
 
       if (mounted) {
-      setState(() {
+        setState(() {
           _isRegistering = false;
-        _isRegistered = true;
+          _isRegistered = true;
           _canRegisterNow = false;
           _approvalRequired = false;
           _registrationMessage = '';
@@ -1585,11 +1654,26 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
     if (mounted) {
       setState(() => _isRegistering = false);
-      AppSnackBar.error(context, result['error'] as String? ?? 'Registration failed');
+      AppSnackBar.error(
+        context,
+        result['error'] as String? ?? 'Registration failed',
+      );
     }
   }
 
   Future<void> _handleViewTicket() async {
+    if (widget.tutorialDemo) {
+      await Navigator.of(context).push<void>(
+        AppPageRoute<void>(
+          builder: (_) => StudentTicketView(
+            ticket: StudentTicketView.tutorialSampleTicket(),
+            tutorialDemo: true,
+          ),
+        ),
+      );
+      return;
+    }
+
     setState(() => _isRegistering = true); // reuse loading state
 
     try {
@@ -1604,20 +1688,24 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         setState(() => _isRegistering = false);
         Navigator.push(
           context,
-          AppPageRoute(
-            builder: (_) => StudentTicketView(ticket: myTicket),
-          ),
+          AppPageRoute(builder: (_) => StudentTicketView(ticket: myTicket)),
         );
       } else {
         if (mounted) {
           setState(() => _isRegistering = false);
-          AppSnackBar.error(context, 'Could not load ticket details. Please check your network connection.');
+          AppSnackBar.error(
+            context,
+            'Could not load ticket details. Please check your network connection.',
+          );
         }
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isRegistering = false);
-        AppSnackBar.error(context, 'Connection timeout or error. Please try again.');
+        AppSnackBar.error(
+          context,
+          'Connection timeout or error. Please try again.',
+        );
       }
     }
   }
@@ -1696,8 +1784,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final startAt = _event!['start_at'] as String?;
     final endAt = _event!['end_at'] as String?;
     final eventType = _event!['event_type'] as String? ?? '';
-    final coverImageUrl =
-        (_event!['cover_image_url'] as String? ?? '').trim();
+    final coverImageUrl = (_event!['cover_image_url'] as String? ?? '').trim();
     final eventFor = (_event!['event_for'] as String?)?.trim() ?? 'all';
     final eventSpan = _event!['event_span'] as String? ?? '';
     final graceTime = _event!['grace_time']?.toString() ?? '';
@@ -1705,7 +1792,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final startDate = parseStoredEventDateTime(startAt);
     final endDate = parseStoredEventDateTime(endAt);
 
-    final isRegistrationClosed = _isRegistrationClosedForEvent() ||
+    final isRegistrationClosed =
+        _isRegistrationClosedForEvent() ||
         (_isRegistrationResolved &&
             !_isRegistered &&
             !_canRegisterNow &&
@@ -1739,14 +1827,12 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         _isRegistrationResolved &&
         !_isDocumentsUnderReview &&
         (
-          // See Ticket — only when docs are approved / not required
-          (_isRegistered && !_docsGateBlocksTicket) ||
-          // Submit / Resubmit documents (never while payment still required)
-          (_needsRequirementsAction && !_approvalRequired) ||
-          // Register only (settle payment stays non-tappable info CTA)
-          (!_isRegistered &&
-              !isRegistrationClosed &&
-              _canRegisterNow));
+        // See Ticket — only when docs are approved / not required
+        (_isRegistered && !_docsGateBlocksTicket) ||
+            // Submit / Resubmit documents (never while payment still required)
+            (_needsRequirementsAction && !_approvalRequired) ||
+            // Register only (settle payment stays non-tappable info CTA)
+            (!_isRegistered && !isRegistrationClosed && _canRegisterNow));
     final isActionDisabled =
         _isDocumentsUnderReview ||
         !_isRegistrationResolved ||
@@ -1754,7 +1840,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             (isRegistrationClosed ||
                 (!_canRegisterNow && !_needsRequirementsAction)));
     // Loader until we know the real per-user CTA.
-    final isCtaLoading = _isRegistering ||
+    final isCtaLoading =
+        _isRegistering ||
         _isPrimaryActionInProgress ||
         _isOpeningRequirements ||
         !_isRegistrationResolved;
@@ -1772,10 +1859,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         color: Colors.white,
         child: CustomScrollView(
           clipBehavior: Clip.hardEdge,
-        slivers: [
-          SliverAppBar(
+          slivers: [
+            SliverAppBar(
               expandedHeight: coverExpandedHeight,
-            pinned: true,
+              pinned: true,
               stretch: true,
               elevation: 0,
               scrolledUnderElevation: 0,
@@ -1791,8 +1878,8 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                   final minH = coverCollapsedHeight;
                   final maxH = coverExpandedHeight;
                   final range = (maxH - minH).clamp(1.0, 1000.0);
-                  final expandT =
-                      ((constraints.maxHeight - minH) / range).clamp(0.0, 1.0);
+                  final expandT = ((constraints.maxHeight - minH) / range)
+                      .clamp(0.0, 1.0);
                   final collapseT = 1.0 - expandT;
 
                   return Stack(
@@ -1827,9 +1914,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                       // Scrim: stronger when collapsed so toolbar icons stay readable
                       DecoratedBox(
                         decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
                             colors: [
                               Color.lerp(
                                 const Color(0x66000000),
@@ -1901,28 +1988,28 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                               textAlign: TextAlign.left,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ),
-            ),
+                            ),
+                          ),
+                        ),
+                      ),
                       // Back button
                       Positioned(
                         left: 8,
                         top: topInset + 4,
                         child: IconButton(
-              icon: Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
+                          icon: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
                               color: Colors.black.withValues(alpha: 0.35),
-                  borderRadius: BorderRadius.circular(12),
-                ),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
                             child: const Icon(
                               Icons.arrow_back_ios_rounded,
                               size: 18,
                               color: Colors.white,
                             ),
-              ),
-              onPressed: () => Navigator.pop(context),
+                          ),
+                          onPressed: () => Navigator.pop(context),
                         ),
                       ),
                       // White left/right curve cut — painted ON TOP of cover so it's visible
@@ -1954,117 +2041,149 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             ),
 
             // Flat white sheet — curve lives only on the cover so no black crescent cut
-          SliverToBoxAdapter(
+            SliverToBoxAdapter(
               child: Container(
                 color: Colors.white,
                 padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Event Type Badge
-                  if (eventType.isNotEmpty)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (widget.tutorialDemo)
+                      Container(
+                        width: double.infinity,
+                        margin: const EdgeInsets.only(bottom: 18),
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFF7E6),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: const Color(0xFFF4D58D)),
+                        ),
+                        child: const Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              Icons.school_rounded,
+                              color: Color(0xFF9A5B00),
+                            ),
+                            SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                'Tap Register to continue to your ticket.',
+                                style: TextStyle(
+                                  color: Color(0xFF754400),
+                                  fontSize: 13,
+                                  height: 1.4,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
-                      margin: const EdgeInsets.only(bottom: 16),
-                      decoration: BoxDecoration(
-                        color: _getEventTypeColor(
-                          eventType,
-                        ).withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            _getEventTypeIcon(eventType),
-                            size: 16,
-                            color: _getEventTypeColor(eventType),
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
+                    // Event Type Badge
+                    if (eventType.isNotEmpty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        margin: const EdgeInsets.only(bottom: 16),
+                        decoration: BoxDecoration(
+                          color: _getEventTypeColor(
                             eventType,
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w700,
+                          ).withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              _getEventTypeIcon(eventType),
+                              size: 16,
                               color: _getEventTypeColor(eventType),
                             ),
-                          ),
-                        ],
+                            const SizedBox(width: 6),
+                            Text(
+                              eventType,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: _getEventTypeColor(eventType),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
+
+                    _buildTopStatsGrid(
+                      registrationStatusLabel: registrationStatusLabel,
+                      eventSpan: eventSpan,
                     ),
 
-                  _buildTopStatsGrid(
-                    registrationStatusLabel: registrationStatusLabel,
-                    eventSpan: eventSpan,
-                  ),
+                    const SizedBox(height: 28),
 
-                  const SizedBox(height: 28),
-
-                  // Event Schedule & Info (aligned with website layout)
-                  const Text(
-                    'Event Schedule & Info',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFF1F2937),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  _buildScheduleInfoGrid(
-                    startDate: startDate,
-                    endDate: endDate,
-                    location: location,
-                    eventType: eventType,
-                    eventFor: eventFor,
-                    graceTime: graceTime,
-                    event: _event!,
-                    ),
-                  if (usesSessions) ...[
-                    const SizedBox(height: 12),
+                    // Event Schedule & Info (aligned with website layout)
                     const Text(
-                      'Seminar Sessions',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFF1F2937),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    _buildSessionScheduleSection(),
-                  ],
-
-                  const SizedBox(height: 28),
-
-                  // Description
-                  if (description.isNotEmpty) ...[
-                    const Text(
-                      'Event Description',
+                      'Event Schedule & Info',
                       style: TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.w800,
                         color: Color(0xFF1F2937),
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    Text(
-                      description,
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Colors.grey.shade700,
-                        height: 1.6,
-                      ),
+                    const SizedBox(height: 16),
+                    _buildScheduleInfoGrid(
+                      startDate: startDate,
+                      endDate: endDate,
+                      location: location,
+                      eventType: eventType,
+                      eventFor: eventFor,
+                      graceTime: graceTime,
+                      event: _event!,
                     ),
+                    if (usesSessions) ...[
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Seminar Sessions',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF1F2937),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      _buildSessionScheduleSection(),
+                    ],
+
+                    const SizedBox(height: 28),
+
+                    // Description
+                    if (description.isNotEmpty) ...[
+                      const Text(
+                        'Event Description',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF1F2937),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        description,
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Colors.grey.shade700,
+                          height: 1.6,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 40),
                   ],
-                  const SizedBox(height: 40),
-                ],
+                ),
               ),
             ),
-          ),
-        ],
-      ),
+          ],
+        ),
       ),
       // Bottom Register/Ticket Button
       bottomNavigationBar: Container(
@@ -2090,7 +2209,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                     isRegistrationClosed ||
                     !_canRegisterNow)) ...[
               Container(
-          width: double.infinity,
+                width: double.infinity,
                 margin: const EdgeInsets.only(bottom: 12),
                 padding: const EdgeInsets.symmetric(
                   horizontal: 14,
@@ -2151,48 +2270,48 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 280),
                 curve: Curves.easeOutCubic,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              gradient: LinearGradient(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
+                  gradient: LinearGradient(
                     colors: _isTicketPrimaryAction
-                    ? [const Color(0xFFD4A843), const Color(0xFFB8942F)]
+                        ? [const Color(0xFFD4A843), const Color(0xFFB8942F)]
                         : (useDisabledGradient
                               ? const [Color(0xFFE5E7EB), Color(0xFFD1D5DB)]
                               : [
                                   _studentDark(context),
                                   _studentPrimary(context),
                                 ]),
-              ),
-              boxShadow: [
-                BoxShadow(
+                  ),
+                  boxShadow: [
+                    BoxShadow(
                       color:
                           (_isTicketPrimaryAction
-                          ? const Color(0xFFD4A843)
+                                  ? const Color(0xFFD4A843)
                                   : (useDisabledGradient
                                         ? const Color(0xFF9CA3AF)
                                         : _studentPrimary(context)))
-                      .withValues(alpha: 0.3),
-                  blurRadius: 15,
-                  offset: const Offset(0, 4),
+                              .withValues(alpha: 0.3),
+                      blurRadius: 15,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            child: ElevatedButton(
+                child: ElevatedButton(
                   // Avoid Material "disabled" gray styling on the loader —
                   // use a no-op while loading so the maroon CTA stays branded.
                   onPressed: canTapAction
                       ? _handlePrimaryAction
                       : (isCtaLoading ? () {} : null),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.transparent,
-                shadowColor: Colors.transparent,
-                foregroundColor: Colors.white,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.transparent,
+                    shadowColor: Colors.transparent,
+                    foregroundColor: Colors.white,
                     disabledForegroundColor: const Color(0xFF6B7280),
-                padding: const EdgeInsets.symmetric(vertical: 18),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                ),
-              ),
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
                   child: isCtaLoading
                       ? const PulseConnectLoader(size: 14, color: Colors.white)
                       : AnimatedSwitcher(
@@ -2204,29 +2323,26 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                               _isTicketPrimaryAction
                                   ? 'ticket_action'
                                   : (_needsRequirementsAction ||
-                                          (_requirementsRequired &&
-                                              !_requirementsApproved)
+                                            (_requirementsRequired &&
+                                                !_requirementsApproved)
                                         ? 'requirements_action'
                                         : 'register_action'),
                             ),
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(
-                                _primaryActionIcon(),
-                          size: 20,
-                        ),
-                        const SizedBox(width: 10),
-                        Text(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(_primaryActionIcon(), size: 20),
+                              const SizedBox(width: 10),
+                              Text(
                                 _primaryActionLabel(),
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
-                    ),
-            ),
-          ),
+                ),
               ),
             ),
           ],
@@ -2254,19 +2370,16 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [
-            _studentDark(context),
-            _studentPrimary(context),
-          ],
+          colors: [_studentDark(context), _studentPrimary(context)],
         ),
       ),
       child: Center(
         child: Padding(
           padding: const EdgeInsets.only(bottom: 48),
-      child: Container(
+          child: Container(
             width: 64,
             height: 64,
-        decoration: BoxDecoration(
+            decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: Colors.white.withValues(alpha: 0.1),
               border: Border.all(
@@ -2330,9 +2443,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
               : 'Single',
           'Span',
           itemWidth,
-      ),
-    );
-  }
+        ),
+      );
+    }
 
     return Wrap(spacing: spacing, runSpacing: spacing, children: items);
   }
@@ -2347,13 +2460,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       width: width,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-            decoration: BoxDecoration(
-              color: const Color(0xFFFFF1F2),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFF1F2),
           borderRadius: BorderRadius.circular(16),
           border: Border.all(color: const Color(0xFFFECDD3)),
-            ),
-            child: Column(
-              children: [
+        ),
+        child: Column(
+          children: [
             Icon(icon, color: _studentPrimary(context), size: 22),
             const SizedBox(height: 6),
             AnimatedSwitcher(
@@ -2362,7 +2475,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                 value,
                 key: ValueKey('$label-$value'),
                 textAlign: TextAlign.center,
-                  style: TextStyle(
+                style: TextStyle(
                   fontWeight: FontWeight.w800,
                   fontSize: 14,
                   color: _studentPrimary(context),
@@ -2370,18 +2483,18 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 softWrap: true,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
               label,
               textAlign: TextAlign.center,
               style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-                ),
-              ],
             ),
+          ],
+        ),
       ),
     );
   }
@@ -2522,8 +2635,12 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       ),
     ]);
 
-    final freeRaw = (event['is_free_event'] ?? true).toString().trim().toLowerCase();
-    final isFreeEvent = freeRaw == 'true' ||
+    final freeRaw = (event['is_free_event'] ?? true)
+        .toString()
+        .trim()
+        .toLowerCase();
+    final isFreeEvent =
+        freeRaw == 'true' ||
         freeRaw == '1' ||
         freeRaw == 't' ||
         freeRaw == 'yes' ||
@@ -2718,11 +2835,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           .where((e) => ['1', '2', '3', '4'].contains(e))
           .toList();
       const yearLabel = {
-      '1': '1st Year',
-      '2': '2nd Year',
-      '3': '3rd Year',
-      '4': '4th Year',
-    };
+        '1': '1st Year',
+        '2': '2nd Year',
+        '3': '3rd Year',
+        '4': '4th Year',
+      };
       final years = yearsRaw.isEmpty
           ? 'All Levels'
           : yearsRaw.map((y) => yearLabel[y] ?? y).join(', ');

@@ -17,7 +17,14 @@ import '../../utils/course_theme_utils.dart';
 import '../../utils/app_page_routes.dart';
 
 class StudentEvents extends StatefulWidget {
-  const StudentEvents({super.key});
+  final Map<String, dynamic>? tutorialEvent;
+  final GlobalKey? tutorialTargetKey;
+
+  const StudentEvents({
+    super.key,
+    this.tutorialEvent,
+    this.tutorialTargetKey,
+  });
 
   @override
   State<StudentEvents> createState() => _StudentEventsState();
@@ -521,6 +528,16 @@ class _StudentEventsState extends State<StudentEvents>
   Widget build(BuildContext context) {
     final primaryColor = Theme.of(context).colorScheme.primary;
     final primaryDark = CourseThemeUtils.studentChromeFromPrimary(primaryColor);
+    final tutorialEvent = widget.tutorialEvent;
+    final visibleActiveEvents = tutorialEvent == null
+        ? _filteredActive
+        : <Map<String, dynamic>>[
+            tutorialEvent,
+            ..._filteredActive.where(
+              (event) =>
+                  event['id']?.toString() != tutorialEvent['id']?.toString(),
+            ),
+          ];
     return Scaffold(
       backgroundColor: const Color(0xFFF9FAFB),
       appBar: AppBar(
@@ -613,13 +630,13 @@ class _StudentEventsState extends State<StudentEvents>
           ),
         ),
       ),
-      body: _isLoading
+      body: _isLoading && tutorialEvent == null
           ? const Center(child: PulseConnectLoader())
           : TabBarView(
               controller: _tabController,
               children: [
                 _buildEventList(
-                  _filteredActive,
+                  visibleActiveEvents,
                   'No active events found',
                   isExpiredTab: false,
                 ),
@@ -696,7 +713,20 @@ class _StudentEventsState extends State<StudentEvents>
         itemCount: events.length,
         itemBuilder: (context, index) {
           final event = events[index];
-          return _buildEventCard(event, showEvaluationActions: isExpiredTab);
+          final card = _buildEventCard(
+            event,
+            showEvaluationActions: isExpiredTab,
+          );
+          if (!isExpiredTab &&
+              widget.tutorialTargetKey != null &&
+              event['id']?.toString() ==
+                  widget.tutorialEvent?['id']?.toString()) {
+            return KeyedSubtree(
+              key: widget.tutorialTargetKey,
+              child: card,
+            );
+          }
+          return card;
         },
       ),
     );
