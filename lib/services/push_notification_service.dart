@@ -114,12 +114,14 @@ Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
 }
 
 class PushNotificationService {
-  static final PushNotificationService _instance = PushNotificationService._internal();
+  static final PushNotificationService _instance =
+      PushNotificationService._internal();
   factory PushNotificationService() => _instance;
   PushNotificationService._internal();
 
   final FirebaseMessaging _firebaseMessaging = FirebaseMessaging.instance;
-  final FlutterLocalNotificationsPlugin _localNotificationsPlugin = FlutterLocalNotificationsPlugin();
+  final FlutterLocalNotificationsPlugin _localNotificationsPlugin =
+      FlutterLocalNotificationsPlugin();
 
   AuthService get _authService => AuthService();
   EventService get _eventService => EventService();
@@ -201,13 +203,12 @@ class PushNotificationService {
 
     if (settings.authorizationStatus == AuthorizationStatus.authorized ||
         settings.authorizationStatus == AuthorizationStatus.provisional) {
-      
       // 3. Handle notification taps (When app is in background but not terminated)
       FirebaseMessaging.onMessageOpenedApp.listen(_handleNotificationClick);
 
       // 4. Cold start from notification — stash until navigator + session are ready.
-      final RemoteMessage? initialMessage =
-          await _firebaseMessaging.getInitialMessage();
+      final RemoteMessage? initialMessage = await _firebaseMessaging
+          .getInitialMessage();
       if (initialMessage != null) {
         final data = _normalizePushData(initialMessage.data);
         if (data.isNotEmpty) {
@@ -221,10 +222,10 @@ class PushNotificationService {
 
       const DarwinInitializationSettings iosInitSettings =
           DarwinInitializationSettings(
-        requestAlertPermission: true,
-        requestBadgePermission: true,
-        requestSoundPermission: true,
-      );
+            requestAlertPermission: true,
+            requestBadgePermission: true,
+            requestSoundPermission: true,
+          );
 
       const InitializationSettings initSettings = InitializationSettings(
         android: androidInitSettings,
@@ -252,7 +253,9 @@ class PushNotificationService {
       );
 
       await _localNotificationsPlugin
-          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >()
           ?.createNotificationChannel(channel);
 
       // 4. Foreground message listener — show local notification popup
@@ -263,13 +266,19 @@ class PushNotificationService {
           return;
         }
 
-        final route = (message.data['route']?.toString() ?? '').trim().toLowerCase();
+        final route = (message.data['route']?.toString() ?? '')
+            .trim()
+            .toLowerCase();
         final eventId = (message.data['event_id']?.toString() ?? '').trim();
-        final type = (message.data['type']?.toString() ?? '').trim().toLowerCase();
+        final type = (message.data['type']?.toString() ?? '')
+            .trim()
+            .toLowerCase();
 
         // Sync UI first (before local notification work) so lists/bell don't
         // lag behind the system tray banner.
-        debugPrint('[FCM] Foreground push type=$type event=$eventId — syncing UI');
+        debugPrint(
+          '[FCM] Foreground push type=$type event=$eventId — syncing UI',
+        );
         if ((type == 'student_requirements_approved' ||
                 type == 'student_requirements_declined') &&
             eventId.isNotEmpty) {
@@ -287,18 +296,23 @@ class PushNotificationService {
 
         await _cacheRegistrationApprovalIfNeeded(message.data);
         RemoteNotification? notification = message.notification;
-        final payload = route == 'certificates' ||
+        final payload =
+            route == 'certificates' ||
                 type == 'certificate_ready' ||
                 type == 'certificate'
             ? 'route:certificates'
-            : (eventId.isNotEmpty
+            : ((type == 'eval_open' || route == 'evaluation') &&
+                      eventId.isNotEmpty
+                  ? jsonEncode(_normalizePushData(message.data))
+                  : eventId.isNotEmpty
                   ? (type == 'proposal_requirements_requested'
                         ? 'proposal_requirements_requested:$eventId'
                         : eventId)
                   : null);
 
-        final fallbackTitle =
-            route == 'certificates' ? 'Certificate Ready' : 'PulseConnect';
+        final fallbackTitle = route == 'certificates'
+            ? 'Certificate Ready'
+            : 'PulseConnect';
         final fallbackBody = route == 'certificates'
             ? 'Your certificate is now available. Open Certificates to view it.'
             : 'You have a new notification.';
@@ -406,7 +420,9 @@ class PushNotificationService {
           presentSound: true,
         ),
       ),
-      payload: (payload?.trim().isNotEmpty ?? false) ? payload!.trim() : eventId,
+      payload: (payload?.trim().isNotEmpty ?? false)
+          ? payload!.trim()
+          : eventId,
     );
   }
 
@@ -459,7 +475,9 @@ class PushNotificationService {
       final prefs = await SharedPreferences.getInstance();
       final userId = prefs.getString('user_id');
       if (userId == null || userId.isEmpty) {
-        debugPrint('[FCM] No user_id in SharedPreferences, skipping token save.');
+        debugPrint(
+          '[FCM] No user_id in SharedPreferences, skipping token save.',
+        );
         return;
       }
 
@@ -560,9 +578,24 @@ class PushNotificationService {
     }
   }
 
+  Map<String, String>? _decodeLocalNotificationPayload(String payload) {
+    try {
+      final decoded = jsonDecode(payload);
+      if (decoded is! Map) return null;
+      return decoded.map(
+        (key, value) => MapEntry(key.toString(), value?.toString() ?? ''),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<void> _handleLocalNotificationPayload(String payload) async {
+    final decodedPayload = _decodeLocalNotificationPayload(payload);
     final Map<String, String> data;
-    if (_isCertificatePayload(payload)) {
+    if (decodedPayload != null && decodedPayload.isNotEmpty) {
+      data = decodedPayload;
+    } else if (_isCertificatePayload(payload)) {
       data = {'route': 'certificates', 'type': 'certificate_ready'};
     } else if (_isProposalRequirementsPayload(payload)) {
       data = {
@@ -689,4 +722,3 @@ class PushNotificationService {
     return false;
   }
 }
-

@@ -1513,6 +1513,22 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     return sessionId.isEmpty ? null : sessionId;
   }
 
+  int? _activeScannerSessionRegistrationLimit() {
+    final payload = _activeOfflineValidationContext();
+    final context = payload?['context'];
+    final contextMap = context is Map<String, dynamic>
+        ? context
+        : (context is Map ? Map<String, dynamic>.from(context) : null);
+    final sessionRaw = contextMap?['session'];
+    final sessionMap = sessionRaw is Map<String, dynamic>
+        ? sessionRaw
+        : (sessionRaw is Map ? Map<String, dynamic>.from(sessionRaw) : null);
+    final limit = int.tryParse(
+      sessionMap?['registration_limit']?.toString() ?? '',
+    );
+    return limit != null && limit > 0 ? limit : null;
+  }
+
   String _activeScannerScanMode() {
     final payload = _activeOfflineValidationContext();
     final context = payload?['context'];
@@ -1548,12 +1564,12 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
     }
     final total = _attendanceTotal;
     final present = _attendancePresent;
-    if (total == null || present == null || total <= 0 || present >= total) {
+    if (total == null || present == null || (total > 0 && present >= total)) {
       return;
     }
     final next = present + 1;
     _attendancePresent = next;
-    _attendancePercent = (next / total) * 100;
+    _attendancePercent = total > 0 ? (next / total) * 100 : 0;
   }
 
   Future<void> _refreshAttendanceStats() async {
@@ -1586,9 +1602,15 @@ class _TeacherScanScreenState extends State<TeacherScanScreen>
       }
       if (res == null) return;
       final present = int.tryParse(res['present']?.toString() ?? '') ?? 0;
-      final total = int.tryParse(res['total']?.toString() ?? '') ?? 0;
-      final percent = double.tryParse(res['percent']?.toString() ?? '') ??
-          (total > 0 ? (present / total) * 100 : 0);
+      final responseTotal = int.tryParse(res['total']?.toString() ?? '') ?? 0;
+      final sessionLimit = _activeScannerSessionRegistrationLimit();
+      final total = responseTotal > 0
+          ? responseTotal
+          : (sessionLimit ?? responseTotal);
+      final responsePercent = double.tryParse(res['percent']?.toString() ?? '');
+      final percent = total > 0
+          ? (present / total * 100).clamp(0.0, 100.0).toDouble()
+          : (responsePercent ?? 0.0);
     setState(() {
         _attendancePresent = present;
         _attendanceTotal = total;

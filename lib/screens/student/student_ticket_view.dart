@@ -87,8 +87,14 @@ class _StudentTicketViewState extends State<StudentTicketView>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _liveAttendance = _attendanceFromTicket(widget.ticket);
-    _seminarAttendance = _seedSeminarRows(widget.ticket);
-    if (widget.tutorialDemo) return;
+    if (widget.tutorialDemo) {
+      _seminarAttendance = _seedSeminarRows(widget.ticket);
+      return;
+    }
+    // Do not render the unfiltered embedded session list before loading the
+    // student's assigned seminar(s).
+    _seminarAttendance = [];
+    _isLoadingSeminarAttendance = true;
 
     _loadSeminarAttendance();
     unawaited(_refreshAttendanceLive(force: true));
@@ -299,11 +305,16 @@ class _StudentTicketViewState extends State<StudentTicketView>
     if (mounted && _seminarAttendance.isEmpty) {
       setState(() => _isLoadingSeminarAttendance = true);
     }
-    final rows = await _eventService.getTicketSeminarAttendance(
-      eventId: eventId,
-      registrationId: registrationId,
-      ticketId: ticketId,
-    );
+    List<Map<String, dynamic>> rows;
+    try {
+      rows = await _eventService.getTicketSeminarAttendance(
+        eventId: eventId,
+        registrationId: registrationId,
+        ticketId: ticketId,
+      );
+    } catch (_) {
+      rows = [];
+    }
     if (!mounted) return;
 
     // Patch nested event flags when seminars exist so UI stays consistent.
@@ -1080,6 +1091,7 @@ class _StudentTicketViewState extends State<StudentTicketView>
     Map<String, dynamic> event,
   ) {
     if (_seminarAttendance.isNotEmpty) return _seminarAttendance;
+    if (_isLoadingSeminarAttendance || !widget.tutorialDemo) return const [];
     final embedded = event['sessions'];
     if (embedded is List && embedded.isNotEmpty) {
       return embedded

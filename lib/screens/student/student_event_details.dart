@@ -348,6 +348,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       event['registered_count']?.toString() ?? '',
       event['allow_registration']?.toString() ?? '',
       event['is_free_event']?.toString() ?? '',
+      event['registration_limit']?.toString() ?? '',
       isRegistered ? '1' : '0',
       participantCount.toString(),
       requirementsStatus,
@@ -659,7 +660,13 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           _event,
           participantCount: _participantCount,
         )) {
-      return 'Registration is full for this event.';
+      final isSessionEvent =
+          (_event?['event_mode']?.toString() ?? '').trim().toLowerCase() ==
+              'seminar_based' ||
+          _event?['uses_sessions'] == true;
+      return isSessionEvent
+          ? 'Registration is full for your assigned seminar.'
+          : 'Registration is full for this event.';
     }
     return 'Registration is closed for this event.';
   }
@@ -883,7 +890,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
           widget.eventId,
           forceFresh: forceFresh,
         ),
-        _eventService.getEventSessions(widget.eventId),
+        _eventService.getStudentEligibleEventSessions(widget.eventId, userId),
       ]).timeout(const Duration(seconds: 8));
 
       if (!mounted || loadToken != _eventLoadToken) return;
@@ -894,6 +901,25 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final registrationSettings = results[2] as Map<String, dynamic>?;
       final sessions = results[3] as List<Map<String, dynamic>>;
       final event = _mergeEventData(baseEvent, registrationSettings);
+      final eventMode = (event['event_mode']?.toString() ?? '')
+          .trim()
+          .toLowerCase();
+      final eventStructure = (event['event_structure']?.toString() ?? '')
+          .trim()
+          .toLowerCase();
+      final isSessionEvent =
+          sessions.isNotEmpty ||
+          eventMode == 'seminar_based' ||
+          eventStructure == 'one_seminar' ||
+          eventStructure == 'two_seminars';
+      final hasSingleEligibleSession = isSessionEvent && sessions.length == 1;
+      if (hasSingleEligibleSession) {
+        final assignedSession = sessions.first;
+        event['registration_limit'] =
+            assignedSession.containsKey('registration_limit')
+            ? assignedSession['registration_limit']
+            : null;
+      }
 
       // Paint event content ASAP. If payment just cleared and registration flips
       // true, keep CTA unresolved until docs gate is known (no See Ticket flash).
@@ -903,16 +929,20 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             _event = {
               ...?_event,
               ...event,
-              if (sessions.isNotEmpty) ...{
+              if (isSessionEvent) ...{
                 'event_mode': 'seminar_based',
                 'uses_sessions': true,
-                'event_structure': sessions.length > 1
-                    ? 'two_seminars'
-                    : 'one_seminar',
-                'session_count': sessions.length,
+                'registered_count': 0,
+                if (sessions.isNotEmpty) ...{
+                  'event_structure': sessions.length > 1
+                      ? 'two_seminars'
+                      : 'one_seminar',
+                  'session_count': sessions.length,
+                },
               },
             };
           }
+          if (isSessionEvent) _participantCount = 0;
           _eventSessions = sessions;
           final becameRegistered = isReg && !_isRegistered;
           _isRegistered = isReg;
@@ -932,7 +962,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       List<dynamic> secondary;
       try {
         secondary = await Future.wait([
-          _eventService.getRegistrationSnapshot(widget.eventId),
+          _eventService.getRegistrationSnapshot(
+            widget.eventId,
+            studentId: userId,
+          ),
           _eventService.getParticipantCount(
             widget.eventId,
             eventHint: event.isNotEmpty ? event : null,
@@ -990,9 +1023,35 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
       if (!mounted || loadToken != _eventLoadToken) return;
       final snapshot = secondary[0] as Map<String, dynamic>?;
-      final count = secondary[1] as int;
+      var fetchedCount = secondary[1] as int;
+      final snapshotSessionCount = int.tryParse(
+        snapshot?['session_registration_count']?.toString() ??
+            snapshot?['registration_count']?.toString() ??
+            '',
+      );
       final ticket = secondary[2] as Map<String, dynamic>;
       final availability = secondary[3] as Map<String, dynamic>;
+      final sessionScoped =
+          snapshot?['session_scoped'] == true || hasSingleEligibleSession;
+      if (hasSingleEligibleSession &&
+          (snapshot?['session_scoped'] != true ||
+              snapshotSessionCount == null)) {
+        final apiSessionCount = int.tryParse(
+          availability['sessionRegistrationCount']?.toString() ?? '',
+        );
+        fetchedCount =
+            apiSessionCount ??
+            await _eventService.getSessionRegistrationCount(
+              eventId: widget.eventId,
+              sessionId: sessions.first['id']?.toString() ?? '',
+              studentId: userId,
+            ) ??
+            0;
+      }
+      final count =
+          snapshot?['session_scoped'] == true && snapshotSessionCount != null
+          ? snapshotSessionCount
+          : fetchedCount;
       final reqInfo = secondary[4] as Map<String, dynamic>;
       final requirementRows = List<Map<String, dynamic>>.from(
         secondary[5] as List? ?? const [],
@@ -1000,6 +1059,15 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
       if (snapshot != null && event.isNotEmpty) {
         event.addAll(_eventService.applyRegistrationSnapshot(event, snapshot));
+      }
+      if (hasSingleEligibleSession && event.isNotEmpty) {
+        final assignedSession = sessions.first;
+        event['registration_limit'] =
+            assignedSession['registration_limit'] ??
+            snapshot?['session_registration_limit'] ??
+            availability['sessionRegistrationLimit'] ??
+            event['registration_limit'];
+        event['session_scoped'] = true;
       }
       if (event.isNotEmpty) {
         event['registered_count'] = count;
@@ -1073,15 +1141,16 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         }
       }
 
-      final resolvedCount = isReg && count < _participantCount
+      final resolvedCount = !sessionScoped && isReg && count < _participantCount
           ? _participantCount
           : count;
+      final isAtCapacity = _eventService.isEventAtCapacity(
+        event.isNotEmpty ? event : null,
+        participantCount: resolvedCount,
+      );
       final isRegistrationClosed =
           !isReg &&
-          (_eventService.isEventAtCapacity(
-                event.isNotEmpty ? event : null,
-                participantCount: resolvedCount,
-              ) ||
+          (isAtCapacity ||
               (event.isNotEmpty && isEventRegistrationWindowClosed(event)));
 
       // Payment must be settled before documents for paid events.
@@ -1147,12 +1216,10 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
       if (isRegistrationClosed) {
         canRegisterNow = false;
-        registrationMessage =
-            _eventService.isEventAtCapacity(
-              event.isNotEmpty ? event : null,
-              participantCount: resolvedCount,
-            )
-            ? 'Registration is full for this event.'
+        registrationMessage = isAtCapacity
+            ? (sessionScoped
+                  ? 'Registration is full for your assigned seminar.'
+                  : 'Registration is full for this event.')
             : 'Registration is closed for this event.';
       }
 
@@ -1586,11 +1653,17 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
 
     final snapshot = await _eventService.getRegistrationSnapshot(
       widget.eventId,
+      studentId: _userId,
     );
     if (snapshot != null && snapshot['is_full'] == true) {
       await _loadEvent(silent: true);
       if (mounted) {
-        AppSnackBar.error(context, 'Registration is full for this event.');
+        AppSnackBar.error(
+          context,
+          snapshot['session_scoped'] == true
+              ? 'Registration is full for your assigned seminar.'
+              : 'Registration is full for this event.',
+        );
       }
       return;
     }
@@ -2521,67 +2594,72 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     }
 
     return Column(
-      children: _eventSessions.asMap().entries.map((entry) {
-        final index = entry.key;
-        final session = entry.value;
-        final sessionStart = parseStoredEventDateTime(session['start_at']);
-        final sessionEnd = parseStoredEventDateTime(session['end_at']);
-        final rawTitle = (session['title']?.toString() ?? '').trim();
-        final sessionTitle = rawTitle.isNotEmpty
-            ? rawTitle
-            : buildSessionDisplayName(session);
+      children: [
+        ..._eventSessions.asMap().entries.map((entry) {
+          final index = entry.key;
+          final session = entry.value;
+          final sessionStart = parseStoredEventDateTime(session['start_at']);
+          final sessionEnd = parseStoredEventDateTime(session['end_at']);
+          final rawTitle = (session['title']?.toString() ?? '').trim();
+          final sessionTitle = rawTitle.isNotEmpty
+              ? rawTitle
+              : buildSessionDisplayName(session);
+          final sessionNumber =
+              int.tryParse(session['session_no']?.toString() ?? '') ??
+              (index + 1);
 
-        return Container(
-          width: double.infinity,
-          margin: EdgeInsets.only(
-            bottom: index == _eventSessions.length - 1 ? 0 : 12,
-          ),
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: const Color(0xFFE5E7EB)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Seminar ${index + 1}',
-                style: const TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF6B7280),
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                sessionTitle,
-                style: const TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF111827),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Column(
-                children: [
-                  _buildSessionMetaRow(
-                    icon: Icons.calendar_today_rounded,
-                    label: 'Date',
-                    value: formatDateRange(sessionStart, sessionEnd),
+          return Container(
+            width: double.infinity,
+            margin: EdgeInsets.only(
+              bottom: index == _eventSessions.length - 1 ? 0 : 12,
+            ),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: const Color(0xFFE5E7EB)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Seminar $sessionNumber',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF6B7280),
                   ),
-                  const SizedBox(height: 8),
-                  _buildSessionMetaRow(
-                    icon: Icons.schedule_rounded,
-                    label: 'Time',
-                    value: formatTimeRange(sessionStart, sessionEnd),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  sessionTitle,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF111827),
                   ),
-                ],
-              ),
-            ],
-          ),
-        );
-      }).toList(),
+                ),
+                const SizedBox(height: 12),
+                Column(
+                  children: [
+                    _buildSessionMetaRow(
+                      icon: Icons.calendar_today_rounded,
+                      label: 'Date',
+                      value: formatDateRange(sessionStart, sessionEnd),
+                    ),
+                    const SizedBox(height: 8),
+                    _buildSessionMetaRow(
+                      icon: Icons.schedule_rounded,
+                      label: 'Time',
+                      value: formatTimeRange(sessionStart, sessionEnd),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          );
+        }),
+      ],
     );
   }
 

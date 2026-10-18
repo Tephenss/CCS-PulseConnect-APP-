@@ -30,8 +30,8 @@ class _ProposalReqDraft {
     this.file,
     this.fileName,
     TextEditingController? labelCtrl,
-  }) : labelCtrl = labelCtrl ??
-            (isDefault ? null : TextEditingController(text: label));
+  }) : labelCtrl =
+           labelCtrl ?? (isDefault ? null : TextEditingController(text: label));
 
   final String code;
   String label;
@@ -72,6 +72,12 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   List<String> _targetYears = ['ALL'];
   String _eventMode = 'simple';
   int _seminarCount = 1;
+  bool _splitSeminarTargets = false;
+  String _seminarSplitDimension = '';
+  String _seminar1SplitCourse = '';
+  String _seminar2SplitCourse = '';
+  List<String> _seminar1SplitYears = [];
+  List<String> _seminar2SplitYears = [];
   final _graceTimeCtrl = TextEditingController(text: '30');
   final _eventFeeCtrl = TextEditingController();
   final _registrationLimitCtrl = TextEditingController();
@@ -217,9 +223,17 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           return false;
         }
       }
+      if (_eventMode == 'seminar_based' && _seminarCount >= 2) {
+        final splitError = _validateSeminarSplitTargets();
+        if (splitError != null) {
+          setState(() => _validationError = splitError);
+          return false;
+        }
+      }
     } else if (step == 2) {
-      final descriptionError =
-          EventFormValidation.validateDescription(_descCtrl.text);
+      final descriptionError = EventFormValidation.validateDescription(
+        _descCtrl.text,
+      );
       if (descriptionError != null) {
         setState(() {
           _validationError = descriptionError;
@@ -367,9 +381,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           return false;
         }
         if (item.file == null) {
-          setState(
-            () => _validationError = 'Upload the file for "$label".',
-          );
+          setState(() => _validationError = 'Upload the file for "$label".');
           return false;
         }
         if (_isProposalPdfOnlyCode(item.code)) {
@@ -398,9 +410,11 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
 
   DateTime _earliestAllowedCreateDateTime() {
     final now = DateTime.now();
-    return DateTime(now.year, now.month, now.day).add(
-      const Duration(days: 1, hours: 7),
-    );
+    return DateTime(
+      now.year,
+      now.month,
+      now.day,
+    ).add(const Duration(days: 1, hours: 7));
   }
 
   int _maxRegistrationCloseWeeks() {
@@ -429,8 +443,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   @override
   void initState() {
     super.initState();
-    _descriptionWordLimitFormatter =
-        DescriptionWordLimitFormatter(snapshot: _descriptionSnapshot);
+    _descriptionWordLimitFormatter = DescriptionWordLimitFormatter(
+      snapshot: _descriptionSnapshot,
+    );
     _eventFeeCtrl.addListener(_onEventFeeChanged);
     _descCtrl.addListener(_onDescriptionChanged);
     _initSpeech();
@@ -560,6 +575,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           'end_at': _toUtcIsoFromManila(_parseDateTime(_seminar1EndCtrl.text)!),
           'location': _locationCtrl.text.trim(),
           'scan_window_minutes': graceTime,
+          'target_participant': _seminarSessionTargetParticipant(1),
         },
       ];
       if (_seminarCount >= 2) {
@@ -571,6 +587,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           'end_at': _toUtcIsoFromManila(_parseDateTime(_seminar2EndCtrl.text)!),
           'location': _locationCtrl.text.trim(),
           'scan_window_minutes': graceTime,
+          'target_participant': _seminarSessionTargetParticipant(2),
         });
       }
 
@@ -598,6 +615,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         'grace_time': graceTime,
         'created_by': teacherId,
         'event_mode': 'seminar_based',
+        'session_attendance_rule': _splitSeminarTargets && _seminarCount >= 2
+            ? 'any'
+            : 'all',
         'event_span':
             (firstStart.year == lastEnd.year &&
                 firstStart.month == lastEnd.month &&
@@ -687,7 +707,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         }
       }
 
-      final savedReqs = created is Map && created['proposal_requirements'] is List
+      final savedReqs =
+          created is Map && created['proposal_requirements'] is List
           ? List<Map<String, dynamic>>.from(
               (created['proposal_requirements'] as List).whereType<Map>().map(
                 (row) => Map<String, dynamic>.from(row),
@@ -713,16 +734,20 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
               'Uploading proposal file ${i + 1} of ${_proposalItems.length}...',
         );
         final bytes = await file.readAsBytes();
-        final uploadRes = await MobileBackendService().uploadProposalDocumentFile(
-          eventId: eventId,
-          requirementId: requirementId,
-          bytes: bytes,
-          fileName: (item.fileName ?? file.path.split(Platform.pathSeparator).last)
-              .trim()
-              .isEmpty
-              ? 'proposal-document'
-              : (item.fileName ?? file.path.split(Platform.pathSeparator).last),
-        );
+        final uploadRes = await MobileBackendService()
+            .uploadProposalDocumentFile(
+              eventId: eventId,
+              requirementId: requirementId,
+              bytes: bytes,
+              fileName:
+                  (item.fileName ??
+                          file.path.split(Platform.pathSeparator).last)
+                      .trim()
+                      .isEmpty
+                  ? 'proposal-document'
+                  : (item.fileName ??
+                        file.path.split(Platform.pathSeparator).last),
+            );
         if (uploadRes['ok'] != true) {
           throw Exception(
             uploadRes['error']?.toString() ?? 'Failed to upload ${item.label}.',
@@ -764,7 +789,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     if (_isFreeEvent) {
       payload['event_fee'] = null;
     } else {
-      final feeText = EventFormValidation.normalizeEventFeeInput(_eventFeeCtrl.text);
+      final feeText = EventFormValidation.normalizeEventFeeInput(
+        _eventFeeCtrl.text,
+      );
       payload['event_fee'] = int.tryParse(feeText) ?? 0;
     }
     final limitRaw = _registrationLimitCtrl.text.trim();
@@ -772,8 +799,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         ? null
         : int.tryParse(limitRaw);
     final maxClose = _maxRegistrationCloseWeeks();
-    payload['registration_close_weeks'] =
-        (maxClose >= 1) ? (_registrationCloseWeeks ?? 1).clamp(1, maxClose) : null;
+    payload['registration_close_weeks'] = (maxClose >= 1)
+        ? (_registrationCloseWeeks ?? 1).clamp(1, maxClose)
+        : null;
   }
 
   List<Map<String, String>> _collectStudentRequirements() {
@@ -803,13 +831,23 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     return cleaned.toSet().toList();
   }
 
+  void _resetSeminarSplitSelection() {
+    _splitSeminarTargets = false;
+    _seminarSplitDimension = '';
+    _seminar1SplitCourse = '';
+    _seminar2SplitCourse = '';
+    _seminar1SplitYears = [];
+    _seminar2SplitYears = [];
+  }
+
   void _toggleTargetYear(String value, bool selected) {
     final normalizedValue = value.trim().toUpperCase();
     final current = List<String>.from(_targetYears);
 
     if (normalizedValue == 'ALL') {
       setState(() {
-        _targetYears = selected ? ['ALL'] : ['ALL'];
+        _targetYears = ['ALL'];
+        _resetSeminarSplitSelection();
       });
       return;
     }
@@ -823,6 +861,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
 
     setState(() {
       _targetYears = _normalizeTargetYears(current);
+      _resetSeminarSplitSelection();
     });
   }
 
@@ -846,11 +885,393 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     return 'COURSE=$normalizedCourse;YEARS=${years.join(',')}';
   }
 
-  void _handleSuccess() {
-    AppSnackBar.success(
-      context,
-      'Event saved and submitted for admin review.',
+  Map<String, dynamic> _seminarTargetSplitModel() {
+    final years = _normalizeTargetYears(_targetYears);
+    final availableYears = years.contains('ALL')
+        ? const ['1', '2', '3', '4']
+        : years;
+    final shared = <String, dynamic>{
+      'years': years,
+      'parentCourse': _targetCourse,
+    };
+
+    final courseOptions = _targetCourse == 'ALL'
+        ? const ['BSIT', 'BSCS']
+        : _targetCourse == 'BSIT'
+        ? const ['BSIT-BA', 'BSIT-SD']
+        : null;
+    if (courseOptions != null) {
+      final canSplitByYear = availableYears.length >= 2;
+      final hints = _targetCourse == 'ALL'
+          ? const {
+              'course':
+                  'Each seminar inherits the event year levels. Assign BSIT to one seminar and BSCS to the other.',
+              'year':
+                  'Both seminars include all programs. Assign each selected year level to exactly one seminar.',
+            }
+          : const {
+              'course':
+                  'Each seminar inherits the event year levels. Assign BSIT-BA to one seminar and BSIT-SD to the other.',
+              'year':
+                  'Both seminars include BSIT-BA and BSIT-SD. Assign each selected year level to exactly one seminar.',
+            };
+      return {
+        ...shared,
+        'dimension': canSplitByYear ? 'choice' : 'course',
+        'defaultDimension': 'course',
+        'options': courseOptions,
+        'yearOptions': availableYears,
+        'hints': hints,
+        'hint': canSplitByYear
+            ? 'Choose how to divide the event participants.'
+            : hints['course'],
+      };
+    }
+
+    if (availableYears.length < 2) {
+      return {
+        ...shared,
+        'dimension': 'unavailable',
+        'options': const <String>[],
+        'hint':
+            'The event target has only one year level. Select at least two year levels to divide participants.',
+      };
+    }
+    return {
+      ...shared,
+      'dimension': 'year',
+      'options': availableYears,
+      'hint':
+          'Both seminars are for $_targetCourse. Assign each selected year level to exactly one seminar.',
+    };
+  }
+
+  String _activeSeminarSplitDimension(Map<String, dynamic> model) {
+    if (model['dimension'] == 'choice') {
+      return _seminarSplitDimension.isEmpty
+          ? model['defaultDimension'] as String
+          : _seminarSplitDimension;
+    }
+    return model['dimension'] as String;
+  }
+
+  String _splitYearLabel(String year) => switch (year) {
+    '1' => '1st Year',
+    '2' => '2nd Year',
+    '3' => '3rd Year',
+    '4' => '4th Year',
+    _ => year,
+  };
+
+  String _seminarSessionTargetParticipant(int seminarNumber) {
+    if (!_splitSeminarTargets || _seminarCount < 2) return '';
+    final model = _seminarTargetSplitModel();
+    final dimension = _activeSeminarSplitDimension(model);
+    if (dimension == 'course') {
+      final course = seminarNumber == 1
+          ? _seminar1SplitCourse
+          : _seminar2SplitCourse;
+      final options = (model['options'] as List).cast<String>();
+      if (!options.contains(course)) return '';
+      return _encodeTargetParticipant(
+        course,
+        (model['years'] as List).cast<String>(),
+      );
+    }
+    if (dimension == 'year') {
+      final years = seminarNumber == 1
+          ? _seminar1SplitYears
+          : _seminar2SplitYears;
+      if (years.isEmpty) return '';
+      return _encodeTargetParticipant(model['parentCourse'] as String, years);
+    }
+    return '';
+  }
+
+  String? _validateSeminarSplitTargets() {
+    if (!_splitSeminarTargets || _seminarCount < 2) return null;
+    final model = _seminarTargetSplitModel();
+    final options = (model['options'] as List).cast<String>();
+    if (model['dimension'] == 'unavailable') return model['hint'] as String;
+    final dimension = _activeSeminarSplitDimension(model);
+    if (dimension == 'course') {
+      final selected = [_seminar1SplitCourse, _seminar2SplitCourse];
+      if (selected.any((value) => !options.contains(value))) {
+        return 'Choose a participant group for both seminars.';
+      }
+      if (selected.toSet().length != options.length) {
+        return 'Assign each available participant group to a different seminar.';
+      }
+      return null;
+    }
+
+    final allSelected = [..._seminar1SplitYears, ..._seminar2SplitYears];
+    if (_seminar1SplitYears.isEmpty || _seminar2SplitYears.isEmpty) {
+      return 'Assign year levels to both seminars.';
+    }
+    if (allSelected.toSet().length != allSelected.length) {
+      return 'A year level can only be assigned to one seminar.';
+    }
+    final yearOptions =
+        (model['dimension'] == 'choice'
+                ? model['yearOptions']
+                : model['options'] as List)
+            .cast<String>();
+    if (yearOptions.any((year) => !allSelected.contains(year))) {
+      return 'Assign every event year level to one of the seminars.';
+    }
+    return null;
+  }
+
+  void _toggleSplitYear(int seminarNumber, String year, bool selected) {
+    final own = List<String>.from(
+      seminarNumber == 1 ? _seminar1SplitYears : _seminar2SplitYears,
     );
+    final other = seminarNumber == 1
+        ? _seminar2SplitYears
+        : _seminar1SplitYears;
+    if (selected && other.contains(year)) return;
+    if (selected) {
+      own.add(year);
+    } else {
+      own.remove(year);
+    }
+    setState(() {
+      if (seminarNumber == 1) {
+        _seminar1SplitYears = own.toSet().toList();
+      } else {
+        _seminar2SplitYears = own.toSet().toList();
+      }
+    });
+  }
+
+  Widget _buildSplitYearGroup(int seminarNumber, List<String> options) {
+    final selected = seminarNumber == 1
+        ? _seminar1SplitYears
+        : _seminar2SplitYears;
+    final other = seminarNumber == 1
+        ? _seminar2SplitYears
+        : _seminar1SplitYears;
+    final unassignedYears = options
+        .where(
+          (year) =>
+              !_seminar1SplitYears.contains(year) &&
+              !_seminar2SplitYears.contains(year),
+        )
+        .toList();
+    final seminar2Locked =
+        seminarNumber == 2 &&
+        _seminar1SplitYears.isEmpty &&
+        _seminar2SplitYears.isEmpty;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Seminar $seminarNumber',
+            style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 6,
+            runSpacing: 2,
+            children: options.map((year) {
+              final reserveForOther =
+                  other.isEmpty &&
+                  unassignedYears.length == 1 &&
+                  unassignedYears.single == year;
+              return FilterChip(
+                label: Text(_splitYearLabel(year)),
+                selected: selected.contains(year),
+                showCheckmark: false,
+                onSelected:
+                    (other.contains(year) && !selected.contains(year)) ||
+                        seminar2Locked ||
+                        reserveForOther
+                    ? null
+                    : (value) =>
+                          _toggleSplitYear(seminarNumber, year, value),
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSeminarSplitAudienceControls() {
+    if (_eventMode != 'seminar_based' || _seminarCount < 2) {
+      return const SizedBox.shrink();
+    }
+    final model = _seminarTargetSplitModel();
+    final canSplit = model['dimension'] != 'unavailable';
+    final courseOptions = (model['options'] as List).cast<String>();
+    final dimension = _activeSeminarSplitDimension(model);
+    final yearOptions =
+        (model[model['dimension'] == 'choice' ? 'yearOptions' : 'options']
+                as List)
+            .cast<String>();
+    final hint = model['dimension'] == 'choice'
+        ? (model['hints'] as Map)[dimension] as String
+        : model['hint'] as String;
+
+    Widget coursePicker(int seminarNumber) {
+      final selected = seminarNumber == 1
+          ? _seminar1SplitCourse
+          : _seminar2SplitCourse;
+      final other = seminarNumber == 1
+          ? _seminar2SplitCourse
+          : _seminar1SplitCourse;
+      final assignedCourses = [_seminar1SplitCourse, _seminar2SplitCourse];
+      final unassignedCourses = courseOptions
+          .where((course) => !assignedCourses.contains(course))
+          .toList();
+      final reserveForOther = other.isEmpty && unassignedCourses.length == 1
+          ? unassignedCourses.single
+          : '';
+      final seminar2Locked =
+          seminarNumber == 2 &&
+          _seminar1SplitCourse.isEmpty &&
+          _seminar2SplitCourse.isEmpty;
+      return DropdownButtonFormField<String>(
+        initialValue: courseOptions.contains(selected) ? selected : '',
+        decoration: InputDecoration(
+          labelText: 'Seminar $seminarNumber participants',
+          border: const OutlineInputBorder(),
+          isDense: true,
+        ),
+        items: [
+          const DropdownMenuItem(value: '', child: Text('Choose a group')),
+          ...courseOptions.map(
+            (course) => DropdownMenuItem(
+              value: course,
+              enabled: (other != course || selected == course) &&
+                  (selected == course || course != reserveForOther),
+              child: Text(course),
+            ),
+          ),
+        ],
+        onChanged: seminar2Locked
+            ? null
+            : (value) => setState(() {
+                if (seminarNumber == 1) {
+                  _seminar1SplitCourse = value ?? '';
+                } else {
+                  _seminar2SplitCourse = value ?? '';
+                }
+              }),
+      );
+    }
+
+    Widget splitDimensionPicker() => DropdownButtonFormField<String>(
+      initialValue: dimension,
+      decoration: const InputDecoration(
+        labelText: 'Split participants by',
+        border: OutlineInputBorder(),
+        isDense: true,
+      ),
+      items: [
+        DropdownMenuItem(
+          value: 'course',
+          child: Text(
+            _targetCourse == 'ALL'
+                ? 'Program (BSIT / BSCS)'
+                : 'Program (BA / SD)',
+          ),
+        ),
+        DropdownMenuItem(
+          value: 'year',
+          child: Text(
+            _targetCourse == 'ALL'
+                ? 'Year level (all programs)'
+                : 'Year level (both BSIT programs)',
+          ),
+        ),
+      ],
+      onChanged: (value) {
+        if (value == null || value == dimension) return;
+        setState(() {
+          _seminarSplitDimension = value;
+          _seminar1SplitCourse = '';
+          _seminar2SplitCourse = '';
+          _seminar1SplitYears = [];
+          _seminar2SplitYears = [];
+        });
+      },
+    );
+
+    return Container(
+      margin: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFFBF5),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFF1D5B2)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            value: _splitSeminarTargets && canSplit,
+            controlAffinity: ListTileControlAffinity.leading,
+            title: const Text(
+              'Split participants between seminars',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
+            ),
+            subtitle: Text(
+              _splitSeminarTargets
+                  ? 'Each student only needs to attend their assigned seminar.'
+                  : 'Leave unchecked to require everyone in the event target to attend both.',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade700),
+            ),
+            onChanged: canSplit
+                ? (value) =>
+                      setState(() => _splitSeminarTargets = value ?? false)
+                : null,
+          ),
+          if (!canSplit)
+            Padding(
+              padding: const EdgeInsets.only(left: 40, bottom: 4),
+              child: Text(
+                model['hint'] as String,
+                style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
+              ),
+            ),
+          if (_splitSeminarTargets && canSplit) ...[
+            const Divider(height: 20),
+            if (model['dimension'] == 'choice') ...[
+              splitDimensionPicker(),
+              const SizedBox(height: 10),
+            ],
+            Text(
+              '$hint The last unassigned group is reserved for the other seminar.',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade700),
+            ),
+            const SizedBox(height: 10),
+            if (dimension == 'course') ...[
+              coursePicker(1),
+              const SizedBox(height: 10),
+              coursePicker(2),
+            ] else ...[
+              _buildSplitYearGroup(1, yearOptions),
+              const SizedBox(height: 8),
+              _buildSplitYearGroup(2, yearOptions),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+  void _handleSuccess() {
+    AppSnackBar.success(context, 'Event saved and submitted for admin review.');
     Navigator.pop(context, true);
   }
 
@@ -870,7 +1291,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
   // --- Voice Control Logic ---
   void _listenToggle() async {
     if (!_speechEnabled) {
-      AppSnackBar.error(context, 'Speech recognition not available on this device.');
+      AppSnackBar.error(
+        context,
+        'Speech recognition not available on this device.',
+      );
       return;
     }
 
@@ -1316,7 +1740,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                       'BSIT-BA': 'BSIT-BA',
                       'BSCS': 'BSCS',
                     },
-                    onChanged: (v) => setState(() => _targetCourse = v!),
+                    onChanged: (v) => setState(() {
+                      _targetCourse = v!;
+                      _resetSeminarSplitSelection();
+                    }),
                     prefixIcon: Icons.groups_outlined,
                   ),
                 ],
@@ -1397,7 +1824,11 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
           ),
         ],
         const SizedBox(height: 16),
-        _buildLabel('Student Limit'),
+        _buildLabel(
+          _eventMode == 'seminar_based'
+              ? 'Student Limit (per seminar)'
+              : 'Student Limit',
+        ),
         _buildNumberField(
           controller: _registrationLimitCtrl,
           hint: 'e.g. 50 (max 9999)',
@@ -1405,7 +1836,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
         ),
         const SizedBox(height: 6),
         Text(
-          'Registration closes automatically once this number of students have registered. Leave blank for no cap.',
+          _eventMode == 'seminar_based'
+              ? 'Each seminar can register up to this number of students. The cap is counted separately for each seminar. Leave blank for no cap.'
+              : 'Registration closes automatically once this number of students have registered. Leave blank for no cap.',
           style: TextStyle(
             fontSize: 11,
             color: Colors.grey.shade600,
@@ -1428,6 +1861,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                 onChanged: (v) => setState(() {
                   _eventMode = v ?? 'simple';
                   _seminarCount = 1;
+                  _resetSeminarSplitSelection();
                   _applySimpleEventEndDefaultFromStart();
                 }),
                 title: const Text(
@@ -1488,7 +1922,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                       ChoiceChip(
                         label: const Text('1'),
                         selected: _seminarCount == 1,
-                        onSelected: (_) => setState(() => _seminarCount = 1),
+                        onSelected: (_) => setState(() {
+                          _seminarCount = 1;
+                          _resetSeminarSplitSelection();
+                        }),
                       ),
                       const SizedBox(width: 8),
                       ChoiceChip(
@@ -1502,6 +1939,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             ],
           ),
         ),
+        if (_eventMode == 'seminar_based' && _seminarCount >= 2) ...[
+          const SizedBox(height: 12),
+          _buildSeminarSplitAudienceControls(),
+        ],
       ],
     );
   }
@@ -1545,9 +1986,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             border: Border.all(
               color: _fieldErrors.containsKey('description')
                   ? Colors.red.shade300
-                  : (_isListening
-                      ? Colors.red.shade200
-                      : Colors.transparent),
+                  : (_isListening ? Colors.red.shade200 : Colors.transparent),
               width: 1.5,
             ),
             borderRadius: BorderRadius.circular(20),
@@ -1877,7 +2316,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
                       color: TeacherThemeUtils.primary.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(999),
                       border: Border.all(
-                        color: TeacherThemeUtils.primary.withValues(alpha: 0.25),
+                        color: TeacherThemeUtils.primary.withValues(
+                          alpha: 0.25,
+                        ),
                       ),
                     ),
                     child: const Text(
@@ -2186,8 +2627,8 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             label: Text(
               item.file == null
                   ? (item.isDefault
-                      ? 'Upload PDF File'
-                      : 'Upload file (PDF, DOC, image)')
+                        ? 'Upload PDF File'
+                        : 'Upload file (PDF, DOC, image)')
                   : (item.fileName ?? 'File selected'),
               style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
             ),
@@ -2371,11 +2812,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     setState(() {
       final next = _proposalItems.length + 1;
       _proposalItems.add(
-        _ProposalReqDraft(
-          code: 'DOC$next',
-          label: '',
-          isDefault: false,
-        ),
+        _ProposalReqDraft(code: 'DOC$next', label: '', isDefault: false),
       );
     });
   }
@@ -2393,9 +2830,7 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
     final bytes = await file.readAsBytes();
     if (bytes.length > 5 * 1024 * 1024) {
       if (!mounted) return;
-      setState(
-        () => _validationError = 'Cover image must be 5MB or smaller.',
-      );
+      setState(() => _validationError = 'Cover image must be 5MB or smaller.');
       return;
     }
     try {
@@ -2416,7 +2851,9 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       }
     } catch (_) {
       if (!mounted) return;
-      setState(() => _validationError = 'Unable to read cover image dimensions.');
+      setState(
+        () => _validationError = 'Unable to read cover image dimensions.',
+      );
       return;
     }
     if (!mounted) return;
@@ -2458,7 +2895,10 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
       final size = await file.length();
       if (size <= 0 || size > 10 * 1024 * 1024) {
         if (!mounted) return;
-        AppSnackBar.error(context, 'Each proposal file must be 10MB or smaller.');
+        AppSnackBar.error(
+          context,
+          'Each proposal file must be 10MB or smaller.',
+        );
         return;
       }
       final resolvedName = (fileName ?? file.path).toLowerCase();
@@ -2981,62 +3421,70 @@ class _TeacherCreateEventState extends State<TeacherCreateEvent> {
             ),
           ],
           Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          OutlinedButton.icon(
-            onPressed: isFirst ? null : _back,
-            icon: const Icon(Icons.chevron_left_rounded, size: 20),
-            label: const Text(
-              'Back',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-            ),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: const Color(0xFF4B5563),
-              side: BorderSide(
-                color: isFirst ? Colors.transparent : const Color(0xFFE5E7EB),
-                width: 1.5,
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-          ),
-
-          ElevatedButton(
-            onPressed: _isSubmitting ? null : (isLast ? _submit : _next),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: TeacherThemeUtils.primary,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 14),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-              elevation: 4,
-              shadowColor: TeacherThemeUtils.dark.withValues(alpha: 0.4),
-            ),
-            child: _isSubmitting
-                ? const PulseConnectLoader(size: 20, color: Colors.white)
-                : Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (isLast) const Icon(Icons.check_rounded, size: 18),
-                      if (isLast) const SizedBox(width: 8),
-                      Text(
-                        isLast ? 'Save Event' : 'Next',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          fontSize: 14,
-                        ),
-                      ),
-                      if (!isLast) const SizedBox(width: 8),
-                      if (!isLast)
-                        const Icon(Icons.chevron_right_rounded, size: 18),
-                    ],
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              OutlinedButton.icon(
+                onPressed: isFirst ? null : _back,
+                icon: const Icon(Icons.chevron_left_rounded, size: 20),
+                label: const Text(
+                  'Back',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFF4B5563),
+                  side: BorderSide(
+                    color: isFirst
+                        ? Colors.transparent
+                        : const Color(0xFFE5E7EB),
+                    width: 1.5,
                   ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 14,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+
+              ElevatedButton(
+                onPressed: _isSubmitting ? null : (isLast ? _submit : _next),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: TeacherThemeUtils.primary,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 28,
+                    vertical: 14,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  elevation: 4,
+                  shadowColor: TeacherThemeUtils.dark.withValues(alpha: 0.4),
+                ),
+                child: _isSubmitting
+                    ? const PulseConnectLoader(size: 20, color: Colors.white)
+                    : Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          if (isLast) const Icon(Icons.check_rounded, size: 18),
+                          if (isLast) const SizedBox(width: 8),
+                          Text(
+                            isLast ? 'Save Event' : 'Next',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w800,
+                              fontSize: 14,
+                            ),
+                          ),
+                          if (!isLast) const SizedBox(width: 8),
+                          if (!isLast)
+                            const Icon(Icons.chevron_right_rounded, size: 18),
+                        ],
+                      ),
+              ),
+            ],
           ),
-          ],
-        ),
         ],
       ),
     );
