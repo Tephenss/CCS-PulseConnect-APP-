@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../services/mobile_backend_service.dart';
 import '../../widgets/app_snackbar.dart';
 import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -8,6 +9,7 @@ import '../../services/event_service.dart';
 import '../../services/event_live_service.dart';
 import '../../widgets/custom_loader.dart';
 import 'student_ticket_view.dart';
+import 'student_event_payment_checkout.dart';
 import 'student_registration_requirements_page.dart';
 import '../../utils/event_time_utils.dart';
 import '../../utils/course_theme_utils.dart';
@@ -129,6 +131,7 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
   bool _isAccessDenied = false;
   bool _canRegisterNow = false;
   bool _approvalRequired = false;
+  bool _paymentProofPending = false;
   bool _requirementsRequired = false;
   bool _requirementsApproved = false;
   String _requirementsStatus = '';
@@ -901,6 +904,11 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
       final registrationSettings = results[2] as Map<String, dynamic>?;
       final sessions = results[3] as List<Map<String, dynamic>>;
       final event = _mergeEventData(baseEvent, registrationSettings);
+      if (!isReg && event.isNotEmpty && !_eventLooksFree(event)) {
+        unawaited(_refreshPaymentSubmissionStatus(userId));
+      } else if (isReg) {
+        _paymentProofPending = false;
+      }
       final eventMode = (event['event_mode']?.toString() ?? '')
           .trim()
           .toLowerCase();
@@ -1396,16 +1404,16 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     if (mounted) setState(() {});
 
     try {
-      // Paid: settle payment before any document / register CTA.
+      // Open secure QR Ph checkout; register only after verified payment.
       if (_approvalRequired && !_canRegisterNow && !_isRegistered) {
-        if (mounted) {
-          AppSnackBar.warning(
+        if (_paymentProofPending) {
+          AppSnackBar.info(
             context,
-            _registrationMessage.isNotEmpty
-                ? _registrationMessage
-                : _settlePaymentMessage(),
+            'Your GCash payment is waiting for organizer approval.',
           );
+          return;
         }
+        await _openPaymongoCheckout();
         return;
       }
 
@@ -1491,6 +1499,49 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     }
   }
 
+  Future<void> _refreshPaymentSubmissionStatus(String userId) async {
+    if (userId.trim().isEmpty || _isRegistered) return;
+    try {
+      final result = await MobileBackendService.fetchEventPaymentStatus(
+        widget.eventId,
+      );
+      if (!mounted || result['ok'] != true) return;
+      final pending = result['pending'] == true;
+      if (_paymentProofPending && !pending) return;
+      setState(() {
+        _paymentProofPending = pending;
+        if (pending) {
+          _registrationMessage =
+              'GCash payment submitted. Waiting for organizer approval.';
+        }
+      });
+    } catch (_) {
+      // Keep the payment CTA available when status lookup is temporarily offline.
+    }
+  }
+
+  Future<void> _openPaymongoCheckout() async {
+    final event = _event ?? <String, dynamic>{};
+    final fee = double.tryParse(event['event_fee']?.toString() ?? '') ?? 0;
+    final completed = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => StudentEventPaymentCheckout(
+          eventId: widget.eventId,
+          eventTitle: (event['title']?.toString() ?? 'Event').trim(),
+          eventFee: fee,
+        ),
+      ),
+    );
+    if (!mounted) return;
+    await _loadEvent(silent: true, forceFresh: true);
+    if (completed == true && mounted) {
+      AppSnackBar.success(
+        context,
+        'Payment confirmed. Your registration is ready.',
+      );
+    }
+  }
+
   String _primaryActionLabel() {
     final registrationPaused =
         _isRegistrationResolved &&
@@ -1499,8 +1550,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
         !_approvalRequired &&
         !_needsRequirementsAction;
     if (!_isRegistrationResolved) return 'Loading...';
+    if (_paymentProofPending && !_isRegistered) return 'Payment Pending';
     if (_approvalRequired && !_canRegisterNow && !_isRegistered) {
-      return 'Settle Payment';
+      return 'Pay Now';
     }
     if ((_isRegistrationClosedForEvent() || registrationPaused) &&
         !_isRegistered) {
@@ -1600,9 +1652,9 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final source = event ?? _event ?? widget.initialEvent;
     final fee = _parseEventFee(source);
     if (fee != null && fee > 0) {
-      return 'Settle ₱${fee.toStringAsFixed(2)} with the authorized person assigned for this event before you can continue.';
+      return 'Settle ₱${fee.toStringAsFixed(2)} with the authorized person assigned for this event before you can continue, or click this button to pay online.';
     }
-    return 'Settle your payment first with the authorized person assigned for this event.';
+    return 'Settle your payment first with the authorized person assigned for this event, or click this button to pay online.';
   }
 
   bool get _isDocumentsUnderReview =>
@@ -1875,23 +1927,32 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
     final isDeclinedDocs = _requirementsStatus == 'declined';
     final registrationStatusLabel = !_isRegistrationResolved
         ? 'Checking...'
-        : ((_approvalRequired && !_isRegistered && !_canRegisterNow)
-              ? 'Settle Payment'
-              : (_docsGateBlocksTicket
-                    ? (_requirementsStatus == 'pending_review'
-                          ? 'Under Review'
-                          : (_requirementsStatus == 'declined'
-                                ? 'Docs Declined'
-                                : 'Docs Required'))
-                    : (_isRegistered
-                          ? 'Registered'
-                          : (isRegistrationClosed
-                                ? 'Closed'
-                                : (_canRegisterNow ? 'Open' : 'Closed')))));
+        : (_paymentProofPending && !_isRegistered
+              ? 'Payment Pending'
+              : (_approvalRequired && !_isRegistered && !_canRegisterNow
+                    ? 'Settle Payment'
+                    : (_docsGateBlocksTicket
+                          ? (_requirementsStatus == 'pending_review'
+                                ? 'Under Review'
+                                : (_requirementsStatus == 'declined'
+                                      ? 'Docs Declined'
+                                      : 'Docs Required'))
+                          : (_isRegistered
+                                ? 'Registered'
+                                : (isRegistrationClosed
+                                      ? 'Closed'
+                                      : (_canRegisterNow
+                                            ? 'Open'
+                                            : 'Closed'))))));
     final usesSessions =
         usesEventSessions(_event!) || _eventSessions.isNotEmpty;
     // Do NOT gate on `_isRefreshingEvent` — silent background refresh must not
     // grey-out a cached See Ticket / Register CTA while network is in flight.
+    final canSubmitPayment =
+        _approvalRequired &&
+        !_isRegistered &&
+        !isRegistrationClosed &&
+        !_paymentProofPending;
     final canTapAction =
         !_isAccessDenied &&
         !_isRegistering &&
@@ -1905,13 +1966,16 @@ class _StudentEventDetailsState extends State<StudentEventDetails>
             // Submit / Resubmit documents (never while payment still required)
             (_needsRequirementsAction && !_approvalRequired) ||
             // Register only (settle payment stays non-tappable info CTA)
+            canSubmitPayment ||
             (!_isRegistered && !isRegistrationClosed && _canRegisterNow));
     final isActionDisabled =
         _isDocumentsUnderReview ||
         !_isRegistrationResolved ||
         (!_isRegistered &&
             (isRegistrationClosed ||
-                (!_canRegisterNow && !_needsRequirementsAction)));
+                (!_canRegisterNow &&
+                    !_needsRequirementsAction &&
+                    !canSubmitPayment)));
     // Loader until we know the real per-user CTA.
     final isCtaLoading =
         _isRegistering ||

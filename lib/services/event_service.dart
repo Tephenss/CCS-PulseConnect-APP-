@@ -4616,10 +4616,10 @@ class EventService {
         final fee = _normalizeEventFee(event['event_fee']);
         final feeText = fee == null ? '' : '₱${fee.toStringAsFixed(2)}';
         var message =
-            'Settle your payment first with the authorized person assigned for this event.';
+            'Settle your payment first with the authorized person assigned for this event, or click this button to pay online.';
         if (feeText.isNotEmpty) {
           message =
-              'Settle $feeText with the authorized person assigned for this event before you can continue.';
+              'Settle $feeText with the authorized person assigned for this event before you can continue, or click this button to pay online.';
         }
         return {
           'allowed': false,

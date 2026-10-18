@@ -204,9 +204,7 @@ class MobileBackendService {
           ..followRedirects = false
           ..headers.addAll(headers)
           ..body = encodedBody;
-        response = await http.Response.fromStream(
-          await client.send(request),
-        );
+        response = await http.Response.fromStream(await client.send(request));
 
         if (response.statusCode != 307 && response.statusCode != 308) {
           return response;
@@ -645,9 +643,7 @@ class MobileBackendService {
         final status = response.statusCode;
         final body = response.body.trim().toLowerCase();
         if (status == 307 || status == 308) {
-          final destination = _safeRedirectTarget(
-            response.headers['location'],
-          );
+          final destination = _safeRedirectTarget(response.headers['location']);
           return {
             'ok': false,
             'error':
@@ -1020,6 +1016,94 @@ class MobileBackendService {
         return {
           'ok': false,
           'error': parsed['error']?.toString() ?? 'Upload failed.',
+        };
+      }
+      return parsed;
+    } catch (e) {
+      return {'ok': false, 'error': normalizeTransportError(e.toString())};
+    }
+  }
+
+  static Future<Map<String, dynamic>> fetchEventPaymentStatus(String eventId) {
+    return post('/api/mobile_event_payment_status.php', {
+      'event_id': eventId.trim(),
+    });
+  }
+
+  static Future<Map<String, dynamic>> createEventPaymentCheckout(
+    String eventId,
+  ) {
+    return post(
+      '/api/mobile_event_payment_checkout.php',
+      {'event_id': eventId.trim()},
+      timeout: const Duration(seconds: 45),
+    );
+  }
+
+  static Future<Map<String, dynamic>> fetchEventPaymentCheckoutStatus(
+    String eventId,
+  ) {
+    return post('/api/mobile_event_payment_checkout_status.php', {
+      'event_id': eventId.trim(),
+    });
+  }
+
+  Future<Map<String, dynamic>> uploadEventPaymentProof({
+    required String eventId,
+    required String amount,
+    required String referenceNumber,
+    required List<int> bytes,
+    required String fileName,
+  }) async {
+    if (!isConfigured) {
+      return {
+        'ok': false,
+        'error':
+            'Hosted backend is not configured. Set mobilePushApiBaseUrl in env.dart.',
+      };
+    }
+    if (bytes.isEmpty) {
+      return {'ok': false, 'error': 'Select a GCash receipt image.'};
+    }
+
+    final uri = _baseUri!.replace(path: '/api/mobile_event_payment_submit.php');
+    final request = http.MultipartRequest('POST', uri);
+    final key = Env.mobilePushApiKey.trim();
+    if (key.isNotEmpty && !key.contains('YOUR_SHARED_KEY')) {
+      request.headers['X-Mobile-Api-Key'] = key;
+    }
+    final session = await getSessionToken();
+    if (session != null && session.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $session';
+      request.headers['X-Mobile-Session'] = session;
+    }
+    request.fields['event_id'] = eventId.trim();
+    request.fields['amount'] = amount.trim();
+    request.fields['reference_number'] = referenceNumber.trim();
+    request.files.add(
+      http.MultipartFile.fromBytes('receipt_file', bytes, filename: fileName),
+    );
+
+    try {
+      final streamed = await request.send().timeout(
+        const Duration(seconds: 60),
+      );
+      final response = await http.Response.fromStream(streamed);
+      final parsed = _tryDecodeJsonResponse(response.body);
+      if (parsed == null) {
+        return {
+          'ok': false,
+          'error':
+              'Could not read the payment server reply (HTTP ${response.statusCode}).',
+        };
+      }
+      if (response.statusCode < 200 ||
+          response.statusCode >= 300 ||
+          parsed['ok'] != true) {
+        return {
+          'ok': false,
+          'error':
+              parsed['error']?.toString() ?? 'Payment proof upload failed.',
         };
       }
       return parsed;
